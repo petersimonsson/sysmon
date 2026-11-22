@@ -30,31 +30,39 @@ pub fn sparkline(
                 .fold(0.0, f32::max)
         })
         .max(f32::EPSILON);
-    div().w(px(160.)).h(px(28.)).rounded_sm().bg(track).child(
-        canvas(
-            |_, _, _| (),
-            move |bounds, (), window, _| {
-                let step = bounds.size.width / (capacity.max(2) - 1) as f32;
-                let y = |v: f32| {
-                    let frac = (v / max).clamp(0.0, 1.0);
-                    bounds.origin.y + bounds.size.height * (1.0 - frac) - px(1.) * (1.0 - frac)
-                };
-                for (values, color) in &series {
-                    if values.len() < 2 {
-                        continue;
+    // At least 160 px; as wide as the tile when its text is wider.
+    div()
+        .w_full()
+        .min_w(px(160.))
+        .h(px(28.))
+        .rounded_sm()
+        .bg(track)
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |bounds, (), window, _| {
+                    let step = bounds.size.width / (capacity.max(2) - 1) as f32;
+                    let y = |v: f32| {
+                        let frac = (v / max).clamp(0.0, 1.0);
+                        bounds.origin.y + bounds.size.height * (1.0 - frac) - px(1.) * (1.0 - frac)
+                    };
+                    for (values, color) in &series {
+                        if values.len() < 2 {
+                            continue;
+                        }
+                        let x0 =
+                            bounds.origin.x + bounds.size.width - step * (values.len() - 1) as f32;
+                        let mut path = PathBuilder::stroke(px(1.5));
+                        path.move_to(point(x0, y(values[0])));
+                        for (i, v) in values.iter().enumerate().skip(1) {
+                            path.line_to(point(x0 + step * i as f32, y(*v)));
+                        }
+                        if let Ok(path) = path.build() {
+                            window.paint_path(path, *color);
+                        }
                     }
-                    let x0 = bounds.origin.x + bounds.size.width - step * (values.len() - 1) as f32;
-                    let mut path = PathBuilder::stroke(px(1.5));
-                    path.move_to(point(x0, y(values[0])));
-                    for (i, v) in values.iter().enumerate().skip(1) {
-                        path.line_to(point(x0 + step * i as f32, y(*v)));
-                    }
-                    if let Ok(path) = path.build() {
-                        window.paint_path(path, *color);
-                    }
-                }
-            },
+                },
+            )
+            .size_full(),
         )
-        .size_full(),
-    )
 }

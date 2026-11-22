@@ -149,7 +149,7 @@ application menu: copy it to `~/.local/share/applications/` (with
 - **Header:** CPU, memory, network and disk for the selected host, each with
   a short history graph, plus a bar for every core. The network graph shows
   receive (blue) and transmit (orange), the disk graph read (blue) and
-  write (orange).
+  write (orange); the figure at the top is the two added together.
 - **Process table:** like htop, memory is shown as **VIRT** (virtual size),
   **RES** (resident set size, RSS) and **SHR** (resident memory shared
   with other processes, e.g. libraries), plus %MEM (RES as a share of RAM).

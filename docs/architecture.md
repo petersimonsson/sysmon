@@ -404,8 +404,11 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
     sparkline (canvas paths), plus per-core bars and host details. Network
     draws receive and transmit, Disk read and write, as two lines on one
     scale: blue for incoming, orange for outgoing (from the graph palette;
-    the theme's chart colours are all one hue), with each figure in its
-    line's colour and named in its accessible description;
+    the theme's chart colours are all one hue), with the total (both directions
+    added) on the title line and the two figures side by side below the
+    sparkline, each in its line's colour and named in its accessible
+    description. A sparkline is at least 160 px, and as wide as
+    its tile when the text is wider;
   - a process table: a virtualized `uniform_list`, clickable column headers
     to sort (PID, user, %CPU, VIRT, RES, SHR, threads, command; RES is the
     resident set size (RSS), and "–" marks sizes a v1 agent didn't send), a filter input (command,

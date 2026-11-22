@@ -675,28 +675,41 @@ impl AppState {
                 .child(text.clone())
                 .into_any_element()
         };
-        let metric =
-            |title: &'static str, line1: AnyElement, line2: AnyElement, chart: AnyElement| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .text_xs()
-                            .child(div().text_color(theme.muted_foreground).child(title))
-                            .child(line1),
-                    )
-                    .child(chart)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(line2),
-                    )
-            };
+        // A tile: title and figures, the sparkline, and optionally a detail line.
+        let metric = |title: &'static str,
+                      line1: AnyElement,
+                      line2: Option<AnyElement>,
+                      chart: AnyElement| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .text_xs()
+                        .child(div().text_color(theme.muted_foreground).child(title))
+                        .child(line1),
+                )
+                .child(chart)
+                .children(
+                    line2.map(|l| div().text_xs().text_color(theme.muted_foreground).child(l)),
+                )
+        };
+        // Two figures side by side, as one tile's figure line.
+        let pair = |a: AnyElement, b: AnyElement| {
+            div().flex().gap_2().child(a).child(b).into_any_element()
+        };
+        // A tile's headline figure, e.g. both directions added up.
+        let total = |id: &'static str, value: String, what: &str| {
+            div()
+                .id(id)
+                .test_support()
+                .aria_description(format!("{what} {value}"))
+                .child(value)
+                .into_any_element()
+        };
         let spark = |series: Vec<(Vec<f32>, Hsla)>, max: Option<f32>| {
             sparkline(series, max, HISTORY_LEN.min(240), theme.secondary).into_any_element()
         };
@@ -742,10 +755,10 @@ impl AppState {
                     .child(metric(
                         "CPU",
                         text(format!("{cpu:.1}%")),
-                        text(format!(
+                        Some(text(format!(
                             "load {:.2} {:.2} {:.2}",
                             s.load[0], s.load[1], s.load[2]
-                        )),
+                        ))),
                         spark(
                             vec![(tail(history(|p| p.cpu_pct)), theme.primary)],
                             Some(100.0),
@@ -754,12 +767,12 @@ impl AppState {
                     .child(metric(
                         "Memory",
                         text(format!("{mem_pct:.1}%")),
-                        text(format!(
+                        Some(text(format!(
                             "{} / {}  swap {}",
                             format::bytes(mem.total.saturating_sub(mem.available) as f64 * 1024.0),
                             format::bytes(mem.total as f64 * 1024.0),
                             format::bytes(swap_used as f64 * 1024.0)
-                        )),
+                        ))),
                         spark(
                             vec![(tail(history(|p| p.mem_used_kib as f32)), theme.success)],
                             Some(mem.total.max(1) as f32),
@@ -767,18 +780,21 @@ impl AppState {
                     ))
                     .child(metric(
                         "Network",
-                        colored(
-                            "net-rx",
-                            format!("↓ {}", format::bytes_per_s(rx)),
-                            "Network receive",
-                            in_color,
-                        ),
-                        colored(
-                            "net-tx",
-                            format!("↑ {}", format::bytes_per_s(tx)),
-                            "Network transmit",
-                            out_color,
-                        ),
+                        total("net-total", format::bytes_per_s(rx + tx), "Network total"),
+                        Some(pair(
+                            colored(
+                                "net-rx",
+                                format!("↓ {}", format::bytes_per_s(rx)),
+                                "Network receive",
+                                in_color,
+                            ),
+                            colored(
+                                "net-tx",
+                                format!("↑ {}", format::bytes_per_s(tx)),
+                                "Network transmit",
+                                out_color,
+                            ),
+                        )),
                         spark(
                             vec![
                                 (tail(history(|p| p.net_rx_bytes_per_s as f32)), in_color),
@@ -789,18 +805,21 @@ impl AppState {
                     ))
                     .child(metric(
                         "Disk",
-                        colored(
-                            "disk-read",
-                            format!("R {}", format::bytes_per_s(rd)),
-                            "Disk read",
-                            in_color,
-                        ),
-                        colored(
-                            "disk-write",
-                            format!("W {}", format::bytes_per_s(wr)),
-                            "Disk write",
-                            out_color,
-                        ),
+                        total("disk-total", format::bytes_per_s(rd + wr), "Disk total"),
+                        Some(pair(
+                            colored(
+                                "disk-read",
+                                format!("R {}", format::bytes_per_s(rd)),
+                                "Disk read",
+                                in_color,
+                            ),
+                            colored(
+                                "disk-write",
+                                format!("W {}", format::bytes_per_s(wr)),
+                                "Disk write",
+                                out_color,
+                            ),
+                        )),
                         spark(
                             vec![
                                 (tail(history(|p| p.disk_read_bytes_per_s as f32)), in_color),
@@ -3516,6 +3535,28 @@ mod tests {
             assert_eq!(d("net-tx").as_deref(), Some("Network transmit 1.0 KiB/s"));
             assert_eq!(d("disk-read").as_deref(), Some("Disk read 4.0 KiB/s"));
             assert_eq!(d("disk-write").as_deref(), Some("Disk write 8.0 KiB/s"));
+            assert_eq!(d("net-total").as_deref(), Some("Network total 3.0 KiB/s"));
+            assert_eq!(d("disk-total").as_deref(), Some("Disk total 12.0 KiB/s"));
+            // The total heads the tile, the directions go under the sparkline.
+            for (t, a) in [("net-total", "net-rx"), ("disk-total", "disk-read")] {
+                let (t, a) = (window.find(t).bounds(), window.find(a).bounds());
+                assert!(t.origin.y + t.size.height < a.origin.y, "{t:?} {a:?}");
+            }
+            // Each pair sits on one line, incoming first.
+            for (a, b) in [("net-rx", "net-tx"), ("disk-read", "disk-write")] {
+                let (a, b) = (window.find(a).bounds(), window.find(b).bounds());
+                assert_eq!(a.origin.y, b.origin.y, "{a:?} {b:?}");
+                assert!(a.origin.x + a.size.width <= b.origin.x, "{a:?} {b:?}");
+            }
+            // A wider figure line widens its tile rather than overlapping the next.
+            let (tx, rd) = (
+                window.find("net-tx").bounds(),
+                window.find("disk-read").bounds(),
+            );
+            assert!(
+                tx.origin.x + tx.size.width <= rd.origin.x || tx.origin.y != rd.origin.y,
+                "{tx:?} {rd:?}"
+            );
         })
         .unwrap();
         // The history holds both directions separately, which the lines draw.
