@@ -2,6 +2,7 @@
 //! monitors over UDP.
 
 mod collect;
+mod journal;
 mod send;
 mod targets;
 mod users;
@@ -52,7 +53,31 @@ struct Args {
     /// 2.5x the agent's CPU and bandwidth on a desktop with ~1700 threads).
     #[arg(long)]
     threads: bool,
+    /// Also send journal lines (needs journalctl; to see system logs the
+    /// agent must be in the systemd-journal group). Requires --key-file,
+    /// as logs often hold sensitive details, unless --logs-unencrypted.
+    #[arg(long)]
+    logs: bool,
+    /// Lowest priority sent: emerg, alert, crit, err, warning, notice,
+    /// info, debug, or 0-7.
+    #[arg(long, default_value = "warning", value_parser = journal::parse_priority, requires = "logs")]
+    log_priority: u8,
+    /// Only lines from this systemd unit. Can be given more than once.
+    #[arg(long = "log-unit", value_name = "UNIT", requires = "logs")]
+    log_units: Vec<String>,
+    /// Where to keep the journal position, so a restarted agent carries on
+    /// where it stopped. Default: journal-cursor in systemd's
+    /// $STATE_DIRECTORY; without either, a restart starts with new lines.
+    #[arg(long, value_name = "PATH", requires = "logs")]
+    log_cursor_file: Option<PathBuf>,
+    /// Allow --logs without --key-file, sending logs in plain text.
+    #[arg(long, requires = "logs")]
+    logs_unencrypted: bool,
 }
+
+/// Send a log batch at least this often, empty if nothing was logged, so
+/// the monitor knows logs are on.
+const LOG_HEARTBEAT_MS: u32 = 10_000;
 
 fn main() -> anyhow::Result<()> {
     // Without RUST_LOG the filter would allow errors only, so the start-up
@@ -71,6 +96,7 @@ fn main() -> anyhow::Result<()> {
         return write_new_key(path);
     }
 
+    check_log_encryption(&args)?;
     let key = args
         .key_file
         .as_deref()
@@ -101,6 +127,24 @@ fn main() -> anyhow::Result<()> {
         encrypted = key.is_some(),
         "starting"
     );
+
+    let mut journal = if args.logs {
+        Some(
+            journal::Journal::spawn(journal::Config {
+                program: "journalctl".into(),
+                priority: args.log_priority,
+                units: args.log_units.clone(),
+                cursor_file: args
+                    .log_cursor_file
+                    .clone()
+                    .or_else(journal::default_cursor_file),
+            })
+            .context("starting the journal reader")?,
+        )
+    } else {
+        None
+    };
+    let log_heartbeat_every = (LOG_HEARTBEAT_MS / interval_ms).max(1);
 
     let interval = Duration::from_millis(interval_ms as u64);
     let host_info_every = args.host_info_every.max(1);
@@ -178,6 +222,19 @@ fn main() -> anyhow::Result<()> {
             ),
         );
 
+        if let Some(journal) = &mut journal {
+            let batch = journal.take();
+            if !batch.entries.is_empty()
+                || batch.dropped > 0
+                || seq.is_multiple_of(log_heartbeat_every)
+            {
+                datagrams.extend(warnings.or_skip(
+                    "logs",
+                    sysmon_proto::encode_logs(host_id, boot_id, seq, &batch).map_err(Into::into),
+                ));
+            }
+        }
+
         let datagrams: Vec<Vec<u8>> = datagrams
             .into_iter()
             .flat_map(|d| {
@@ -195,6 +252,10 @@ fn main() -> anyhow::Result<()> {
                     break;
                 }
             }
+        }
+        // The lines are out: a restart can carry on after them.
+        if let Some(journal) = &mut journal {
+            journal.save_position();
         }
         tracing::debug!(
             seq,
@@ -214,6 +275,18 @@ fn main() -> anyhow::Result<()> {
         }
         seq = seq.wrapping_add(1);
     }
+}
+
+/// Logs often hold sensitive details: don't send them in plain text by
+/// accident.
+fn check_log_encryption(args: &Args) -> anyhow::Result<()> {
+    if args.logs && args.key_file.is_none() && !args.logs_unencrypted {
+        anyhow::bail!(
+            "--logs sends journal lines, which often hold sensitive details; \
+             use --key-file to encrypt them, or --logs-unencrypted to send them in plain text"
+        );
+    }
+    Ok(())
 }
 
 /// Shortest sampling interval. HostInfo reports the interval actually used,
@@ -314,8 +387,33 @@ fn unix_now_ns() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, NOTICES, Warnings, effective_interval_ms, users_datagrams};
+    use super::{
+        Args, NOTICES, Warnings, check_log_encryption, effective_interval_ms, users_datagrams,
+    };
     use clap::Parser as _;
+
+    #[test]
+    fn logs_need_a_key_unless_explicitly_unencrypted() {
+        let parse = |extra: &[&str]| {
+            let mut a = vec!["sysmon-agent", "-t", "127.0.0.1:1"];
+            a.extend(extra);
+            Args::try_parse_from(a)
+        };
+        assert!(check_log_encryption(&parse(&["--logs"]).unwrap()).is_err());
+        assert!(check_log_encryption(&parse(&["--logs", "--logs-unencrypted"]).unwrap()).is_ok());
+        let keyed = parse(&["--logs", "-k", "/etc/sysmon/key"]).unwrap();
+        assert!(check_log_encryption(&keyed).is_ok());
+        assert_eq!(keyed.log_priority, 4, "warning and above by default");
+        assert_eq!(
+            parse(&["--logs", "--log-priority", "err"])
+                .unwrap()
+                .log_priority,
+            3
+        );
+        // Log options without --logs are a mistake.
+        assert!(parse(&["--log-priority", "err"]).is_err());
+        assert!(check_log_encryption(&parse(&[]).unwrap()).is_ok());
+    }
 
     #[test]
     fn host_info_reports_the_interval_used() {
