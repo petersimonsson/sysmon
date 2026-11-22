@@ -30,7 +30,10 @@ PrivateTmp=yes
 PrivateDevices=yes
 NoNewPrivileges=yes
 CapabilityBoundingSet=
-RestrictAddressFamilies=AF_INET AF_INET6
+# AF_UNIX is for user-name lookups: glibc reaches systemd's user database
+# (dynamic users, including this agent's own), SSSD and nscd over Unix
+# sockets.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
