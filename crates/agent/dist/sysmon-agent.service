@@ -17,6 +17,8 @@ After=network-online.target
 EnvironmentFile=/etc/default/sysmon-agent
 LoadCredential=key:/etc/sysmon/key
 ExecStart=/usr/local/bin/sysmon-agent --target ${SYSMON_TARGET} --compress --key-file ${CREDENTIALS_DIRECTORY}/key
+# To send threads too (about 2.5x the CPU and bandwidth), use this instead:
+#ExecStart=/usr/local/bin/sysmon-agent --target ${SYSMON_TARGET} --compress --key-file ${CREDENTIALS_DIRECTORY}/key --threads
 Restart=always
 RestartSec=5
 

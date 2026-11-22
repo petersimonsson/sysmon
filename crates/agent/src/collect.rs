@@ -10,7 +10,11 @@ use std::os::unix::fs::MetadataExt;
 
 use sysmon_proto::{
     CpuCounters, DiskStat, HostInfo, MemInfo, NetIf, ProcKey, ProcMeta, ProcSample, SystemSample,
+    ThreadSample,
 };
+
+/// `PF_KTHREAD` in the `flags` field of `/proc/[pid]/stat`: a kernel thread.
+const PF_KTHREAD: u64 = 0x0020_0000;
 
 /// Longest command line sent in a `ProcMeta`; keeps metadata well inside a datagram.
 const MAX_CMDLINE: usize = 512;
@@ -57,7 +61,7 @@ pub fn boot_id() -> u128 {
         .unwrap_or(0)
 }
 
-pub fn host_info(interval_ms: u32) -> HostInfo {
+pub fn host_info(interval_ms: u32, sends_threads: bool) -> HostInfo {
     // SAFETY: sysconf has no preconditions.
     let (clk_tck, page_size) = unsafe {
         (
@@ -74,8 +78,7 @@ pub fn host_info(interval_ms: u32) -> HostInfo {
         clk_tck: clk_tck.max(1) as u32,
         page_size: page_size.max(1) as u32,
         interval_ms,
-        // Set by the next change, with --threads.
-        sends_threads: false,
+        sends_threads,
     }
 }
 
@@ -90,9 +93,14 @@ pub fn system(ts_unix_ns: u64) -> SystemSample {
     }
 }
 
-/// Every process in `/proc`. Processes that exit mid-scan are skipped.
-pub fn procs(out: &mut Vec<ProcSample>) {
+/// Every process in `/proc`, and with `threads`, every thread of every user
+/// process other than its main thread. Processes and threads that exit
+/// mid-scan are skipped.
+pub fn procs(out: &mut Vec<ProcSample>, mut threads: Option<&mut Vec<ThreadSample>>) {
     out.clear();
+    if let Some(t) = threads.as_deref_mut() {
+        t.clear();
+    }
     let Ok(dir) = fs::read_dir("/proc") else {
         return;
     };
@@ -107,6 +115,14 @@ pub fn procs(out: &mut Vec<ProcSample>) {
             // SHR is only in statm. If the process exits in between, it's
             // simply unknown for this sample.
             p.shared_pages = with_file(&format!("/proc/{pid}/statm"), parse_statm_shared).flatten();
+            // Kernel threads are single-threaded; a process with one thread
+            // has only its main thread, which is the process row itself.
+            if let Some(t) = threads.as_deref_mut()
+                && p.kernel_thread != Some(true)
+                && p.threads > 1
+            {
+                read_threads(pid, t);
+            }
             out.push(p);
         }
     }
@@ -127,6 +143,45 @@ pub fn proc_meta(key: ProcKey) -> Option<ProcMeta> {
         cmdline.truncate(end);
     }
     Some(ProcMeta { key, uid, cmdline })
+}
+
+fn read_threads(tgid: u32, out: &mut Vec<ThreadSample>) {
+    let Ok(dir) = fs::read_dir(format!("/proc/{tgid}/task")) else {
+        return;
+    };
+    for entry in dir.flatten() {
+        let Some(tid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if tid == tgid {
+            continue;
+        }
+        if let Some(t) = with_file(&format!("/proc/{tgid}/task/{tid}/stat"), |s| {
+            parse_thread_stat(tgid, tid, s)
+        })
+        .flatten()
+        {
+            out.push(t);
+        }
+    }
+}
+
+/// A thread's `stat` has the same layout as a process's.
+fn parse_thread_stat(tgid: u32, tid: u32, s: &str) -> Option<ThreadSample> {
+    let p = parse_proc_stat(tid, s)?;
+    Some(ThreadSample {
+        tgid,
+        tid,
+        starttime: p.starttime,
+        state: p.state,
+        utime: p.utime,
+        stime: p.stime,
+        comm: p.comm,
+    })
 }
 
 /// The third field of `/proc/[pid]/statm`: resident shared pages (file-backed
@@ -157,7 +212,7 @@ fn parse_proc_stat(pid: u32, s: &str) -> Option<ProcSample> {
         vsize_bytes: num(23),
         // From statm; filled in by the caller.
         shared_pages: None,
-        kernel_thread: None,
+        kernel_thread: Some(num(9)? & PF_KTHREAD != 0),
     })
 }
 
@@ -300,6 +355,23 @@ mod tests {
         assert_eq!((p.utime, p.stime), (250, 75));
         assert_eq!((p.threads, p.starttime, p.rss_pages), (3, 98765, 2048));
         assert_eq!(p.vsize_bytes, Some(123456789));
+        assert_eq!(
+            p.kernel_thread,
+            Some(false),
+            "flags 4194560 has no PF_KTHREAD"
+        );
+        // kthreadd: flags 0x208040 includes PF_KTHREAD (0x200000).
+        let kthreadd = "2 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 20 0 1 0 5 0 0 \
+                        18446744073709551615";
+        assert_eq!(
+            parse_proc_stat(2, kthreadd).unwrap().kernel_thread,
+            Some(true)
+        );
+        let t = parse_thread_stat(1234, 1240, line).unwrap();
+        assert_eq!(
+            (t.tgid, t.tid, t.utime, &t.comm[..]),
+            (1234, 1240, 250, "my (weird) proc")
+        );
         assert_eq!(parse_statm_shared("5000 2048 512 100 0 900 0\n"), Some(512));
         assert_eq!(parse_statm_shared("5000 2048"), None);
     }
@@ -309,8 +381,31 @@ mod tests {
         let s = system(0);
         assert!(s.cpus.len() >= 2, "aggregate line plus at least one core");
         assert!(s.mem.total > 0);
+        // Give this process a second thread to find.
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::Builder::new()
+            .name("probe-thread".into())
+            .spawn(move || {
+                let _ = stop_rx.recv();
+            })
+            .unwrap();
         let mut ps = Vec::new();
-        procs(&mut ps);
+        let mut ts = Vec::new();
+        procs(&mut ps, Some(&mut ts));
+        let me = std::process::id();
+        assert!(
+            ts.iter().any(|t| t.tgid == me && t.comm == "probe-thread"),
+            "our own extra thread is reported"
+        );
+        assert!(
+            ts.iter().all(|t| t.tid != t.tgid),
+            "main threads are left out"
+        );
+        if let Some(k) = ps.iter().find(|p| p.pid == 2) {
+            assert_eq!(k.kernel_thread, Some(true), "kthreadd is a kernel thread");
+        }
+        stop_tx.send(()).unwrap();
+        worker.join().unwrap();
         let me = ps.iter().find(|p| p.pid == std::process::id()).unwrap();
         assert!(me.vsize_bytes.unwrap() > me.rss_pages * 4096 / 2);
         assert!(me.shared_pages.is_some());

@@ -44,6 +44,10 @@ struct Args {
     /// Resend metadata for every process every this many samples.
     #[arg(long, default_value_t = 30)]
     meta_refresh_every: u32,
+    /// Also send every thread of every user process (off by default: about
+    /// 2.5x the agent's CPU and bandwidth on a desktop with ~1700 threads).
+    #[arg(long)]
+    threads: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -72,7 +76,7 @@ fn main() -> anyhow::Result<()> {
 
     let host_id = collect::host_id();
     let boot_id = collect::boot_id();
-    let info = collect::host_info(args.interval_ms);
+    let info = collect::host_info(args.interval_ms, args.threads);
     tracing::info!(
         host_id = format_args!("{host_id:016x}"),
         host = %info.hostname,
@@ -87,6 +91,7 @@ fn main() -> anyhow::Result<()> {
     let mut known: HashMap<ProcKey, u32> = HashMap::new();
     let mut passwd = collect::read_passwd();
     let mut procs = Vec::new();
+    let mut threads = Vec::new();
     let mut next_tick = Instant::now();
 
     for seq in 0u32.. {
@@ -94,7 +99,7 @@ fn main() -> anyhow::Result<()> {
         let host_tick = seq % host_info_every == 0;
 
         let system = collect::system(unix_now_ns());
-        collect::procs(&mut procs);
+        collect::procs(&mut procs, args.threads.then_some(&mut threads));
 
         // Metadata for new processes, or for all of them on a refresh tick.
         let refresh = seq % args.meta_refresh_every.max(1) == 0;
@@ -132,12 +137,7 @@ fn main() -> anyhow::Result<()> {
             host_id, boot_id, seq, &meta,
         )?);
         datagrams.extend(sysmon_proto::encode_sample(
-            host_id,
-            boot_id,
-            seq,
-            &system,
-            &procs,
-            &[],
+            host_id, boot_id, seq, &system, &procs, &threads,
         )?);
 
         let mut bytes = 0;
