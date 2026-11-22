@@ -10,7 +10,7 @@ A `top`-like system monitor split in two:
 
 The UI shows per-host CPU, memory, network and disk with short history
 graphs, and a process table you can sort, filter and view as a tree. You can
-pick processes (or whole subtrees) and graph their %CPU, RSS, %MEM or thread
+pick processes (or whole subtrees) and graph their %CPU, memory or thread
 count over the last 10 minutes. Recordings replay at up to 256× speed with
 seeking.
 
@@ -103,6 +103,10 @@ The host shows up in the sidebar within a second.
    with 500 processes). `--target` can be given several times to send to more
    than one monitor.
 
+   **Upgrading:** update the monitor before the agents. A newer monitor reads
+   data from older agents (and old recordings), but an older monitor rejects
+   a newer agent's data.
+
 ### Running the agent as a service
 
 `crates/agent/dist/sysmon-agent.service` is a sandboxed systemd unit. The
@@ -133,16 +137,21 @@ binary to `/usr/local/bin`, the key to `/etc/sysmon/key`, put
   silent. Click a host to show it.
 - **Header:** CPU, memory, network and disk for the selected host, each with
   a short history graph, plus a bar for every core.
-- **Process table:**
+- **Process table:** like htop, memory is shown as **VIRT** (virtual size),
+  **RES** (resident set size, RSS) and **SHR** (resident memory shared
+  with other processes, e.g. libraries), plus %MEM (RES as a share of RAM).
+  "–" means the agent didn't report it (agents older than protocol v2).
   - Click a column header to sort, and click it again to reverse.
   - Type in the filter box to match command, user or an exact PID.
   - **Tree** groups processes under their parent. Click ▾/▸ to collapse a
-    subtree; a collapsed row shows the subtree's total CPU and memory.
+    subtree; a collapsed row shows the subtree's total CPU, RES and VIRT.
+    (Like htop's, these totals count memory shared between the processes
+    more than once.)
 - **Graphs:** pick up to 8 processes with the checkbox at the left of a row,
   Ctrl+click, or Shift+click for a range. A panel opens below the table with
   one line per process. Picking a collapsed tree row graphs the whole
   subtree's total.
-  - Choose the metric (%CPU, RSS, %MEM, threads) and the time window (1, 5 or
+  - Choose the metric (%CPU, VIRT, RES, SHR, %MEM, threads) and the time window (1, 5 or
     10 minutes) at the top of the panel.
   - Hover over the chart to read the values at that moment.
   - Drag the divider above the panel to resize it.
@@ -175,9 +184,10 @@ Press **F1** or **?** in the app for the full list. The most useful ones:
 | Ctrl+F or `/` | Filter (Enter goes back to the list, Esc clears) |
 | ↑/↓ or `j`/`k` | Move the row cursor |
 | `g`, Ctrl+G | Graph the cursor row, clear the graph |
-| `1`–`4`, `w`, `v` | Graph %CPU / RSS / %MEM / threads, change window, show/hide graph |
+| `1`–`6`, `w`, `v` | Graph %CPU / VIRT / RES / SHR / %MEM / threads, change window, show/hide graph |
 | `t`, `e`, `c` | Tree view, expand all, collapse all |
-| Shift+P / M / N / U / C | Sort by CPU / memory / PID / user / command |
+| Shift+P / V / M / S | Sort by CPU / VIRT / RES / SHR |
+| Shift+N / U / C | Sort by PID / user / command |
 | Space, `[`, `]` | Play/pause, slower, faster |
 | ←/→, Shift+←/→, Home/End | Seek 10 s, 1 min, to start/end |
 

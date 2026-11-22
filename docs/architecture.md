@@ -121,6 +121,14 @@ pub enum Msg {
 - `Users` is sent with `HostInfo` and lists only uids that running processes
   use, read from the agent's `/etc/passwd`.
 - New `Msg` variants are only ever appended, so old recordings keep decoding.
+- **Versions:** changing a type's fields changes the encoding (postcard isn't
+  self-describing), so it bumps `VERSION`. The old types are frozen in a
+  module (`proto::v1`), and `decode` reads every version from `MIN_VERSION`
+  up, converting to the current types. Version 2 added
+  `ProcSample::vsize_bytes` (VIRT) and `shared_pages` (SHR), both `Option`:
+  `None` from v1 data, and SHR also `None` if a process exits between the
+  agent's two reads. Monitors must be upgraded before agents, since an older
+  monitor rejects newer versions.
 - **Process identity** is `(pid, starttime)`, so a reused PID never merges two
   processes' histories.
 
@@ -145,7 +153,10 @@ pub struct Frame {
   `loop { collect(); encode(); send(); sleep_until(next_tick) }` with a
   blocking `std::net::UdpSocket`.
 - It reads `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`, `/proc/[pid]/stat`,
-  `/proc/net/dev` and `/proc/diskstats` into one reused buffer.
+  `/proc/[pid]/statm`, `/proc/net/dev` and `/proc/diskstats` into one reused
+  buffer. `statm` is read only for SHR (its third field). That second read
+  per process costs about 57 % more agent CPU: 4.1 → 6.5 ms per sample of
+  about 495 processes, or 0.4 % → 0.65 % of a core at 1 Hz.
 - It tracks the set of known `(pid, starttime)` pairs to decide when to emit
   `ProcMeta`.
 - CLI (`clap`): `--target host:port` (repeatable), `--interval-ms`,
@@ -255,14 +266,15 @@ agent or the monitor was offline) are skipped rather than waited out.
 - the process table, joined with `ProcMeta` (cmdline, uid) and `Users`;
 - `proc_history`: every process of the last 600 samples, frame-major
   (`series::ProcFrame`: timestamp, memory total, and each process's key,
-  ppid, %CPU, RSS and threads). Rows carried over lost chunks are left out,
+  ppid, %CPU, VIRT, RES, SHR and threads). Rows carried over lost chunks are left out,
   so graphs show a gap instead of a repeated value. `series(target, metric,
   since)` gives one graph line, where `target` is a `Process(key)` or a
-  `Subtree(key)` and `metric` is %CPU, RSS, %MEM (against that sample's
-  memory total) or threads. A subtree total is taken from each sample's own
+  `Subtree(key)` and `metric` is %CPU, VIRT, RES, SHR, %MEM (against that
+  sample's memory total) or threads. Unknown VIRT/SHR values are gaps; a
+  subtree sums the values that are known. A subtree total is taken from each sample's own
   parent links, so children count only while they exist. Memory: a point
-  is 40 bytes, so 40 × processes × 600 per host, about 12 MB for 500
-  processes;
+  is 56 bytes (unknown sizes use a sentinel rather than `Option`), so
+  56 × processes × 600 per host, about 17 MB for 500 processes;
 - liveness: when the last sample was taken, and the incomplete-frame rate.
 
 ## 6. `sysmon-ui`: gpui-kit application
@@ -288,7 +300,8 @@ agent or the monitor was offline) are skipped rather than waited out.
   - a header with CPU, memory, network and disk figures, each with a
     sparkline (canvas paths), plus per-core bars and host details;
   - a process table: a virtualized `uniform_list`, clickable column headers
-    to sort (PID, user, %CPU, RSS, threads, command), a filter input (command,
+    to sort (PID, user, %CPU, VIRT, RES, SHR, threads, command; RES is the
+    resident set size (RSS), and "–" marks sizes a v1 agent didn't send), a filter input (command,
     user or exact PID), and stale rows dimmed;
   - a **Tree** toggle that groups processes under their parent
     (`sysmon_model::tree::build`). Siblings follow the current sort, guide
@@ -302,7 +315,7 @@ agent or the monitor was offline) are skipped rather than waited out.
     are kept per view and host by `ProcKey`, so they survive sorting,
     filtering and tree changes, and each keeps its colour while picked;
   - a **graph panel** below the process list while anything is picked: one
-    line per pick for the chosen metric (%CPU, RSS, %MEM, threads) over
+    line per pick for the chosen metric (%CPU, VIRT, RES, SHR, %MEM, threads) over
     1, 5 or 10 minutes, drawn on a canvas (`graph.rs`). Lines break where a
     process was absent. Hovering shows a crosshair, and the legend switches
     to the values at that moment. The legend names each line (with a
@@ -353,8 +366,9 @@ agent or the monitor was offline) are skipped rather than waited out.
   | ↑/↓ or `j`/`k`, PgUp/PgDn | Move the row cursor |
   | `t`, `e`, `c` | Tree view, expand all, collapse all |
   | `g`, Ctrl+G | Graph the cursor row (collapsed: its subtree), clear the graph |
-  | `1`–`4`, `w`, `v` | Graph %CPU / RSS / %MEM / threads, cycle window, show/hide |
-  | Shift+P / M / N / U / C | Sort by CPU / memory / PID / user / command (again flips) |
+  | `1`–`6`, `w`, `v` | Graph %CPU / VIRT / RES / SHR / %MEM / threads, cycle window, show/hide |
+  | Shift+P / V / M / S | Sort by CPU / VIRT / RES / SHR (again flips) |
+  | Shift+N / U / C | Sort by PID / user / command (again flips) |
   | Space, `]`, `[` | Play/pause, faster, slower |
   | ←/→, Shift+←/→, Home/End | Seek 10 s, 1 min, to start/end |
   | F1 or `?` | Shortcuts overlay |
