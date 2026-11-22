@@ -147,7 +147,9 @@ application menu: copy it to `~/.local/share/applications/` (with
   monitor hasn't heard from a host for three intervals; a host silent for
   an hour is dropped. Click a host to show it.
 - **Header:** CPU, memory, network and disk for the selected host, each with
-  a short history graph, plus a bar for every core.
+  a short history graph, plus a bar for every core. The network graph shows
+  receive (blue) and transmit (orange), the disk graph read (blue) and
+  write (orange).
 - **Process table:** like htop, memory is shown as **VIRT** (virtual size),
   **RES** (resident set size, RSS) and **SHR** (resident memory shared
   with other processes, e.g. libraries), plus %MEM (RES as a share of RAM).

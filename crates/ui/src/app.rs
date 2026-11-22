@@ -660,30 +660,47 @@ impl AppState {
         let rd: f64 = s.disks.iter().map(|d| d.read_bytes_per_s).sum();
         let wr: f64 = s.disks.iter().map(|d| d.write_bytes_per_s).sum();
 
-        let metric = |title: &'static str, line1: String, line2: String, chart: AnyElement| {
+        // Incoming (receive, read) and outgoing (transmit, write), the same
+        // in both tiles; from the graph palette, as the theme's chart colours
+        // are all shades of one hue.
+        let (in_color, out_color) = (selection::color(0), selection::color(1));
+        // The colour ties a figure to its line; the description says it in words.
+        let colored = |id: &'static str, text: String, what: &str, color: Hsla| {
+            let figure = text.split_once(' ').map_or(text.as_str(), |(_, f)| f);
             div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .text_xs()
-                        .child(div().text_color(theme.muted_foreground).child(title))
-                        .child(line1),
-                )
-                .child(chart)
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(line2),
-                )
+                .id(id)
+                .test_support()
+                .text_color(color)
+                .aria_description(format!("{what} {figure}"))
+                .child(text.clone())
+                .into_any_element()
         };
-        let spark = |values: Vec<f32>, max: Option<f32>, color: Hsla| {
-            sparkline(values, max, HISTORY_LEN.min(240), color, theme.secondary).into_any_element()
+        let metric =
+            |title: &'static str, line1: AnyElement, line2: AnyElement, chart: AnyElement| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .text_xs()
+                            .child(div().text_color(theme.muted_foreground).child(title))
+                            .child(line1),
+                    )
+                    .child(chart)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(line2),
+                    )
+            };
+        let spark = |series: Vec<(Vec<f32>, Hsla)>, max: Option<f32>| {
+            sparkline(series, max, HISTORY_LEN.min(240), theme.secondary).into_any_element()
         };
+        let text = |t: String| div().child(t).into_any_element();
         let tail = |mut v: Vec<f32>| {
             let skip = v.len().saturating_sub(240);
             v.drain(..skip);
@@ -724,45 +741,75 @@ impl AppState {
                     .gap_6()
                     .child(metric(
                         "CPU",
-                        format!("{cpu:.1}%"),
-                        format!("load {:.2} {:.2} {:.2}", s.load[0], s.load[1], s.load[2]),
-                        spark(tail(history(|p| p.cpu_pct)), Some(100.0), theme.primary),
+                        text(format!("{cpu:.1}%")),
+                        text(format!(
+                            "load {:.2} {:.2} {:.2}",
+                            s.load[0], s.load[1], s.load[2]
+                        )),
+                        spark(
+                            vec![(tail(history(|p| p.cpu_pct)), theme.primary)],
+                            Some(100.0),
+                        ),
                     ))
                     .child(metric(
                         "Memory",
-                        format!("{mem_pct:.1}%"),
-                        format!(
+                        text(format!("{mem_pct:.1}%")),
+                        text(format!(
                             "{} / {}  swap {}",
                             format::bytes(mem.total.saturating_sub(mem.available) as f64 * 1024.0),
                             format::bytes(mem.total as f64 * 1024.0),
                             format::bytes(swap_used as f64 * 1024.0)
-                        ),
+                        )),
                         spark(
-                            tail(history(|p| p.mem_used_kib as f32)),
+                            vec![(tail(history(|p| p.mem_used_kib as f32)), theme.success)],
                             Some(mem.total.max(1) as f32),
-                            theme.success,
                         ),
                     ))
                     .child(metric(
                         "Network",
-                        format!("↓ {}", format::bytes_per_s(rx)),
-                        format!("↑ {}", format::bytes_per_s(tx)),
+                        colored(
+                            "net-rx",
+                            format!("↓ {}", format::bytes_per_s(rx)),
+                            "Network receive",
+                            in_color,
+                        ),
+                        colored(
+                            "net-tx",
+                            format!("↑ {}", format::bytes_per_s(tx)),
+                            "Network transmit",
+                            out_color,
+                        ),
                         spark(
-                            tail(history(|p| p.net_rx_bytes_per_s as f32)),
+                            vec![
+                                (tail(history(|p| p.net_rx_bytes_per_s as f32)), in_color),
+                                (tail(history(|p| p.net_tx_bytes_per_s as f32)), out_color),
+                            ],
                             None,
-                            theme.info,
                         ),
                     ))
                     .child(metric(
                         "Disk",
-                        format!("R {}", format::bytes_per_s(rd)),
-                        format!("W {}", format::bytes_per_s(wr)),
+                        colored(
+                            "disk-read",
+                            format!("R {}", format::bytes_per_s(rd)),
+                            "Disk read",
+                            in_color,
+                        ),
+                        colored(
+                            "disk-write",
+                            format!("W {}", format::bytes_per_s(wr)),
+                            "Disk write",
+                            out_color,
+                        ),
                         spark(
-                            tail(history(|p| {
-                                (p.disk_read_bytes_per_s + p.disk_write_bytes_per_s) as f32
-                            })),
+                            vec![
+                                (tail(history(|p| p.disk_read_bytes_per_s as f32)), in_color),
+                                (
+                                    tail(history(|p| p.disk_write_bytes_per_s as f32)),
+                                    out_color,
+                                ),
+                            ],
                             None,
-                            theme.warning,
                         ),
                     ))
                     .child(
@@ -3423,5 +3470,65 @@ mod tests {
         cx.run_until_parked();
         app.read_with(cx, |app, _| assert!(app.error.is_some()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
+    fn network_and_disk_tiles_show_both_directions(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        app.update(cx, |app, cx| {
+            for seq in 0..2u32 {
+                let k = seq as u64;
+                let frame = sysmon_proto::Frame {
+                    host_id: 1,
+                    boot_id: 1,
+                    seq,
+                    system: Some(sysmon_proto::SystemSample {
+                        ts_unix_ns: (1 + k) * 1_000_000_000,
+                        net: vec![sysmon_proto::NetIf {
+                            name: "eth0".into(),
+                            rx_bytes: k * 2048,
+                            tx_bytes: k * 1024,
+                            rx_packets: 0,
+                            tx_packets: 0,
+                        }],
+                        disks: vec![sysmon_proto::DiskStat {
+                            name: "sda".into(),
+                            sectors_read: k * 8,
+                            sectors_written: k * 16,
+                            io_ms: 0,
+                        }],
+                        ..Default::default()
+                    }),
+                    procs: vec![],
+                    threads: vec![],
+                    complete: true,
+                    received_ns: 0,
+                };
+                apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+            }
+            app.ensure_selection();
+            cx.notify();
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let d = |id: &'static str| window.find(id).description().map(|d| d.to_string());
+            assert_eq!(d("net-rx").as_deref(), Some("Network receive 2.0 KiB/s"));
+            assert_eq!(d("net-tx").as_deref(), Some("Network transmit 1.0 KiB/s"));
+            assert_eq!(d("disk-read").as_deref(), Some("Disk read 4.0 KiB/s"));
+            assert_eq!(d("disk-write").as_deref(), Some("Disk write 8.0 KiB/s"));
+        })
+        .unwrap();
+        // The history holds both directions separately, which the lines draw.
+        app.read_with(cx, |app, _| {
+            let p = app.live_hosts[&1].history.back().copied().unwrap();
+            assert_eq!(
+                (p.net_rx_bytes_per_s, p.net_tx_bytes_per_s),
+                (2048.0, 1024.0)
+            );
+            assert_eq!(
+                (p.disk_read_bytes_per_s, p.disk_write_bytes_per_s),
+                (4096.0, 8192.0)
+            );
+        });
     }
 }
