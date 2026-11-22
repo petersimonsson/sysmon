@@ -2,6 +2,7 @@
 //! monitors over UDP.
 
 mod collect;
+mod users;
 
 /// License notices of everything linked into this binary (see build.rs).
 static NOTICES: sysmon_notices::Notices = sysmon_notices::embed!();
@@ -89,7 +90,8 @@ fn main() -> anyhow::Result<()> {
     let interval = Duration::from_millis(args.interval_ms.max(10) as u64);
     let host_info_every = args.host_info_every.max(1);
     let mut known: HashMap<ProcKey, u32> = HashMap::new();
-    let mut passwd = collect::read_passwd();
+    let mut users = users::UserNames::spawn();
+    let mut sent_users: HashMap<u32, String> = HashMap::new();
     let mut procs = Vec::new();
     let mut threads = Vec::new();
     let mut next_tick = Instant::now();
@@ -117,21 +119,24 @@ fn main() -> anyhow::Result<()> {
         if host_tick {
             datagrams.push(host_info_datagram(host_id, boot_id, seq, &info)?);
             if seq % (host_info_every * 6) == 0 {
-                passwd = collect::read_passwd();
+                users.refresh();
             }
-            let mut uids: Vec<u32> = known.values().copied().collect();
-            uids.sort_unstable();
-            uids.dedup();
-            let users: Vec<UserName> = uids
-                .into_iter()
-                .filter_map(|uid| {
-                    passwd.get(&uid).map(|name| UserName {
-                        uid,
-                        name: name.clone(),
-                    })
-                })
-                .collect();
-            datagrams.extend(sysmon_proto::encode_users(host_id, boot_id, seq, &users)?);
+        }
+        // Names for the uids in use: with every HostInfo, and as soon as a
+        // lookup brings a new one, so users don't show as numbers for long.
+        let mut uids: Vec<u32> = known.values().copied().collect();
+        uids.sort_unstable();
+        uids.dedup();
+        let names: Vec<UserName> = uids
+            .into_iter()
+            .filter_map(|uid| users.get(uid).map(|name| UserName { uid, name }))
+            .collect();
+        let news = names
+            .iter()
+            .any(|u| sent_users.get(&u.uid) != Some(&u.name));
+        if host_tick || news {
+            datagrams.extend(sysmon_proto::encode_users(host_id, boot_id, seq, &names)?);
+            sent_users = names.into_iter().map(|u| (u.uid, u.name)).collect();
         }
         datagrams.extend(sysmon_proto::encode_proc_meta(
             host_id, boot_id, seq, &meta,

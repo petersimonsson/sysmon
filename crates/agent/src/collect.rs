@@ -3,7 +3,6 @@
 //! Everything here returns raw cumulative counters; rates are the monitor's job.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::MetadataExt;
@@ -32,19 +31,6 @@ fn with_file<T>(path: &str, f: impl FnOnce(&str) -> T) -> Option<T> {
         fs::File::open(path).ok()?.read_to_string(buf).ok()?;
         Some(f(buf))
     })
-}
-
-/// uid → user name from `/etc/passwd`.
-pub fn read_passwd() -> HashMap<u32, String> {
-    let s = fs::read_to_string("/etc/passwd").unwrap_or_default();
-    s.lines()
-        .filter_map(|l| {
-            let mut f = l.split(':');
-            let name = f.next()?;
-            let uid = f.nth(1)?.parse().ok()?;
-            Some((uid, name.to_string()))
-        })
-        .collect()
 }
 
 pub fn host_id() -> u64 {
