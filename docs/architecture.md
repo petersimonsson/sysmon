@@ -263,7 +263,10 @@ pub struct Frame {
     none are repeated. Without one, it starts with new lines (`--lines=0`).
     If journalctl fails at once with a saved cursor (the journal was
     vacuumed), the cursor is dropped.
-  - journalctl is started again 10 s after it exits.
+  - journalctl is started again 10 s after it exits, and stops when the
+    agent does, however it ends (`PR_SET_PDEATHSIG` on the reader thread
+    that starts it, which lives as long as the agent); before, one left by
+    an agent stopped outside systemd ran until its next matching line.
   - `--logs` refuses to start without `--key-file` unless
     `--logs-unencrypted` is given (see [Security](#security)).
   - Tested against the real journal with `logger`: warning and err arrive,
