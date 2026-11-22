@@ -125,6 +125,7 @@ binary to `/usr/local/bin`, the key to `/etc/sysmon/key`, put
 | `--max-gib N` | no limit | Delete the oldest recordings above N GiB |
 | `--replay PATH` | | Open a recording instead of listening |
 | `--speed N` | `1` | Replay speed |
+| `--licenses` | | Print all license notices and exit |
 
 ### The window
 
@@ -146,6 +147,9 @@ binary to `/usr/local/bin`, the key to `/etc/sysmon/key`, put
   - Hover over the chart to read the values at that moment.
   - Drag the divider above the panel to resize it.
 - **Times** are shown in your local time zone.
+- **Help → About sysmon** shows the version, sysmon's licenses, and the
+  license of every third-party crate built into the UI, with the full texts.
+  **Save all notices…** writes them all to one file.
 
 ### Recordings
 
@@ -217,6 +221,22 @@ feature, press keys, click and check the results. They need no display.
 The repository uses [jj](https://jj-vcs.github.io/jj/), colocated with git:
 start a piece of work with `jj new -m "<crate>: <what>"`, and see
 [docs/architecture.md](docs/architecture.md#version-control) for the rest.
+
+## Distributing binaries
+
+The licenses of the crates the UI is built from (MIT, Apache-2.0, BSD and
+others) require their notices to be shipped with the binary. They're built
+into `sysmon-ui` (see Help → About), and you can write them out to ship
+alongside it:
+
+```sh
+sysmon-ui --licenses > THIRD_PARTY_LICENSES.txt
+```
+
+`crates/ui/build.rs` collects them at build time from every crate linked
+into the binary, so the list is always current. `sysmon-agent` has far fewer
+dependencies, but doesn't have this yet; if you distribute it, include its
+dependencies' notices too (for example with `cargo about`).
 
 ## License
 

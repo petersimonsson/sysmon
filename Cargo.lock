@@ -7209,12 +7209,14 @@ dependencies = [
  "flume 0.11.1",
  "gpui-kit",
  "jiff",
+ "serde_json",
  "sysmon-ingest",
  "sysmon-model",
  "sysmon-proto",
  "sysmon-store",
  "tracing",
  "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]

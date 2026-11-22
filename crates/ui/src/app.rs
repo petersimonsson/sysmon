@@ -11,7 +11,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::AppMenuBar;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use sysmon_ingest::Event;
@@ -994,6 +994,21 @@ impl AppState {
         }
     }
 
+    fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The dialog's builder can run again; the view is created once here.
+        let view = cx.new(|cx| crate::about::AboutView::new(window, cx));
+        let focus = self.focus.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let focus = focus.clone();
+            dialog
+                .title("About sysmon")
+                .w(px(1000.))
+                .child(view.clone())
+                // Give the keyboard back to the app's shortcuts.
+                .on_close(move |_, window, cx| focus.focus(window, cx))
+        });
+    }
+
     fn set_metric(&mut self, metric: Metric, cx: &mut Context<Self>) {
         self.graph_metric = metric;
         self.graph_visible = true;
@@ -1398,6 +1413,7 @@ impl AppState {
                 }
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &About, window, cx| this.open_about(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleGraphPanel, _, cx| {
                 this.graph_visible = !this.graph_visible;
                 cx.notify();
@@ -2187,5 +2203,37 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("graph-panel").is_some());
         });
+    }
+
+    #[gpui_kit::test]
+    fn about_dialog_shows_notices_and_returns_focus(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        step(cx, &|window, cx| {
+            window.dispatch_action(Box::new(crate::actions::About), cx)
+        });
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("about").is_some(), "dialog open");
+            assert!(
+                window.try_find(("about-crate", 0usize)).is_some(),
+                "crate list"
+            );
+            assert!(window.try_find("about-text").is_some(), "license text");
+        });
+        step(cx, &|window, cx| window.click(("about-crate", 0usize), cx));
+        step(cx, &|window, cx| window.press("escape", cx));
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("about").is_none(), "Esc closes it");
+        });
+        // Single-key shortcuts work again once it's closed.
+        step(cx, &|window, cx| window.press("t", cx));
+        app.read_with(cx, |app, _| assert!(app.tree));
     }
 }

@@ -18,6 +18,11 @@ flume.workspace = true
 gpui-kit.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zstd.workspace = true
+
+[build-dependencies]
+serde_json = "1"
+zstd.workspace = true
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }

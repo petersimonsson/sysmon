@@ -308,6 +308,22 @@ agent or the monitor was offline) are skipped rather than waited out.
   - in the Recording view, a replay bar: play/pause, 1× to 256× speed, a
     timeline `Slider` that seeks on release, and start, position and end
     times.
+- **About and license notices:** Help → About opens a dialog with the
+  version, sysmon's licenses, and every third-party crate in the binary with
+  its license files (filterable, and savable as one document).
+  `sysmon-ui --licenses` prints the same document. `crates/ui/build.rs`
+  builds the list with `cargo metadata`:
+  - It follows only normal dependencies from `sysmon-ui`, skipping
+    proc-macro crates and everything under them, since none of that is
+    linked in.
+  - It collects files named LICENSE*, LICENCE*, COPYING*, NOTICE*,
+    COPYRIGHT* or UNLICENSE* anywhere in each package (which picks up
+    bundled code, such as zstd's C sources or the Lucide icons).
+  - For the few crates that publish no license file, it uses the standard
+    text of their declared license, labelled as such.
+  - Texts are deduplicated and zstd-compressed into the binary: about 1 MB
+    of text becomes about 40 KB. They're decompressed the first time
+    they're needed.
 - **Times** are shown in the system's local time zone (`TZ`, or
   `/etc/localtime`), with the UTC offset beside the sample time and the
   replay position. The offset is worked out per timestamp, so a recording

@@ -1,10 +1,12 @@
 //! sysmon-ui: receives agent datagrams, records them, and shows them live, or
 //! replays a recording.
 
+mod about;
 mod actions;
 mod app;
 mod format;
 mod graph;
+mod notices;
 mod pipeline;
 mod selection;
 mod widgets;
@@ -45,6 +47,10 @@ struct Args {
     /// Replay speed multiplier.
     #[arg(long, default_value_t = 1.0)]
     speed: f64,
+    /// Print sysmon's license and the license notices of all third-party
+    /// software in this binary, then exit.
+    #[arg(long)]
+    licenses: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -54,6 +60,14 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    if args.licenses {
+        use std::io::Write as _;
+        // A closed pipe (`--licenses | head`) is a normal way to stop reading.
+        return match std::io::stdout().write_all(notices::full_text().as_bytes()) {
+            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
+            _ => Ok(()),
+        };
+    }
     let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
 
     let start = match &args.replay {

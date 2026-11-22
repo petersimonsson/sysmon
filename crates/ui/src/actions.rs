@@ -47,6 +47,7 @@ actions!(
         GraphMem,
         GraphThreads,
         CycleGraphWindow,
+        About,
     ]
 );
 
@@ -270,7 +271,11 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Go to Start", SeekStart),
             MenuItem::action("Go to End", SeekEnd),
         ]),
-        Menu::new("Help").items([MenuItem::action("Keyboard Shortcuts", ToggleShortcuts)]),
+        Menu::new("Help").items([
+            MenuItem::action("Keyboard Shortcuts", ToggleShortcuts),
+            MenuItem::separator(),
+            MenuItem::action("About sysmon", About),
+        ]),
     ]
 }
 
