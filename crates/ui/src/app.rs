@@ -448,6 +448,20 @@ impl AppState {
         bar.child(div().flex_1())
             .when_some(self.error.clone(), |b, e| {
                 b.child(div().text_xs().text_color(theme.danger).child(e))
+                    .child(
+                        div()
+                            .id("error-dismiss")
+                            .test_support()
+                            .px_1()
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("×")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.error = None;
+                                cx.notify();
+                            })),
+                    )
             })
             .child(
                 Button::new("open")
@@ -1158,13 +1172,25 @@ impl AppState {
         Some(self.selections.entry((self.view, host)).or_default())
     }
 
+    /// Show (or, once a pick fits again, take down) the "graph is full" message.
     fn report_full(&mut self, result: Result<(), selection::Full>) {
+        let full = format!(
+            "At most {} processes can be graphed at once",
+            selection::MAX_SERIES
+        );
         if result.is_err() {
-            self.error = Some(format!(
-                "At most {} processes can be graphed at once",
-                selection::MAX_SERIES
-            ));
+            self.error = Some(full);
+        } else if self.error.as_ref() == Some(&full) {
+            self.error = None;
         }
+    }
+
+    fn clear_graph(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = self.selection_mut() {
+            s.clear();
+        }
+        self.report_full(Ok(()));
+        cx.notify();
     }
 
     /// A click on row `i` of `lines`: moves the cursor; Ctrl toggles the row
@@ -1360,12 +1386,7 @@ impl AppState {
                     .label("Clear")
                     .small()
                     .ghost()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(s) = this.selection_mut() {
-                            s.clear();
-                        }
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, _, cx| this.clear_graph(cx))),
             )
             .child(
                 Button::new("graph-hide")
@@ -1518,6 +1539,7 @@ impl AppState {
                                 if let Some(s) = this.selection_mut() {
                                     s.remove(key);
                                 }
+                                this.report_full(Ok(()));
                                 cx.notify();
                             })),
                     ),
@@ -1633,6 +1655,8 @@ impl AppState {
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
                 if this.show_shortcuts {
                     this.show_shortcuts = false;
+                } else if this.error.is_some() {
+                    this.error = None;
                 } else {
                     this.filter.update(cx, |f, cx| f.set_value("", window, cx));
                 }
@@ -1676,12 +1700,7 @@ impl AppState {
             .on_action(cx.listener(|this, _: &CursorPageUp, _, cx| this.move_cursor(-20, cx)))
             .on_action(cx.listener(|this, _: &CursorPageDown, _, cx| this.move_cursor(20, cx)))
             .on_action(cx.listener(|this, _: &ToggleGraph, _, cx| this.toggle_cursor(cx)))
-            .on_action(cx.listener(|this, _: &ClearGraph, _, cx| {
-                if let Some(s) = this.selection_mut() {
-                    s.clear();
-                }
-                cx.notify();
-            }))
+            .on_action(cx.listener(|this, _: &ClearGraph, _, cx| this.clear_graph(cx)))
             .on_action(cx.listener(|this, _: &About, window, cx| this.open_about(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleGraphPanel, _, cx| {
                 this.graph_visible = !this.graph_visible;
@@ -3088,5 +3107,71 @@ mod tests {
             let s = app.silence(&app.live_hosts[&1]).expect("silent");
             assert!(s >= 10_000_000_000);
         });
+    }
+
+    #[gpui_kit::test]
+    fn errors_can_be_dismissed_and_the_full_graph_one_clears_itself(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        app.update(cx, |app, cx| {
+            let procs = (1..=12u32)
+                .map(|pid| sysmon_proto::ProcSample {
+                    pid,
+                    ppid: 0,
+                    starttime: 0,
+                    state: b'S',
+                    utime: 0,
+                    stime: 0,
+                    rss_pages: 1,
+                    threads: 1,
+                    comm: format!("p{pid}"),
+                    vsize_bytes: None,
+                    shared_pages: None,
+                    kernel_thread: Some(false),
+                })
+                .collect();
+            let frame = sysmon_proto::Frame {
+                host_id: 1,
+                boot_id: 1,
+                seq: 0,
+                system: Some(sysmon_proto::SystemSample {
+                    ts_unix_ns: 1_000_000_000,
+                    ..Default::default()
+                }),
+                procs,
+                threads: vec![],
+                complete: true,
+                received_ns: 0,
+            };
+            apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+            app.ensure_selection();
+            cx.notify();
+        });
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                f(window, cx)
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        for i in 0..9usize {
+            step(cx, &move |w, cx| w.click(("pick", i), cx));
+        }
+        assert!(
+            app.read_with(cx, |a, _| a.error.is_some()),
+            "9th pick refused"
+        );
+        // Clearing the graph takes the message down.
+        step(cx, &|w, cx| w.press("ctrl-g", cx));
+        assert_eq!(app.read_with(cx, |a, _| a.error.clone()), None);
+
+        // Any error: the × and Esc dismiss it.
+        app.update(cx, |a, _| a.error = Some("boom".into()));
+        step(cx, &|w, cx| w.click("error-dismiss", cx));
+        assert_eq!(app.read_with(cx, |a, _| a.error.clone()), None);
+        app.update(cx, |a, _| a.error = Some("boom".into()));
+        step(cx, &|w, cx| w.press("escape", cx));
+        assert_eq!(app.read_with(cx, |a, _| a.error.clone()), None);
     }
 }
