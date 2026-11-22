@@ -115,6 +115,7 @@ impl Assembler {
                 seq: h.seq,
                 system: None,
                 procs: Vec::new(),
+                threads: Vec::new(),
                 complete: false,
             },
         });
@@ -125,8 +126,7 @@ impl Assembler {
         match msg {
             Msg::System(s) => partial.frame.system = Some(s),
             Msg::Procs(p) => partial.frame.procs.extend(p),
-            // Counted as a chunk; added to frames in the ingest change.
-            Msg::Threads(_) => {}
+            Msg::Threads(t) => partial.frame.threads.extend(t),
             _ => unreachable!(),
         }
 
@@ -229,6 +229,45 @@ mod tests {
         let (h, m) = dgrams[1].clone();
         a.push(h, m, now);
         assert!(frames(&mut a).is_empty());
+    }
+
+    #[test]
+    fn threads_are_collected_into_the_frame() {
+        let now = Instant::now();
+        let threads: Vec<_> = (0..300)
+            .map(|i| sysmon_proto::ThreadSample {
+                tgid: i % 10,
+                tid: 1000 + i,
+                starttime: 1,
+                state: b'S',
+                utime: 1,
+                stime: 1,
+                comm: "worker".into(),
+            })
+            .collect();
+        let dgrams: Vec<_> = encode_sample(9, 0, 1, &SystemSample::default(), &procs(50), &threads)
+            .unwrap()
+            .iter()
+            .map(|d| decode(d).unwrap())
+            .collect();
+        let mut a = Assembler::new(Duration::from_secs(1));
+        for (h, m) in dgrams.iter().cloned() {
+            a.push(h, m, now);
+        }
+        let out = frames(&mut a);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].complete);
+        assert_eq!((out[0].procs.len(), out[0].threads.len()), (50, 300));
+
+        // Losing a thread chunk makes the sample incomplete.
+        let mut a = Assembler::new(Duration::from_secs(1));
+        for (h, m) in dgrams.iter().take(dgrams.len() - 1).cloned() {
+            a.push(h, m, now);
+        }
+        a.flush_stale(now + Duration::from_secs(2));
+        let out = frames(&mut a);
+        assert!(!out[0].complete);
+        assert!(out[0].threads.len() < 300);
     }
 
     #[test]

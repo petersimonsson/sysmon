@@ -2003,6 +2003,7 @@ mod tests {
                     proc(11, 10, "vim"),
                     proc(20, 1, "sshd"),
                 ],
+                threads: Vec::new(),
                 complete: true,
             };
             apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));

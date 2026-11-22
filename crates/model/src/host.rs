@@ -409,6 +409,7 @@ mod tests {
                 ..Default::default()
             }),
             procs,
+            threads: Vec::new(),
             complete,
         })
     }
