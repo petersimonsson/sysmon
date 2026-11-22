@@ -1,0 +1,223 @@
+# sysmon
+
+A `top`-like system monitor split in two:
+
+- **`sysmon-agent`** runs on each machine you want to watch. It samples
+  `/proc` once a second and sends the raw counters over UDP. It's a single
+  small binary that depends only on libc.
+- **`sysmon-ui`** runs on your desktop. It receives data from any number of
+  agents, shows it live, and records it to disk so you can replay it later.
+
+The UI shows per-host CPU, memory, network and disk with short history
+graphs, and a process table you can sort, filter and view as a tree. You can
+pick processes (or whole subtrees) and graph their %CPU, RSS, %MEM or thread
+count over the last 10 minutes. Recordings replay at up to 256× speed with
+seeking.
+
+See [docs/architecture.md](docs/architecture.md) for how it works inside.
+
+## Requirements
+
+- **Rust 1.88 or newer** (the code uses edition 2024 and `let` chains).
+  Install it with [rustup](https://rustup.rs).
+- **Agent:** Linux (it reads `/proc`). Nothing else.
+- **UI:** developed and tested on Linux. It's built with
+  [gpui-kit](https://gpui-kit.com), which also supports macOS and Windows,
+  but those haven't been tried. On Linux it needs:
+  - a C compiler and `pkg-config` (to build the bundled zstd library);
+  - the development files for **xkbcommon** (with its X11 part), **xcb** and
+    **freetype**, which the UI links against;
+  - a **Vulkan** driver at run time, which gpui renders with.
+
+  Package names vary between distributions; these should cover it:
+
+  ```sh
+  # Debian / Ubuntu
+  sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev \
+      libxcb1-dev libfreetype-dev libvulkan1 mesa-vulkan-drivers
+
+  # Fedora
+  sudo dnf install gcc pkgconf-pkg-config libxkbcommon-devel libxkbcommon-x11-devel \
+      libxcb-devel freetype-devel vulkan-loader mesa-vulkan-drivers
+
+  # Arch
+  sudo pacman -S base-devel libxkbcommon libxkbcommon-x11 libxcb freetype2 \
+      vulkan-icd-loader   # plus vulkan-radeon, vulkan-intel or nvidia-utils
+  ```
+
+## Building
+
+```sh
+cargo build --release                     # everything
+cargo build --release -p sysmon-agent     # just the agent (fast, no GUI deps)
+cargo build --release -p sysmon-ui        # just the UI
+```
+
+The binaries end up in `target/release/`. The first UI build takes a while,
+because it compiles gpui.
+
+To get an agent you can copy to any x86-64 Linux machine, build it statically
+with musl:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+cargo build --release -p sysmon-agent --target x86_64-unknown-linux-musl
+# → target/x86_64-unknown-linux-musl/release/sysmon-agent
+```
+
+## Quick start
+
+To try it on one machine, run both halves locally:
+
+```sh
+cargo run --release -p sysmon-ui -- --listen 127.0.0.1:9876 &
+cargo run --release -p sysmon-agent -- --target 127.0.0.1:9876
+```
+
+The host shows up in the sidebar within a second.
+
+## Monitoring other machines
+
+1. **Make a shared key** and copy it to the monitoring machine and to every
+   agent. It's optional, but without it anyone who can reach the UDP port can
+   read your data and inject fake samples.
+
+   ```sh
+   sysmon-agent --generate-key sysmon.key     # 64 hex digits, mode 0600
+   ```
+
+2. **Start the UI** on the monitoring machine. Open UDP port 9876 in its
+   firewall.
+
+   ```sh
+   sysmon-ui --key-file sysmon.key
+   ```
+
+3. **Start an agent** on each machine to watch:
+
+   ```sh
+   sysmon-agent --target monitor.example:9876 --compress --key-file sysmon.key
+   ```
+
+   `--compress` roughly halves the bandwidth (about 9 KB per second for a host
+   with 500 processes). `--target` can be given several times to send to more
+   than one monitor.
+
+### Running the agent as a service
+
+`crates/agent/dist/sysmon-agent.service` is a sandboxed systemd unit. The
+comment at the top of the file has the install steps. In short: copy the
+binary to `/usr/local/bin`, the key to `/etc/sysmon/key`, put
+`SYSMON_TARGET=monitor.example:9876` in `/etc/default/sysmon-agent`, then
+`systemctl enable --now sysmon-agent`.
+
+## Using the UI
+
+### Command-line options
+
+| Option | Default | |
+|---|---|---|
+| `-l, --listen ADDR` | `0.0.0.0:9876` | UDP address to receive agents on |
+| `-k, --key-file PATH` | none | Accept only data encrypted with this key |
+| `-d, --data-dir DIR` | `~/.local/share/sysmon` | Where recordings are written |
+| `--no-record` | | Don't record |
+| `--keep-hours N` | keep all | Delete recordings older than N hours |
+| `--max-gib N` | no limit | Delete the oldest recordings above N GiB |
+| `--replay PATH` | | Open a recording instead of listening |
+| `--speed N` | `1` | Replay speed |
+
+### The window
+
+- **Sidebar:** one entry per host. The dot turns red when a host goes
+  silent. Click a host to show it.
+- **Header:** CPU, memory, network and disk for the selected host, each with
+  a short history graph, plus a bar for every core.
+- **Process table:**
+  - Click a column header to sort, and click it again to reverse.
+  - Type in the filter box to match command, user or an exact PID.
+  - **Tree** groups processes under their parent. Click ▾/▸ to collapse a
+    subtree; a collapsed row shows the subtree's total CPU and memory.
+- **Graphs:** pick up to 8 processes with the checkbox at the left of a row,
+  Ctrl+click, or Shift+click for a range. A panel opens below the table with
+  one line per process. Picking a collapsed tree row graphs the whole
+  subtree's total.
+  - Choose the metric (%CPU, RSS, %MEM, threads) and the time window (1, 5 or
+    10 minutes) at the top of the panel.
+  - Hover over the chart to read the values at that moment.
+  - Drag the divider above the panel to resize it.
+- **Times** are shown in your local time zone.
+
+### Recordings
+
+While listening, the UI records everything it receives, under
+`<data dir>/<host>/<boot>/<YYYY-MM-DDTHH>.seg`, with one file per host per
+hour (named in UTC). It goes on recording while you look at an old recording.
+
+To replay a recording, use **File → Open Recording…** (Ctrl+O), or start with
+`sysmon-ui --replay ~/.local/share/sysmon`. You can open the whole data
+directory, one host or boot directory, or a single `.seg` file. Use the
+replay bar at the bottom to play, pause, change speed and seek. Recordings
+from several hosts play back together, in the order they were received.
+
+### Keyboard
+
+Press **F1** or **?** in the app for the full list. The most useful ones:
+
+| Keys | |
+|---|---|
+| Ctrl+O, Ctrl+Q | Open recording, quit |
+| Ctrl+1, Ctrl+2 | Live view, Recording view |
+| Ctrl+↑ / Ctrl+↓ | Previous / next host |
+| Ctrl+F or `/` | Filter (Enter goes back to the list, Esc clears) |
+| ↑/↓ or `j`/`k` | Move the row cursor |
+| `g`, Ctrl+G | Graph the cursor row, clear the graph |
+| `1`–`4`, `w`, `v` | Graph %CPU / RSS / %MEM / threads, change window, show/hide graph |
+| `t`, `e`, `c` | Tree view, expand all, collapse all |
+| Shift+P / M / N / U / C | Sort by CPU / memory / PID / user / command |
+| Space, `[`, `]` | Play/pause, slower, faster |
+| ←/→, Shift+←/→, Home/End | Seek 10 s, 1 min, to start/end |
+
+Single-letter shortcuts are turned off while you type in the filter.
+
+## Command-line tools
+
+Two small programs let you look at the data without the UI:
+
+```sh
+# Print what arrives on a port (add a key file as the second argument if used)
+cargo run -p sysmon-ingest --example dump -- 0.0.0.0:9876 sysmon.key
+
+# Print a recording sample by sample, or its last sample as a process tree
+cargo run -p sysmon-model --example replay -- ~/.local/share/sysmon
+cargo run -p sysmon-model --example replay -- ~/.local/share/sysmon --tree
+```
+
+## Development
+
+The workspace has one crate per part:
+
+| Crate | |
+|---|---|
+| `crates/proto` | Wire format, chunking, compression and encryption |
+| `crates/agent` | The collector |
+| `crates/ingest` | UDP receiver and reassembly |
+| `crates/store` | Recording files, index and retention |
+| `crates/model` | Rates, history, process trees, graph series, replay engine |
+| `crates/ui` | The gpui-kit application |
+
+```sh
+cargo test --workspace                    # all tests, including headless UI tests
+cargo clippy --workspace --all-targets
+cargo fmt --all
+```
+
+The UI tests open real windows headlessly through gpui-kit's `test-support`
+feature, press keys, click and check the results. They need no display.
+
+The repository uses [jj](https://jj-vcs.github.io/jj/), colocated with git:
+start a piece of work with `jj new -m "<crate>: <what>"`, and see
+[docs/architecture.md](docs/architecture.md#version-control) for the rest.
+
+## License
+
+No license has been chosen yet.
