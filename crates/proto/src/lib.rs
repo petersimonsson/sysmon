@@ -22,8 +22,12 @@ pub use seal::{Key, Opener, Sealer};
 
 /// Magic bytes at the start of every datagram.
 pub const MAGIC: [u8; 2] = *b"SM";
-/// Current protocol version.
-pub const VERSION: u8 = 4;
+/// Newest protocol version. v5 added [`Msg::Logs`]; only log datagrams are
+/// sent as v5 (see [`version_of`]), so a v4 monitor still reads everything
+/// else and just rejects the logs.
+pub const VERSION: u8 = 5;
+/// The version samples and every message older than v5 are sent as.
+const BASE_VERSION: u8 = 4;
 /// Oldest version [`decode`] still reads.
 pub const MIN_VERSION: u8 = 1;
 /// Upper bound on encoded datagram size, chosen to fit common path MTUs.
@@ -67,6 +71,55 @@ pub enum Msg {
     Users(Vec<UserName>),
     /// Chunks after the processes of a sample, when the agent sends threads.
     Threads(Vec<ThreadSample>),
+    /// Journal lines (`sysmon-agent --logs`), standalone like `ProcMeta`.
+    /// Sent at least every few seconds, empty if nothing was logged, so the
+    /// monitor knows logs are on.
+    Logs(LogBatch),
+}
+
+/// The version a datagram carrying `msg` is sent as.
+pub fn version_of(msg: &Msg) -> u8 {
+    match msg {
+        Msg::Logs(_) => VERSION,
+        _ => BASE_VERSION,
+    }
+}
+
+/// Longest log message sent, in bytes; longer ones are cut and marked
+/// [`LogEntry::truncated`], so any entry fits in one datagram.
+pub const MAX_LOG_MESSAGE: usize = 800;
+/// Longest unit or identifier sent, in bytes.
+pub const MAX_LOG_NAME: usize = 64;
+
+/// Consecutive log lines from one agent run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogBatch {
+    /// Random per agent start: line numbers restart with it, so a new run
+    /// isn't mistaken for lost lines.
+    pub run: u64,
+    /// Number of `entries[0]` within the run; numbers count up by one per
+    /// line, so a jump means datagrams were lost.
+    pub first_seq: u64,
+    /// Lines the agent dropped (over its rate limit) before these.
+    pub dropped: u32,
+    pub entries: Vec<LogEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogEntry {
+    /// When it was logged, by the agent's wall clock (the journal's
+    /// `__REALTIME_TIMESTAMP`), nanoseconds since the Unix epoch.
+    pub ts_unix_ns: u64,
+    /// syslog priority: 0 emerg … 3 err, 4 warning, 5 notice, 6 info, 7 debug.
+    pub priority: u8,
+    /// `_SYSTEMD_UNIT`, if the line came from a unit.
+    pub unit: Option<String>,
+    /// `SYSLOG_IDENTIFIER`, else `_COMM`.
+    pub ident: String,
+    pub pid: Option<u32>,
+    pub message: String,
+    /// The message was cut to [`MAX_LOG_MESSAGE`].
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,7 +330,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub fn encode(header: &Header, msg: &Msg) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(MAX_DATAGRAM);
     out.extend_from_slice(&MAGIC);
-    out.push(VERSION);
+    out.push(version_of(msg));
     out.push(0); // flags
     let out = postcard::to_extend(&(header, msg), out)?;
     if out.len() > MAX_DATAGRAM {
@@ -374,6 +427,43 @@ pub fn encode_proc_meta(
     encode_standalone(host_id, boot_id, seq, meta, Msg::ProcMeta)
 }
 
+/// Encode a log batch as standalone datagrams, split so each fits in
+/// [`MAX_DATAGRAM`] (with `first_seq` and `dropped` adjusted per part). An
+/// empty batch is one datagram. Entries must respect [`MAX_LOG_MESSAGE`]
+/// and [`MAX_LOG_NAME`].
+pub fn encode_logs(
+    host_id: u64,
+    boot_id: u128,
+    seq: u32,
+    batch: &LogBatch,
+) -> Result<Vec<Vec<u8>>> {
+    let header = Header {
+        host_id,
+        boot_id,
+        seq,
+        chunk: 0,
+        chunks: 1,
+    };
+    // run, first_seq and dropped as varints, on top of the usual overhead.
+    let mut groups = pack_within(&batch.entries, ITEM_BUDGET - 25)?;
+    if groups.is_empty() {
+        groups.push(0..0);
+    }
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(i, range)| {
+            let part = LogBatch {
+                run: batch.run,
+                first_seq: batch.first_seq + range.start as u64,
+                dropped: if i == 0 { batch.dropped } else { 0 },
+                entries: batch.entries[range].to_vec(),
+            };
+            encode(&header, &Msg::Logs(part))
+        })
+        .collect()
+}
+
 /// Encode user names as standalone datagrams, like [`encode_proc_meta`].
 pub fn encode_users(
     host_id: u64,
@@ -404,13 +494,18 @@ fn encode_standalone<T: Serialize + Clone>(
         .collect()
 }
 
+/// Room for a message's items in one datagram: what's left after the
+/// worst-case varint header (10+19+5+3+3), enum tag and vec length, and
+/// room for encryption so sealed datagrams still fit.
+const ITEM_BUDGET: usize = MAX_DATAGRAM - (PREAMBLE_LEN + 48 + seal::SEAL_OVERHEAD);
+
 /// Split `items` into consecutive ranges whose encoding fits in one datagram.
 fn pack<T: Serialize>(items: &[T]) -> Result<Vec<std::ops::Range<usize>>> {
-    // Worst-case varint header (10+19+5+3+3) + enum tag + vec length, plus
-    // room for encryption so sealed datagrams still fit.
-    const OVERHEAD: usize = PREAMBLE_LEN + 48 + seal::SEAL_OVERHEAD;
-    let budget = MAX_DATAGRAM - OVERHEAD;
+    pack_within(items, ITEM_BUDGET)
+}
 
+/// [`pack`], with `budget` bytes for the items of each datagram.
+fn pack_within<T: Serialize>(items: &[T], budget: usize) -> Result<Vec<std::ops::Range<usize>>> {
     let mut groups = Vec::new();
     let mut start = 0;
     let mut size = 0;
@@ -451,6 +546,64 @@ mod tests {
             shared_pages: Some(100),
             kernel_thread: None,
         }
+    }
+
+    fn log_entry(i: usize, len: usize) -> LogEntry {
+        LogEntry {
+            ts_unix_ns: 1_000 + i as u64,
+            priority: 4,
+            unit: Some("x".repeat(MAX_LOG_NAME)),
+            ident: "y".repeat(MAX_LOG_NAME),
+            pid: Some(u32::MAX),
+            message: "m".repeat(len),
+            truncated: len == MAX_LOG_MESSAGE,
+        }
+    }
+
+    #[test]
+    fn log_batches_split_and_keep_their_numbering() {
+        let batch = LogBatch {
+            run: u64::MAX,
+            first_seq: u64::MAX / 2,
+            dropped: u32::MAX,
+            entries: (0..20).map(|i| log_entry(i, MAX_LOG_MESSAGE)).collect(),
+        };
+        let datagrams = encode_logs(u64::MAX, u128::MAX, u32::MAX, &batch).unwrap();
+        assert!(datagrams.len() > 1);
+        let mut next = batch.first_seq;
+        let mut entries = Vec::new();
+        for (i, d) in datagrams.iter().enumerate() {
+            // Sealed, the largest still fits.
+            assert!(d.len() + seal::SEAL_OVERHEAD <= MAX_DATAGRAM, "{}", d.len());
+            assert_eq!(d[2], VERSION, "logs go out as v5");
+            let (h, Msg::Logs(part)) = decode(d).unwrap() else {
+                panic!("not logs")
+            };
+            assert_eq!((h.chunk, h.chunks), (0, 1));
+            assert_eq!(part.run, batch.run);
+            assert_eq!(part.first_seq, next);
+            assert_eq!(part.dropped, if i == 0 { u32::MAX } else { 0 });
+            next += part.entries.len() as u64;
+            entries.extend(part.entries);
+        }
+        assert_eq!(entries, batch.entries);
+    }
+
+    #[test]
+    fn an_empty_log_batch_is_one_datagram_and_other_messages_stay_v4() {
+        let batch = LogBatch {
+            run: 1,
+            first_seq: 7,
+            dropped: 0,
+            entries: vec![],
+        };
+        let d = encode_logs(1, 2, 3, &batch).unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(decode(&d[0]).unwrap().1, Msg::Logs(batch));
+        // So a v4 monitor keeps reading samples from a v5 agent.
+        let sample = encode_sample(1, 2, 3, &SystemSample::default(), &[proc(1)], &[]).unwrap();
+        assert!(sample.iter().all(|d| d[2] == 4));
+        assert_eq!(encode_users(1, 2, 3, &[]).unwrap().len(), 0);
     }
 
     #[test]
@@ -527,8 +680,8 @@ mod tests {
             Err(Error::UnsupportedVersion(0))
         ));
         assert!(matches!(
-            decode(b"SM\x05\x00"),
-            Err(Error::UnsupportedVersion(5))
+            decode(b"SM\x06\x00"),
+            Err(Error::UnsupportedVersion(6))
         ));
     }
 

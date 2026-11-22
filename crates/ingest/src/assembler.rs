@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-use sysmon_proto::{Frame, Header, HostInfo, Msg, ProcMeta, UserName};
+use sysmon_proto::{Frame, Header, HostInfo, LogBatch, Msg, ProcMeta, UserName};
 
 /// A sample this many behind the newest one seen means the agent restarted
 /// (its first samples having been lost), rather than a late packet. UDP
@@ -12,9 +12,26 @@ const RESTART_GAP: u32 = 64;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Frame(Frame),
-    HostInfo { host_id: u64, info: HostInfo },
-    ProcMeta { host_id: u64, meta: Vec<ProcMeta> },
-    Users { host_id: u64, users: Vec<UserName> },
+    HostInfo {
+        host_id: u64,
+        info: HostInfo,
+    },
+    ProcMeta {
+        host_id: u64,
+        meta: Vec<ProcMeta>,
+    },
+    Users {
+        host_id: u64,
+        users: Vec<UserName>,
+    },
+    /// Journal lines. `received_ns` is the monitor's clock (the recorded
+    /// receive time when replaying), which playback seeks by.
+    Logs {
+        host_id: u64,
+        boot_id: u128,
+        batch: LogBatch,
+        received_ns: u64,
+    },
 }
 
 impl Event {
@@ -23,7 +40,8 @@ impl Event {
             Event::Frame(f) => f.host_id,
             Event::HostInfo { host_id, .. }
             | Event::ProcMeta { host_id, .. }
-            | Event::Users { host_id, .. } => *host_id,
+            | Event::Users { host_id, .. }
+            | Event::Logs { host_id, .. } => *host_id,
         }
     }
 }
@@ -85,6 +103,15 @@ impl Assembler {
                 self.out.push(Event::Users {
                     host_id: h.host_id,
                     users,
+                });
+                return;
+            }
+            Msg::Logs(batch) => {
+                self.out.push(Event::Logs {
+                    host_id: h.host_id,
+                    boot_id: h.boot_id,
+                    batch,
+                    received_ns: recv_ns,
                 });
                 return;
             }
@@ -319,6 +346,29 @@ mod tests {
         assert!(frames(&mut a).is_empty());
         a.flush_stale(now + Duration::from_secs(2));
         assert_eq!(frames(&mut a).len(), 1);
+    }
+
+    #[test]
+    fn log_batches_pass_straight_through() {
+        let mut a = Assembler::new(Duration::from_secs(1));
+        let batch = sysmon_proto::LogBatch {
+            run: 9,
+            first_seq: 0,
+            dropped: 0,
+            entries: vec![],
+        };
+        let d = sysmon_proto::encode_logs(1, 2, 3, &batch).unwrap();
+        let (h, m) = sysmon_proto::decode(&d[0]).unwrap();
+        a.push(h, m, Instant::now(), 77);
+        assert_eq!(
+            a.drain().collect::<Vec<_>>(),
+            [Event::Logs {
+                host_id: 1,
+                boot_id: 2,
+                batch,
+                received_ns: 77
+            }]
+        );
     }
 
     #[test]
