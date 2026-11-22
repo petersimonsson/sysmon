@@ -119,6 +119,12 @@ binary to `/usr/local/bin`, the key to `/etc/sysmon/key`, put
 `SYSMON_TARGET=monitor.example:9876` in `/etc/default/sysmon-agent`, then
 `systemctl enable --now sysmon-agent`.
 
+### Desktop entry
+
+`crates/ui/dist/sysmon.desktop` puts `sysmon-ui` in the desktop's
+application menu: copy it to `~/.local/share/applications/` (with
+`sysmon-ui` on your `PATH`).
+
 ## Using the UI
 
 ### Command-line options
@@ -137,8 +143,9 @@ binary to `/usr/local/bin`, the key to `/etc/sysmon/key`, put
 
 ### The window
 
-- **Sidebar:** one entry per host. The dot turns red when a host goes
-  silent. Click a host to show it.
+- **Sidebar:** one entry per host, by name. The dot turns red when the
+  monitor hasn't heard from a host for three intervals; a host silent for
+  an hour is dropped. Click a host to show it.
 - **Header:** CPU, memory, network and disk for the selected host, each with
   a short history graph, plus a bar for every core.
 - **Process table:** like htop, memory is shown as **VIRT** (virtual size),

@@ -163,6 +163,7 @@ pub struct Frame {
     pub procs: Vec<ProcSample>,
     pub threads: Vec<ThreadSample>,     // empty unless the agent sends threads
     pub complete: bool,                 // false if any chunk was missing
+    pub received_ns: u64,               // monitor clock: newest chunk received
 }
 ```
 
@@ -359,7 +360,15 @@ agent or the monitor was offline) are skipped rather than waited out.
   parent links, so children count only while they exist. Memory: a point
   is 56 bytes (unknown sizes use a sentinel rather than `Option`), so
   56 × processes × 600 per host, about 17 MB for 500 processes;
-- liveness: when the last sample was taken, and the incomplete-frame rate.
+- liveness: when the monitor last received a sample (`last_received_ns`,
+  from `Frame::received_ns`, the monitor-side receive time of the frame's
+  newest chunk; the recorded receive time when replaying), so a skewed
+  agent clock doesn't make a host look silent, or hide that it is; and the
+  incomplete-frame rate.
+
+Arithmetic on values from the network (CPU tick sums, `utime + stime`,
+pages × page size, memory used, collapsed-subtree totals) saturates, so a
+buggy or hostile agent can't overflow it (a panic in debug builds).
 
 ## 6. `sysmon-ui`: gpui-kit application
 
@@ -372,15 +381,25 @@ agent or the monitor was offline) are skipped rather than waited out.
 - **Bridges:** foreground tasks (`cx.spawn`) drain the live `Event` channel and
   the replay `Feed` channel. Each wakes on one item, drains the rest of the
   queue, and calls `cx.notify()` once per batch. A 200 ms ticker moves the
-  timeline slider and position while replaying.
+  timeline slider and position while replaying, redrawing only when the
+  status shown (position to the second, speed, paused) changed, so a paused
+  replay costs nothing.
+- **Live hosts are forgotten** after an hour of silence (their history and
+  graph selection with them), and at most 256 are kept, the longest silent
+  going first: each can hold tens of MB of history, and without a key anyone
+  can send under made-up host IDs.
+- **Window:** titled "sysmon", with app ID / WM_CLASS `sysmon` to match
+  `crates/ui/dist/sysmon.desktop`.
 - **Views** (built from `gpui_kit::component`):
   - a menu bar (File, View, Processes, Graph, Playback, Help). On Linux and
     Windows it's gpui-kit's in-window `AppMenuBar`; on macOS it's the native
     menu bar (`cx.set_menus`). Menu items show their shortcuts;
   - a toolbar with Live / Recording and Open recording… (the system file
-    picker, via `cx.prompt_for_paths`);
-  - a sidebar listing hosts with a liveness dot ("silent for N") and the
-    incomplete-frame rate;
+    picker, via `cx.prompt_for_paths`; the recording is opened on the
+    background executor, since that reads every segment's index), and any
+    error, dismissed with its × or Esc;
+  - a sidebar listing hosts by name, with a liveness dot ("silent for N")
+    and the incomplete-frame rate;
   - a header with CPU, memory, network and disk figures, each with a
     sparkline (canvas paths), plus per-core bars and host details;
   - a process table: a virtualized `uniform_list`, clickable column headers
@@ -404,7 +423,8 @@ agent or the monitor was offline) are skipped rather than waited out.
     user processes under it;
   - **threads** (Ctrl+H, off by default) come from `Snapshot::threads`. Each
     has its own %CPU from its own ticks and is carried over lost chunks like
-    a process. In the flat view they follow their process; in the tree
+    a process. They sort by %CPU, command or (for PID) TID in the chosen
+    direction, otherwise by TID. In the flat view they follow their process; in the tree
     they're its *first* children, so the guides already drawn for its real
     children stay right. Memory columns show `–` (they're the process's), and
     collapsed totals don't include threads. A thread matching the filter
