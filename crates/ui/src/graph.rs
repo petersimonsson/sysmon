@@ -113,6 +113,8 @@ pub struct ChartSpec {
     pub end_ns: u64,
     pub y_max: f32,
     pub hover_ns: Option<u64>,
+    /// A time to mark with a vertical line (the selected log line), and its colour.
+    pub mark: Option<(u64, Hsla)>,
     pub grid: Hsla,
     pub crosshair: Hsla,
 }
@@ -125,6 +127,7 @@ pub fn chart(spec: ChartSpec, bounds_out: ChartBounds) -> impl IntoElement {
         end_ns,
         y_max,
         hover_ns,
+        mark,
         grid,
         crosshair,
     } = spec;
@@ -167,6 +170,18 @@ pub fn chart(spec: ChartSpec, bounds_out: ChartBounds) -> impl IntoElement {
                     if let Ok(p) = p.build() {
                         window.paint_path(p, line.color);
                     }
+                }
+            }
+
+            if let Some((m, color)) = mark
+                && (start_ns..=end_ns).contains(&m)
+            {
+                let mx = x(m);
+                let mut p = PathBuilder::stroke(px(2.));
+                p.move_to(point(mx, bounds.origin.y));
+                p.line_to(point(mx, bounds.origin.y + bounds.size.height));
+                if let Ok(p) = p.build() {
+                    window.paint_path(p, color);
                 }
             }
 
