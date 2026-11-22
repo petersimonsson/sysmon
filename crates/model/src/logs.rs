@@ -154,28 +154,51 @@ pub struct LogMark {
     pub received_ns: u64,
 }
 
-/// Where the recording under `path` has errors, in time order. Only log
-/// datagrams are v5 or later, so everything else is skipped by its version
-/// byte without being decoded; this reads the whole recording, so run it in
-/// the background.
+/// Whether `msg` is a log batch with an error (err or worse) in it: what
+/// the timeline marks, and what the recorder marks blocks for.
+pub fn has_errors(msg: &Msg) -> bool {
+    matches!(msg, Msg::Logs(batch) if batch.entries.iter().any(|e| e.priority <= 3))
+}
+
+/// The marks in `records`.
+fn marks_in(records: impl IntoIterator<Item = sysmon_store::Record>, out: &mut Vec<LogMark>) {
+    for record in records {
+        // Only log datagrams are v5 or later: skip the rest undecoded.
+        if record.datagram.get(2).is_none_or(|&v| v < 5) {
+            continue;
+        }
+        if let Ok((h, msg)) = sysmon_proto::decode(&record.datagram)
+            && has_errors(&msg)
+        {
+            out.push(LogMark {
+                host_id: h.host_id,
+                received_ns: record.recv_ts_ns,
+            });
+        }
+    }
+}
+
+/// Where the recording under `path` has errors, in time order.
+///
+/// Segments record which of their blocks hold errors as they're written
+/// (`sysmon_store::marks`), so only those blocks are read. A segment from
+/// before that has no marks and is read in full, which takes 0.3-0.7 s per
+/// host-day; run this in the background.
 pub fn error_marks(path: &Path) -> std::io::Result<Vec<LogMark>> {
     let mut marks = Vec::new();
     for info in sysmon_store::list_segments(path)? {
-        let Ok(reader) = sysmon_store::SegmentReader::open(&info.path) else {
+        let Ok(mut reader) = sysmon_store::SegmentReader::open(&info.path) else {
             continue;
         };
-        for record in reader.map_while(Result::ok) {
-            if record.datagram.get(2).is_none_or(|&v| v < 5) {
-                continue;
+        match sysmon_store::marks::load(&info.path) {
+            Some(blocks) => {
+                for offset in blocks {
+                    if let Ok(records) = reader.block_at(offset) {
+                        marks_in(records, &mut marks);
+                    }
+                }
             }
-            if let Ok((h, Msg::Logs(batch))) = sysmon_proto::decode(&record.datagram)
-                && batch.entries.iter().any(|e| e.priority <= 3)
-            {
-                marks.push(LogMark {
-                    host_id: h.host_id,
-                    received_ns: record.recv_ts_ns,
-                });
-            }
+            None => marks_in(reader.map_while(Result::ok), &mut marks),
         }
     }
     marks.sort_by_key(|m| m.received_ns);
@@ -304,6 +327,14 @@ mod tests {
         put(2, t + 3 * S, logs(&warn, 2));
         rec.flush().unwrap();
         drop(rec);
+        // Recorded without marks: every segment is read in full.
+        for seg in sysmon_store::list_segments(&dir).unwrap() {
+            assert_eq!(
+                sysmon_store::marks::load(&seg.path).as_deref(),
+                Some(&[][..])
+            );
+            std::fs::remove_file(sysmon_store::marks::marks_path(&seg.path)).unwrap();
+        }
         let marks = error_marks(&dir).unwrap();
         assert_eq!(
             marks,
@@ -317,6 +348,39 @@ mod tests {
                     received_ns: t + 3 * S
                 }
             ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn marked_recordings_are_read_only_where_marked() {
+        let dir = std::env::temp_dir().join(format!("sysmon-marked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut rec = sysmon_store::Recorder::new(&dir);
+        let t = 1_700_000_000 * S;
+        let mut err = batch(1, 0, &["broke"]);
+        err.entries[0].priority = 3;
+        let d = sysmon_proto::encode_logs(1, 9, 0, &err).unwrap().remove(0);
+        let msg = sysmon_proto::decode(&d).unwrap().1;
+        assert!(has_errors(&msg));
+        let quiet = sysmon_proto::encode_logs(1, 9, 0, &batch(1, 1, &["fine"]))
+            .unwrap()
+            .remove(0);
+        assert!(!has_errors(&sysmon_proto::decode(&quiet).unwrap().1));
+        // The error is recorded marked; another error, recorded unmarked in
+        // a block of its own, shows that only marked blocks are read.
+        rec.append_marked(1, 9, t, &quiet, false).unwrap();
+        rec.append_marked(1, 9, t + S, &d, true).unwrap();
+        rec.flush().unwrap();
+        rec.append_marked(1, 9, t + 2 * S, &d, false).unwrap();
+        rec.flush().unwrap();
+        drop(rec);
+        assert_eq!(
+            error_marks(&dir).unwrap(),
+            [LogMark {
+                host_id: 1,
+                received_ns: t + S
+            }]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

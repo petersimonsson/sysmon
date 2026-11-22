@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crate::catalog::{HOUR_NS, list_segments};
 use crate::index::index_path;
+use crate::marks::marks_path;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Retention {
@@ -31,7 +32,8 @@ pub fn prune(data_dir: &Path, policy: &Retention, now_ns: u64) -> std::io::Resul
     let mut segments: Vec<_> = list_segments(data_dir)?
         .into_iter()
         .map(|s| {
-            let size = file_len(&s.path) + file_len(&index_path(&s.path));
+            let size =
+                file_len(&s.path) + file_len(&index_path(&s.path)) + file_len(&marks_path(&s.path));
             (s, size)
         })
         .collect();
@@ -56,6 +58,7 @@ pub fn prune(data_dir: &Path, policy: &Retention, now_ns: u64) -> std::io::Resul
         }
         std::fs::remove_file(&seg.path)?;
         let _ = std::fs::remove_file(index_path(&seg.path));
+        let _ = std::fs::remove_file(marks_path(&seg.path));
         report.removed_segments += 1;
         report.removed_bytes += size;
         report.kept_bytes -= size;

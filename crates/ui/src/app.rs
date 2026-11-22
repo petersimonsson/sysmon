@@ -4444,7 +4444,10 @@ mod tests {
             };
             if let Some(b) = log {
                 let d = sysmon_proto::encode_logs(1, 2, seq, &b).unwrap();
-                rec.append(1, 2, at, &d[0]).unwrap();
+                // Marked as the live recorder marks it.
+                let errors =
+                    sysmon_model::logs::has_errors(&sysmon_proto::decode(&d[0]).unwrap().1);
+                rec.append_marked(1, 2, at, &d[0], errors).unwrap();
             }
         }
         rec.flush().unwrap();

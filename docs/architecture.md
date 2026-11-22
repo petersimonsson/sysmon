@@ -327,6 +327,7 @@ pub struct Frame {
 ```
 <data_dir>/<host_id>/<boot_id>/<YYYY-MM-DDTHH>.seg   # one segment per host per hour (UTC)
 <data_dir>/<host_id>/<boot_id>/<YYYY-MM-DDTHH>.idx   # sparse time index
+<data_dir>/<host_id>/<boot_id>/<YYYY-MM-DDTHH>.marks # blocks with error log lines
 ```
 
 `data_dir` defaults to the platform data directory, e.g.
@@ -351,6 +352,14 @@ record := recv_ts_ns:u64le  len:u16le  datagram[len]
   readers trust only the prefix of entries that chains through the segment
   and scan any blocks after it, and the writer rewrites a stale index when it
   reopens a segment. Only the writer writes `.idx` files.
+- **Marks:** `<name>.marks` lists the offsets (u64le) of blocks holding a
+  record the caller marked (`append_marked`); sysmon's recorder marks log
+  batches with errors (`logs::has_errors`). It's created with its segment
+  and appended to after each marked block, unsynced: marks are hints that
+  readers check, and one lost in a crash only goes unmarked. A segment
+  without one (recorded before marks existed) must be read in full; the
+  writer doesn't start one for such a segment, as it would be incomplete.
+  Retention removes it with its segment.
 - **Catalog:** `list_segments` finds every segment under a directory and
   parses host, boot and hour from its path.
 - **Retention:** `prune` deletes whole hour files beyond a maximum age or total
@@ -567,8 +576,10 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
     timeline `Slider` that seeks on release, and start, position and end
     times. Red ticks under it mark where the selected host logged errors
     (err or worse), at most one per 1/500 of the timeline. They come from
-    `logs::error_marks`, a background scan of the whole recording that skips
-    every datagram older than v5 by its version byte.
+    `logs::error_marks`, run in the background, which reads only the blocks
+    each segment's `.marks` lists (6 hours: 70 → 0.9 ms). Segments without
+    marks are read in full, skipping every datagram older than v5 by its
+    version byte (0.3 s per host-day).
 - **About and license notices:** Help → About opens a dialog with the
   version, sysmon's licenses, and every third-party crate in the binary with
   its license files (filterable, and savable as one document).

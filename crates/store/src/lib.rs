@@ -7,6 +7,7 @@
 //! ```text
 //! <data_dir>/<host_id>/<boot_id>/<YYYY-MM-DDTHH>.seg   segment
 //! <data_dir>/<host_id>/<boot_id>/<YYYY-MM-DDTHH>.idx   sparse index (see `index`)
+//! <data_dir>/<host_id>/<boot_id>/<YYYY-MM-DDTHH>.marks marked blocks (see `marks`)
 //!
 //! file        := file_header block*
 //! file_header := "SMSEG" version:u8
@@ -17,6 +18,7 @@
 mod block;
 pub mod catalog;
 pub mod index;
+pub mod marks;
 mod reader;
 mod recorder;
 pub mod retention;
@@ -204,5 +206,83 @@ mod tests {
         let left = list_segments(&dir).unwrap();
         assert_eq!(left.len(), 1, "the current hour is never removed");
         assert_eq!(left[0].hour_start_ns, base + 4 * hour);
+    }
+
+    #[test]
+    fn marked_blocks_are_listed_and_can_be_read_alone() {
+        let dir = tmp_dir("marks");
+        let path = dir.join("m.seg");
+        {
+            let mut w = SegmentWriter::open(&path).unwrap();
+            // Three blocks; only the second holds a marked record.
+            for (i, marked) in [false, true, false].into_iter().enumerate() {
+                w.append_marked(i as u64 * SEC, b"plain", false).unwrap();
+                w.append_marked(i as u64 * SEC + 1, b"flagged", marked)
+                    .unwrap();
+                w.flush().unwrap();
+            }
+        }
+        let offsets = marks::load(&path).unwrap();
+        assert_eq!(offsets.len(), 1);
+        let mut r = SegmentReader::open(&path).unwrap();
+        let block = r.block_at(offsets[0]).unwrap();
+        assert_eq!(
+            block.iter().map(|r| r.recv_ts_ns).collect::<Vec<_>>(),
+            [SEC, SEC + 1]
+        );
+        // Reading on after block_at is unaffected.
+        assert_eq!(r.count(), 6);
+
+        // Reopened (a monitor restart in the same hour): marks go on.
+        {
+            let mut w = SegmentWriter::open(&path).unwrap();
+            w.append_marked(10 * SEC, b"again", true).unwrap();
+        }
+        assert_eq!(marks::load(&path).unwrap().len(), 2);
+        // An offset with no valid block (a crash's leftover) reads as nothing.
+        assert!(r_block_at_is_empty(&path, 3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn r_block_at_is_empty(path: &Path, offset: u64) -> bool {
+        SegmentReader::open(path)
+            .unwrap()
+            .block_at(offset)
+            .unwrap()
+            .is_empty()
+    }
+
+    #[test]
+    fn a_segment_from_before_marks_stays_without_them() {
+        let dir = tmp_dir("nomarks");
+        let path = dir.join("old.seg");
+        drop(SegmentWriter::open(&path).unwrap());
+        std::fs::remove_file(marks::marks_path(&path)).unwrap();
+        {
+            let mut w = SegmentWriter::open(&path).unwrap();
+            w.append_marked(SEC, b"x", true).unwrap();
+        }
+        // Readers must scan it: its marks would be incomplete.
+        assert_eq!(marks::load(&path), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pruning_removes_marks_too() {
+        let dir = tmp_dir("prunemarks");
+        let path = segment_path(&dir, 1, 2, SEC);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        {
+            let mut w = SegmentWriter::open(&path).unwrap();
+            w.append_marked(SEC, b"x", true).unwrap();
+        }
+        assert!(marks::marks_path(&path).exists());
+        let policy = Retention {
+            max_age: Some(Duration::from_secs(1)),
+            max_bytes: None,
+        };
+        prune(&dir, &policy, 10 * catalog::HOUR_NS).unwrap();
+        assert!(!marks::marks_path(&path).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

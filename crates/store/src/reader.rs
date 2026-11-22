@@ -89,6 +89,18 @@ impl SegmentReader {
         Ok(true)
     }
 
+    /// The records of the block at `offset` (a marked block's), or none if
+    /// there's no valid block there.
+    pub fn block_at(&mut self, offset: u64) -> Result<Vec<Record>> {
+        self.file.seek(SeekFrom::Start(offset))?;
+        let mut records = Vec::new();
+        if let Some(b) = block::read_block(&mut self.file, offset, &mut self.payload) {
+            block::decode_block(&self.payload, b.offset, &mut records)?;
+        }
+        self.file.seek(SeekFrom::Start(self.offset))?;
+        Ok(records)
+    }
+
     /// Resume reading after the end was reached, e.g. to follow a segment
     /// that is still being written.
     pub fn resume(&mut self) {

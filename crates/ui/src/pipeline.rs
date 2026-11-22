@@ -83,8 +83,16 @@ fn record(
             return;
         };
         // The header says which host and boot the datagram belongs to.
-        if let Ok((h, _)) = sysmon_proto::decode(&plain)
-            && let Err(e) = recorder.append(h.host_id, h.boot_id, raw.recv_ts_ns, &plain)
+        // Blocks with error log lines are marked, so opening a recording
+        // finds them for the timeline without reading all of it.
+        if let Ok((h, msg)) = sysmon_proto::decode(&plain)
+            && let Err(e) = recorder.append_marked(
+                h.host_id,
+                h.boot_id,
+                raw.recv_ts_ns,
+                &plain,
+                sysmon_model::logs::has_errors(&msg),
+            )
         {
             tracing::error!(error = %e, "recording failed");
         }
@@ -243,6 +251,55 @@ mod tests {
                 sysmon_proto::decode(d).unwrap()
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn error_log_lines_are_marked_as_they_are_recorded() {
+        let dir = std::env::temp_dir().join(format!("sysmon-ui-marks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let addr = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let (_events, recorder) = start_live(
+            addr,
+            sysmon_proto::Opener::new(None),
+            Some(Recording {
+                dir: dir.clone(),
+                retention: Default::default(),
+            }),
+        )
+        .unwrap();
+        let agent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let line = |first_seq, priority| sysmon_proto::LogBatch {
+            run: 1,
+            first_seq,
+            dropped: 0,
+            entries: vec![sysmon_proto::LogEntry {
+                ts_unix_ns: 1,
+                priority,
+                unit: None,
+                ident: "t".into(),
+                pid: None,
+                message: "m".into(),
+                truncated: false,
+            }],
+        };
+        for (seq, priority) in [(0, 4), (1, 3)] {
+            for d in sysmon_proto::encode_logs(1, 2, 0, &line(seq, priority)).unwrap() {
+                agent.send_to(&d, addr).unwrap();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        recorder.unwrap().stop(Duration::from_secs(2));
+        let seg = &sysmon_store::list_segments(&dir).unwrap()[0].path;
+        assert_eq!(sysmon_store::marks::load(seg).map(|m| m.len()), Some(1));
+        assert_eq!(
+            sysmon_model::logs::error_marks(&dir).unwrap().len(),
+            1,
+            "the err line"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
