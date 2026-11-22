@@ -176,5 +176,6 @@ mod tests {
         assert_eq!(frames, 3);
         let p = &host.snapshot.procs[0];
         assert_eq!((p.key.pid, p.cpu_pct), (42, 100.0));
+        assert_eq!((p.virt_kib, p.shr_kib), (None, None), "v1 has no VIRT/SHR");
     }
 }

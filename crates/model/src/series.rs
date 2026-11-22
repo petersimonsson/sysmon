@@ -14,23 +14,45 @@ use sysmon_proto::ProcKey;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Metric {
     Cpu,
+    Virt,
+    /// Resident memory, shown as RES.
     Rss,
+    Shr,
     MemPct,
     Threads,
 }
 
 impl Metric {
-    pub const ALL: [Metric; 4] = [Metric::Cpu, Metric::Rss, Metric::MemPct, Metric::Threads];
+    /// In the process table's column order.
+    pub const ALL: [Metric; 6] = [
+        Metric::Cpu,
+        Metric::Virt,
+        Metric::Rss,
+        Metric::Shr,
+        Metric::MemPct,
+        Metric::Threads,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Metric::Cpu => "%CPU",
-            Metric::Rss => "RSS",
+            Metric::Virt => "VIRT",
+            Metric::Rss => "RES",
+            Metric::Shr => "SHR",
             Metric::MemPct => "%MEM",
             Metric::Threads => "Threads",
         }
     }
+
+    /// Whether values are sizes in KiB.
+    pub fn is_size(self) -> bool {
+        matches!(self, Metric::Virt | Metric::Rss | Metric::Shr)
+    }
 }
+
+/// Stored in place of a size that isn't known (v1 agents, unreadable statm).
+/// A sentinel rather than `Option` keeps each history point 16 bytes smaller.
+pub const UNKNOWN: u64 = u64::MAX;
 
 /// What a graph line shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,6 +86,10 @@ pub struct ProcPoint {
     pub ppid: u32,
     pub cpu_pct: f32,
     pub rss_kib: u64,
+    /// [`UNKNOWN`] when not reported.
+    pub virt_kib: u64,
+    /// [`UNKNOWN`] when not reported.
+    pub shr_kib: u64,
     pub threads: u32,
 }
 
@@ -75,10 +101,13 @@ impl ProcFrame {
             .map(|i| &self.procs[i])
     }
 
-    fn value(&self, p: &ProcPoint, metric: Metric) -> f32 {
-        match metric {
+    fn value(&self, p: &ProcPoint, metric: Metric) -> Option<f32> {
+        let known = |v: u64| (v != UNKNOWN).then_some(v as f32);
+        Some(match metric {
             Metric::Cpu => p.cpu_pct,
+            Metric::Virt => return known(p.virt_kib),
             Metric::Rss => p.rss_kib as f32,
+            Metric::Shr => return known(p.shr_kib),
             Metric::MemPct => {
                 if self.mem_total_kib == 0 {
                     0.0
@@ -87,7 +116,7 @@ impl ProcFrame {
                 }
             }
             Metric::Threads => p.threads as f32,
-        }
+        })
     }
 
     /// The processes a target covers in this frame (a process, or a root
@@ -121,8 +150,13 @@ impl ProcFrame {
     /// The target's value in this frame (summed over a subtree), or `None`
     /// if it isn't present.
     pub fn sample(&self, target: SeriesTarget, metric: Metric) -> Option<f32> {
-        self.members_of(target)
-            .map(|ps| ps.iter().map(|p| self.value(p, metric)).sum())
+        // A subtree sums what's known; it's unknown only if nothing is.
+        let values: Vec<f32> = self
+            .members_of(target)?
+            .iter()
+            .filter_map(|p| self.value(p, metric))
+            .collect();
+        (!values.is_empty()).then(|| values.iter().sum())
     }
 
     /// How many processes the target covers in this frame.
@@ -158,6 +192,8 @@ mod tests {
             ppid,
             cpu_pct: cpu,
             rss_kib,
+            virt_kib: rss_kib * 10,
+            shr_kib: UNKNOWN,
             threads: 2,
         }
     }
@@ -231,6 +267,27 @@ mod tests {
         );
         assert_eq!(frames[1].members(t), 4);
         assert_eq!(frames[2].members(t), 0);
+    }
+
+    #[test]
+    fn sizes_and_unknown_values() {
+        let frames = [frame(
+            1,
+            1000,
+            vec![point(10, 1, 0.0, 100), point(11, 10, 0.0, 50)],
+        )];
+        let p10 = SeriesTarget::Process(key(10));
+        assert_eq!(series(&frames, p10, Metric::Virt), [(1, Some(1000.0))]);
+        assert_eq!(
+            series(&frames, p10, Metric::Shr),
+            [(1, None)],
+            "unknown is a gap"
+        );
+        let tree = SeriesTarget::Subtree(key(10));
+        assert_eq!(series(&frames, tree, Metric::Virt), [(1, Some(1500.0))]);
+        assert_eq!(series(&frames, tree, Metric::Shr), [(1, None)]);
+        assert!(Metric::Rss.is_size() && !Metric::MemPct.is_size());
+        assert_eq!(Metric::Rss.label(), "RES");
     }
 
     #[test]

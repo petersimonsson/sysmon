@@ -48,8 +48,20 @@ pub fn y_max(metric: Metric, lines: &[Line]) -> f32 {
         Metric::Cpu => nice_ceiling(max.max(100.0)),
         Metric::MemPct => nice_ceiling(max.max(1.0)),
         Metric::Threads => nice_ceiling(max.max(4.0)),
-        Metric::Rss => nice_ceiling(max.max(1024.0)),
+        Metric::Virt | Metric::Rss | Metric::Shr => nice_size_ceiling(max.max(1024.0)),
     }
+}
+
+/// Like [`nice_ceiling`] for sizes in KiB, in binary units, so the axis
+/// reads 500 MiB or 2 GiB rather than 9.5 GiB.
+pub fn nice_size_ceiling(kib: f32) -> f32 {
+    let mut unit = 1.0f32;
+    while kib / unit >= 1024.0 {
+        unit *= 1024.0;
+    }
+    let n = nice_ceiling(kib / unit);
+    // 1000 KiB would read oddly; go to the next unit instead.
+    if n >= 1000.0 { unit * 1024.0 } else { n * unit }
 }
 
 /// Split a line into runs of consecutive present values.
@@ -84,7 +96,7 @@ pub fn value_at(points: &[(u64, Option<f32>)], ts: u64) -> Option<f32> {
 pub fn format_value(metric: Metric, v: f32) -> String {
     match metric {
         Metric::Cpu | Metric::MemPct => format!("{v:.1}%"),
-        Metric::Rss => format::bytes(v as f64 * 1024.0),
+        Metric::Virt | Metric::Rss | Metric::Shr => format::bytes(v as f64 * 1024.0),
         Metric::Threads => format!("{v:.0}"),
     }
 }
@@ -183,7 +195,7 @@ pub fn chart(spec: ChartSpec, bounds_out: ChartBounds) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     // Explicit imports: the gpui glob would shadow `#[test]`.
-    use super::{Line, nice_ceiling, segments, value_at, y_max};
+    use super::{Line, nice_ceiling, nice_size_ceiling, segments, value_at, y_max};
     use gpui_kit::hsla;
     use sysmon_model::Metric;
 
@@ -195,6 +207,15 @@ mod tests {
         assert_eq!(nice_ceiling(101.0), 200.0);
         assert_eq!(nice_ceiling(0.12), 0.2);
         assert_eq!(nice_ceiling(7300.0), 10_000.0);
+    }
+
+    #[test]
+    fn size_axis_uses_binary_units() {
+        const MIB: f32 = 1024.0;
+        assert_eq!(nice_size_ceiling(300.0 * MIB), 500.0 * MIB);
+        assert_eq!(nice_size_ceiling(1.5 * MIB * 1024.0), 2.0 * MIB * 1024.0);
+        assert_eq!(nice_size_ceiling(900.0 * MIB), MIB * 1024.0);
+        assert_eq!(nice_size_ceiling(3.0), 5.0);
     }
 
     #[test]

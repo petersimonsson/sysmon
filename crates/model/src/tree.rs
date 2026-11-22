@@ -24,6 +24,8 @@ pub struct TreeLine {
     pub hidden: usize,
     pub hidden_cpu_pct: f32,
     pub hidden_rss_kib: u64,
+    /// Summed VIRT of the hidden rows that report it.
+    pub hidden_virt_kib: u64,
 }
 
 /// Arrange `rows` as a forest by `ppid`.
@@ -109,6 +111,7 @@ pub fn build(
             hidden: 0,
             hidden_cpu_pct: 0.0,
             hidden_rss_kib: 0,
+            hidden_virt_kib: 0,
         };
         if is_collapsed {
             let mut pending: Vec<usize> = kids.clone();
@@ -119,6 +122,7 @@ pub fn build(
                 line.hidden += 1;
                 line.hidden_cpu_pct += rows[d].cpu_pct;
                 line.hidden_rss_kib += rows[d].rss_kib;
+                line.hidden_virt_kib += rows[d].virt_kib.unwrap_or(0);
                 pending.extend(&children[d]);
             }
         } else {
@@ -148,6 +152,8 @@ mod tests {
             state: 'S',
             cpu_pct: cpu,
             rss_kib: 10,
+            virt_kib: Some(100),
+            shr_kib: None,
             threads: 1,
             comm: format!("p{pid}"),
             cmdline: None,
@@ -218,8 +224,13 @@ mod tests {
         let p10 = &lines[1];
         assert!(p10.collapsed);
         assert_eq!(
-            (p10.hidden, p10.hidden_cpu_pct, p10.hidden_rss_kib),
-            (2, 5.0, 20)
+            (
+                p10.hidden,
+                p10.hidden_cpu_pct,
+                p10.hidden_rss_kib,
+                p10.hidden_virt_kib
+            ),
+            (2, 5.0, 20, 200)
         );
     }
 

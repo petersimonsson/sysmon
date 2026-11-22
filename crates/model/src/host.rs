@@ -57,7 +57,13 @@ pub struct ProcRow {
     pub ppid: u32,
     pub state: char,
     pub cpu_pct: f32,
+    /// Resident memory (RES in htop).
     pub rss_kib: u64,
+    /// Virtual size (VIRT); `None` from v1 agents.
+    pub virt_kib: Option<u64>,
+    /// Resident shared memory (SHR); `None` from v1 agents, or if the agent
+    /// couldn't read it.
+    pub shr_kib: Option<u64>,
     pub threads: u32,
     pub comm: String,
     pub cmdline: Option<String>,
@@ -190,6 +196,8 @@ impl HostModel {
                     state: p.state as char,
                     cpu_pct: cpu,
                     rss_kib: p.rss_pages * page_kib,
+                    virt_kib: p.vsize_bytes.map(|b| b / 1024),
+                    shr_kib: p.shared_pages.map(|s| s * page_kib),
                     threads: p.threads,
                     comm: p.comm,
                     cmdline: meta.map(|m| m.cmdline.clone()),
@@ -234,6 +242,8 @@ impl HostModel {
                 ppid: r.ppid,
                 cpu_pct: r.cpu_pct,
                 rss_kib: r.rss_kib,
+                virt_kib: r.virt_kib.unwrap_or(series::UNKNOWN),
+                shr_kib: r.shr_kib.unwrap_or(series::UNKNOWN),
                 threads: r.threads,
             })
             .collect();
@@ -412,6 +422,9 @@ mod tests {
         let s = &m.snapshot;
         assert_eq!(s.cpu_pct, vec![75.0]);
         assert_eq!(s.procs[0].cpu_pct, 50.0);
+        // 4 KiB pages without HostInfo; VIRT arrives in bytes.
+        assert_eq!(s.procs[0].virt_kib, Some(1 << 20));
+        assert_eq!(s.procs[0].shr_kib, Some(400));
         assert_eq!(s.net[0].rx_bytes_per_s, 1000.0);
         assert_eq!(s.net[0].tx_bytes_per_s, 10.0);
         assert_eq!(s.disks[0].read_bytes_per_s, 1024.0);
