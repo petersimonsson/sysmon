@@ -4,6 +4,7 @@ description = "sysmon receiver: UDP socket, chunk reassembly and fan-out"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 sysmon-proto.workspace = true

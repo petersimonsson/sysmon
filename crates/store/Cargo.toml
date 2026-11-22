@@ -4,6 +4,7 @@ description = "sysmon on-disk recording: segment writer and reader"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 crc32fast.workspace = true

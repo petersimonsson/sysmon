@@ -4,6 +4,7 @@ description = "sysmon desktop monitor built with gpui-kit"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 sysmon-proto.workspace = true

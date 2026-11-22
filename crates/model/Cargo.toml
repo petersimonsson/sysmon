@@ -4,6 +4,7 @@ description = "sysmon state: rate computation, history and data sources"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 sysmon-proto.workspace = true
