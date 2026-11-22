@@ -21,15 +21,21 @@ const MAX_CMDLINE: usize = 512;
 thread_local! {
     /// One buffer reused for every `/proc` read, so steady-state sampling
     /// doesn't allocate per file.
-    static BUF: RefCell<String> = RefCell::new(String::with_capacity(64 * 1024));
+    static BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(64 * 1024));
 }
 
 /// Read a file into the shared buffer and run `f` on its contents.
+///
+/// The contents are decoded leniently: names in `/proc` (a process's or
+/// thread's `comm`, network interfaces, disks) are arbitrary bytes, and an
+/// unprivileged process can give itself a name that isn't UTF-8. Reading
+/// strictly would skip the whole file, hiding that process (or every
+/// interface) from the monitor. Invalid bytes become U+FFFD instead.
 fn with_file<T>(path: &str, f: impl FnOnce(&str) -> T) -> Option<T> {
     BUF.with_borrow_mut(|buf| {
         buf.clear();
-        fs::File::open(path).ok()?.read_to_string(buf).ok()?;
-        Some(f(buf))
+        fs::File::open(path).ok()?.read_to_end(buf).ok()?;
+        Some(f(&String::from_utf8_lossy(buf)))
     })
 }
 
@@ -316,9 +322,7 @@ fn hostname() -> String {
 }
 
 fn read_trimmed(path: &str) -> String {
-    fs::read_to_string(path)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    with_file(path, |s| s.trim().to_string()).unwrap_or_default()
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -330,6 +334,37 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn processes_with_non_utf8_names_are_listed() {
+        // Name a child process with a byte that isn't valid UTF-8, as any
+        // unprivileged process can (prctl PR_SET_NAME).
+        let mut child = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import ctypes, time; ctypes.CDLL(None).prctl(15, b'\\xffhidden', 0, 0, 0); time.sleep(5)",
+            ])
+            .spawn()
+            .expect("python3 for the test");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let found = loop {
+            let mut ps = Vec::new();
+            procs(&mut ps, None);
+            if let Some(p) = ps
+                .iter()
+                .find(|p| p.pid == child.id() && p.comm.ends_with("hidden"))
+            {
+                break Some(p.comm.clone());
+            }
+            if std::time::Instant::now() > deadline {
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        child.kill().ok();
+        child.wait().ok();
+        assert_eq!(found.as_deref(), Some("\u{FFFD}hidden"));
+    }
 
     #[test]
     fn parses_stat_with_awkward_comm() {
