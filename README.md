@@ -101,7 +101,10 @@ The host shows up in the sidebar within a second.
 
    `--compress` roughly halves the bandwidth (about 9 KB per second for a host
    with 500 processes). `--target` can be given several times to send to more
-   than one monitor.
+   than one monitor. Add `--threads` to send every thread as well, so the UI
+   can list them. That costs about 2.5× the agent's CPU and bandwidth
+   (measured with ~1700 threads: 17 ms and 26 KB per sample), so it's off by
+   default.
 
    **Upgrading:** update the monitor before the agents. A newer monitor reads
    data from older agents (and old recordings), but an older monitor rejects
@@ -147,9 +150,19 @@ binary to `/usr/local/bin`, the key to `/etc/sysmon/key`, put
     subtree; a collapsed row shows the subtree's total CPU, RES and VIRT.
     (Like htop's, these totals count memory shared between the processes
     more than once.)
+  - **Hide kernel threads** (on by default, Ctrl+K) leaves out the kernel's
+    own threads (`kthreadd` and its children), which are often most of the
+    list. The header and status line say how many there are.
+  - **Show threads** (off by default, Ctrl+H) lists each process's threads
+    under it, marked `↳`, with their own state and %CPU. Their memory is the
+    process's, so those columns show `–`. In the tree they're the first
+    children of their process. This needs agents started with `--threads`;
+    otherwise the status line says so.
+  - Thread names match the filter too. A process with a matching thread is
+    shown (dimmed) along with it.
 - **Graphs:** pick up to 8 processes with the checkbox at the left of a row,
   Ctrl+click, or Shift+click for a range. A panel opens below the table with
-  one line per process. Picking a collapsed tree row graphs the whole
+  one line per process (or thread). Picking a collapsed tree row graphs the whole
   subtree's total.
   - Choose the metric (%CPU, VIRT, RES, SHR, %MEM, threads) and the time window (1, 5 or
     10 minutes) at the top of the panel.
@@ -186,6 +199,7 @@ Press **F1** or **?** in the app for the full list. The most useful ones:
 | `g`, Ctrl+G | Graph the cursor row, clear the graph |
 | `1`–`6`, `w`, `v` | Graph %CPU / VIRT / RES / SHR / %MEM / threads, change window, show/hide graph |
 | `t`, `e`, `c` | Tree view, expand all, collapse all |
+| Ctrl+K, Ctrl+H | Hide/show kernel threads, show/hide threads |
 | Shift+P / V / M / S | Sort by CPU / VIRT / RES / SHR |
 | Shift+N / U / C | Sort by PID / user / command |
 | Space, `[`, `]` | Play/pause, slower, faster |

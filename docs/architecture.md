@@ -108,6 +108,7 @@ pub enum Msg {
     Procs(Vec<ProcSample>),     // chunks 1..n of a sample: whole process records
     ProcMeta(Vec<ProcMeta>),    // cmdline/uid for (pid, starttime)
     Users(Vec<UserName>),       // uid → name for the uids of running processes
+    Threads(Vec<ThreadSample>), // chunks after a sample's Procs, with `--threads`
 }
 ```
 
@@ -127,8 +128,12 @@ pub enum Msg {
   up, converting to the current types. Version 2 added
   `ProcSample::vsize_bytes` (VIRT) and `shared_pages` (SHR), both `Option`:
   `None` from v1 data, and SHR also `None` if a process exits between the
-  agent's two reads. Monitors must be upgraded before agents, since an older
-  monitor rejects newer versions.
+  agent's two reads. Version 3 added `ProcSample::kernel_thread` (the kernel's
+  `PF_KTHREAD` flag), `HostInfo::sends_threads`, and `Msg::Threads`
+  (`ThreadSample { tgid, tid, starttime, state, utime, stime, comm }`, keyed
+  by `(tid, starttime)`, which never collides with a process key). v1 and v2
+  are frozen in `proto::v1` and `proto::v2`. Monitors must be upgraded before
+  agents, since an older monitor rejects newer versions.
 - **Process identity** is `(pid, starttime)`, so a reused PID never merges two
   processes' histories.
 
@@ -143,6 +148,7 @@ pub struct Frame {
     pub seq: u32,
     pub system: Option<SystemSample>,   // None if chunk 0 was lost
     pub procs: Vec<ProcSample>,
+    pub threads: Vec<ThreadSample>,     // empty unless the agent sends threads
     pub complete: bool,                 // false if any chunk was missing
 }
 ```
@@ -160,8 +166,15 @@ pub struct Frame {
 - It tracks the set of known `(pid, starttime)` pairs to decide when to emit
   `ProcMeta`.
 - CLI (`clap`): `--target host:port` (repeatable), `--interval-ms`,
-  `--compress`, `--key-file`, `--generate-key <path>`, and `--licenses`
-  (third-party license notices; see section 6).
+  `--compress`, `--key-file`, `--generate-key <path>`, `--threads`, and
+  `--licenses` (third-party license notices; see section 6).
+- `kernel_thread` comes from the `flags` field of `stat`, which is already
+  read, so it costs nothing.
+- `--threads` (off by default) also reads `/proc/[pid]/task/*/stat` for every
+  user process with more than one thread, and sends all threads but the main
+  one, which is the process row. Measured with ~470 processes and ~1700
+  threads: 6.8 → 17 ms per sample, and 10.1 → 26.5 KB per sample
+  compressed.
 - Deployment: a static musl build
   (`rustup target add x86_64-unknown-linux-musl`, then
   `cargo build --release -p sysmon-agent --target x86_64-unknown-linux-musl`)
@@ -309,6 +322,19 @@ agent or the monitor was offline) are skipped rather than waited out.
     shows how many descendants it hides and their summed CPU and memory.
     When filtering, matches are shown with their ancestors (dimmed) so they
     keep their place. Expand all / Collapse all act on the selected host;
+  - **kernel threads** (`ProcRow::kernel_thread`: the agent's flag, or for
+    data older than v3, kthreadd and its children) are left out by default
+    (Ctrl+K); in the tree that's kthreadd's whole subtree, which never has
+    user processes under it;
+  - **threads** (Ctrl+H, off by default) come from `Snapshot::threads`. Each
+    has its own %CPU from its own ticks and is carried over lost chunks like
+    a process. In the flat view they follow their process; in the tree
+    they're its *first* children, so the guides already drawn for its real
+    children stay right. Memory columns show `–` (they're the process's), and
+    collapsed totals don't include threads. A thread matching the filter
+    keeps its process as dimmed context. Threads can be graphed
+    (`SeriesTarget::Thread`, %CPU only; history is a 24-byte `ThreadPoint`
+    per thread per sample);
   - **process graphs:** pick up to 8 rows with the checkbox column,
     Ctrl+click (toggle), Shift+click (range), or the row cursor (↑/↓, `j`/`k`)
     and `g`. Picking a collapsed tree row graphs its subtree's total. Picks
@@ -365,6 +391,7 @@ agent or the monitor was offline) are skipped rather than waited out.
   | Ctrl+F or `/` | Filter processes (Enter returns, Esc clears) |
   | ↑/↓ or `j`/`k`, PgUp/PgDn | Move the row cursor |
   | `t`, `e`, `c` | Tree view, expand all, collapse all |
+  | Ctrl+K, Ctrl+H | Hide/show kernel threads, show/hide threads |
   | `g`, Ctrl+G | Graph the cursor row (collapsed: its subtree), clear the graph |
   | `1`–`6`, `w`, `v` | Graph %CPU / VIRT / RES / SHR / %MEM / threads, cycle window, show/hide |
   | Shift+P / V / M / S | Sort by CPU / VIRT / RES / SHR (again flips) |
