@@ -1,5 +1,8 @@
 //! Text formatting for the UI.
 
+use jiff::tz::TimeZone;
+use jiff::{Timestamp, ZonedDateTime};
+
 pub fn bytes_per_s(v: f64) -> String {
     format!("{}/s", bytes(v))
 }
@@ -19,22 +22,36 @@ pub fn bytes(v: f64) -> String {
     }
 }
 
-/// `HH:MM:SS` in UTC.
-pub fn time_utc(ts_ns: u64) -> String {
-    let s = ts_ns / 1_000_000_000 % 86_400;
-    format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+/// A receive or sample timestamp in the system time zone (`TZ`, or
+/// `/etc/localtime`). The offset is worked out for that moment, so DST
+/// changes within a recording are right.
+fn local(ts_ns: u64) -> ZonedDateTime {
+    in_zone(ts_ns, TimeZone::system())
 }
 
-/// `YYYY-MM-DD HH:MM:SS` in UTC.
-pub fn datetime_utc(ts_ns: u64) -> String {
-    let path = sysmon_store::segment_path(std::path::Path::new(""), 0, 0, ts_ns);
-    let date = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .and_then(|s| s.split('T').next())
-        .unwrap_or_default()
-        .to_string();
-    format!("{date} {}", time_utc(ts_ns))
+fn in_zone(ts_ns: u64, tz: TimeZone) -> ZonedDateTime {
+    Timestamp::from_nanosecond(ts_ns as i128)
+        .unwrap_or(Timestamp::UNIX_EPOCH)
+        .to_zoned_datetime(tz)
+}
+
+/// `HH:MM:SS` in local time.
+pub fn time(ts_ns: u64) -> String {
+    local(ts_ns).strftime("%H:%M:%S").to_string()
+}
+
+/// `YYYY-MM-DD HH:MM:SS` in local time.
+pub fn datetime(ts_ns: u64) -> String {
+    local(ts_ns).strftime("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// The local zone's offset at that moment, e.g. `UTC+01:00`.
+pub fn utc_offset(ts_ns: u64) -> String {
+    offset_label(&local(ts_ns))
+}
+
+fn offset_label(t: &ZonedDateTime) -> String {
+    format!("UTC{}", t.strftime("%:z"))
 }
 
 pub fn duration(ns: u64) -> String {
@@ -57,9 +74,57 @@ mod tests {
         assert_eq!(bytes(512.0), "512 B");
         assert_eq!(bytes(1536.0), "1.5 KiB");
         assert_eq!(bytes_per_s(3.0 * 1024.0 * 1024.0), "3.0 MiB/s");
-        let ts = 1_795_332_065u64 * 1_000_000_000;
-        assert_eq!(datetime_utc(ts), "2026-11-22 07:21:05");
         assert_eq!(duration(3_725 * 1_000_000_000), "1h02m");
         assert_eq!(duration(65 * 1_000_000_000), "1m05s");
+    }
+
+    fn fmt(ts_ns: u64, tz: TimeZone) -> (String, String) {
+        let t = in_zone(ts_ns, tz);
+        (
+            t.strftime("%Y-%m-%d %H:%M:%S").to_string(),
+            offset_label(&t),
+        )
+    }
+
+    fn fixed(offset_s: i32) -> TimeZone {
+        TimeZone::fixed(jiff::tz::Offset::from_seconds(offset_s).unwrap())
+    }
+
+    #[test]
+    fn times_follow_the_zone() {
+        // 2026-11-22T07:21:05Z
+        let ts = 1_795_332_065u64 * 1_000_000_000;
+        assert_eq!(
+            fmt(ts, fixed(0)),
+            ("2026-11-22 07:21:05".into(), "UTC+00:00".into())
+        );
+        assert_eq!(
+            fmt(ts, fixed(3600)),
+            ("2026-11-22 08:21:05".into(), "UTC+01:00".into())
+        );
+        // Across midnight, and a half-hour zone.
+        assert_eq!(fmt(ts, fixed(-8 * 3600)).0, "2026-11-21 23:21:05");
+        assert_eq!(fmt(ts, fixed(5 * 3600 + 1800)).0, "2026-11-22 12:51:05");
+        // The public helpers use the system zone.
+        assert_eq!(datetime(ts), fmt(ts, TimeZone::system()).0);
+    }
+
+    #[test]
+    fn dst_is_applied_per_timestamp() {
+        // Needs the system tz database; skip where there isn't one.
+        let Ok(stockholm) = TimeZone::get("Europe/Stockholm") else {
+            eprintln!("no tz database; skipping");
+            return;
+        };
+        let winter = 1_795_332_065u64 * 1_000_000_000; // 2026-11-22T07:21:05Z
+        let summer = 1_782_907_200u64 * 1_000_000_000; // 2026-07-01T12:00:00Z
+        assert_eq!(
+            fmt(winter, stockholm.clone()),
+            ("2026-11-22 08:21:05".into(), "UTC+01:00".into())
+        );
+        assert_eq!(
+            fmt(summer, stockholm),
+            ("2026-07-01 14:00:00".into(), "UTC+02:00".into())
+        );
     }
 }

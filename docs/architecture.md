@@ -172,7 +172,7 @@ pub struct Frame {
 ### Files
 
 ```
-<data_dir>/<host_id>/<boot_id>/<YYYY-MM-DDTHH>.seg   # one segment per host per hour
+<data_dir>/<host_id>/<boot_id>/<YYYY-MM-DDTHH>.seg   # one segment per host per hour (UTC)
 <data_dir>/<host_id>/<boot_id>/<YYYY-MM-DDTHH>.idx   # sparse time index
 ```
 
@@ -307,7 +307,11 @@ agent or the monitor was offline) are skipped rather than waited out.
     divider above the panel to resize it;
   - in the Recording view, a replay bar: play/pause, 1× to 256× speed, a
     timeline `Slider` that seeks on release, and start, position and end
-    times (UTC).
+    times.
+- **Times** are shown in the system's local time zone (`TZ`, or
+  `/etc/localtime`), with the UTC offset beside the sample time and the
+  replay position. The offset is worked out per timestamp, so a recording
+  that spans a DST change reads correctly. Segment file names stay in UTC.
 - **Keyboard:** every command is a gpui action (`crates/ui/src/actions.rs`).
   `SHORTCUTS` is the single table that both binds the keys and fills the
   F1 / `?` overlay. The root element sets the `SysmonApp` key context and

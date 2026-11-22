@@ -631,9 +631,10 @@ impl AppState {
                                 )
                             }))
                             .child(format!(
-                                "{} processes · sample {}",
+                                "{} processes · sample {} ({})",
                                 s.procs.len(),
-                                format::datetime_utc(s.ts_unix_ns)
+                                format::datetime(s.ts_unix_ns),
+                                format::utc_offset(s.ts_unix_ns)
                             )),
                     ),
             )
@@ -1158,9 +1159,9 @@ impl AppState {
             .pl(px(64.))
             .text_xs()
             .text_color(theme.muted_foreground)
-            .child(format::time_utc(start))
-            .child(hover_ns.map(format::time_utc).unwrap_or_default())
-            .child(format::time_utc(end));
+            .child(format::time(start))
+            .child(hover_ns.map(format::time).unwrap_or_default())
+            .child(format::time(end));
         let chart = div()
             .flex()
             .flex_col()
@@ -1183,7 +1184,7 @@ impl AppState {
                 div()
                     .text_color(theme.muted_foreground)
                     .child(match hover_ns {
-                        Some(t) => format!("{} at {}", metric.label(), format::time_utc(t)),
+                        Some(t) => format!("{} at {}", metric.label(), format::time(t)),
                         None => format!("{} now", metric.label()),
                     }),
             );
@@ -1588,21 +1589,20 @@ impl AppState {
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(format::datetime_utc(st.start_ns)),
+                        .child(format::datetime(st.start_ns)),
                 )
                 .child(div().flex_1().child(Slider::new(&self.timeline)))
                 .child(
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(format::datetime_utc(st.end_ns)),
+                        .child(format::datetime(st.end_ns)),
                 )
-                .child(
-                    div()
-                        .text_sm()
-                        .font_family(mono.clone())
-                        .child(format::datetime_utc(st.position_ns)),
-                ),
+                .child(div().text_sm().font_family(mono.clone()).child(format!(
+                    "{} {}",
+                    format::datetime(st.position_ns),
+                    format::utc_offset(st.position_ns)
+                ))),
         )
     }
 }

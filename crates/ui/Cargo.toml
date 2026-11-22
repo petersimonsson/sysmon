@@ -11,6 +11,7 @@ sysmon-ingest.workspace = true
 sysmon-store.workspace = true
 sysmon-model.workspace = true
 anyhow.workspace = true
+jiff.workspace = true
 clap.workspace = true
 flume.workspace = true
 gpui-kit.workspace = true
