@@ -84,7 +84,15 @@ fn main() -> anyhow::Result<()> {
 
     let host_id = collect::host_id();
     let boot_id = collect::boot_id();
-    let info = collect::host_info(args.interval_ms, args.threads);
+    let interval_ms = effective_interval_ms(args.interval_ms);
+    if interval_ms != args.interval_ms {
+        tracing::warn!(
+            requested = args.interval_ms,
+            used = interval_ms,
+            "interval raised to the minimum"
+        );
+    }
+    let info = collect::host_info(interval_ms, args.threads);
     tracing::info!(
         host_id = format_args!("{host_id:016x}"),
         host = %info.hostname,
@@ -94,7 +102,7 @@ fn main() -> anyhow::Result<()> {
         "starting"
     );
 
-    let interval = Duration::from_millis(args.interval_ms.max(10) as u64);
+    let interval = Duration::from_millis(interval_ms as u64);
     let host_info_every = args.host_info_every.max(1);
     let mut known: HashMap<ProcKey, u32> = HashMap::new();
     let mut users = users::UserNames::spawn();
@@ -208,6 +216,14 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Shortest sampling interval. HostInfo reports the interval actually used,
+/// since the monitor judges a host silent after a few missed intervals.
+const MIN_INTERVAL_MS: u32 = 10;
+
+fn effective_interval_ms(requested: u32) -> u32 {
+    requested.max(MIN_INTERVAL_MS)
+}
+
 /// Longest user name sent; longer ones (only seen from odd directories) are
 /// cut, so they can't make the whole `Users` message too large to send.
 const MAX_USER_NAME: usize = 256;
@@ -313,7 +329,17 @@ fn unix_now_ns() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{NOTICES, Warnings, users_datagrams};
+    use super::{Args, NOTICES, Warnings, effective_interval_ms, users_datagrams};
+    use clap::Parser as _;
+
+    #[test]
+    fn host_info_reports_the_interval_used() {
+        let args = Args::parse_from(["sysmon-agent", "-t", "127.0.0.1:1", "-i", "0"]);
+        let used = effective_interval_ms(args.interval_ms);
+        assert_eq!(used, 10);
+        assert_eq!(crate::collect::host_info(used, false).interval_ms, 10);
+        assert_eq!(effective_interval_ms(1000), 1000);
+    }
     use sysmon_proto::{Msg, UserName};
 
     #[test]
