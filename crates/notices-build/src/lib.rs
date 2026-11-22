@@ -58,15 +58,32 @@ pub fn generate(root: &str) {
 
     let target = std::env::var("TARGET").unwrap();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let output = Command::new(cargo)
-        .args(["metadata", "--format-version", "1", "--offline", "--locked"])
-        .args(["--filter-platform", &target, "--manifest-path"])
-        .arg(manifest_dir.join("Cargo.toml"))
-        .output()
-        .expect("running cargo metadata");
+    let metadata = |offline: bool| {
+        Command::new(&cargo)
+            .args(["metadata", "--format-version", "1", "--locked"])
+            .args(offline.then_some("--offline"))
+            .args(["--filter-platform", &target, "--manifest-path"])
+            .arg(manifest_dir.join("Cargo.toml"))
+            .output()
+            .expect("running cargo metadata")
+    };
+    // Offline first: everything is normally downloaded already. But cargo
+    // metadata describes the whole workspace, so building one binary on its
+    // own (`cargo build -p sysmon-agent` in a fresh checkout) leaves the
+    // other crates' dependencies missing; then they're fetched, as the build
+    // itself just fetched its own.
+    let mut output = metadata(true);
+    let offline_build = std::env::var("CARGO_NET_OFFLINE").is_ok_and(|v| v == "true");
+    if !output.status.success() && !offline_build {
+        println!(
+            "cargo:warning=downloading the rest of the workspace's packages, which listing license notices needs"
+        );
+        output = metadata(false);
+    }
     if !output.status.success() {
         panic!(
-            "cargo metadata failed; license notices can't be collected:\n{}",
+            "cargo metadata failed; license notices can't be collected. \
+             If building offline, run `cargo fetch` first.\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
