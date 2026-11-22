@@ -1,7 +1,7 @@
 //! Top-level gpui entity: owns the live and replay host models and renders
 //! the toolbar, host list, header, process table and replay timeline.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -16,12 +16,14 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use sysmon_ingest::Event;
 use sysmon_model::{
-    Control, Feed, HISTORY_LEN, HostModel, ProcRow, ReplayHandle, ReplayStatus, TreeLine,
+    Control, Feed, HISTORY_LEN, HostModel, ProcRow, ReplayHandle, ReplayStatus, SeriesTarget,
+    TreeLine,
 };
 use sysmon_proto::ProcKey;
 
 use crate::actions::{self, *};
 use crate::format;
+use crate::selection::{self, Selection};
 use crate::widgets::{bar, sparkline};
 
 const ROW_HEIGHT: f32 = 20.;
@@ -38,7 +40,7 @@ pub struct Start {
     pub data_dir: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum View {
     Live,
     Replay,
@@ -74,6 +76,10 @@ pub struct AppState {
     /// Show processes as a tree grouped by parent.
     tree: bool,
     collapsed: HashSet<ProcKey>,
+    /// Processes picked for the graph, per view and host.
+    selections: HashMap<(View, u64), Selection>,
+    /// The highlighted row, moved with ↑/↓ and toggled into the graph with G.
+    cursor: Option<ProcKey>,
     filter: Entity<InputState>,
     timeline: Entity<SliderState>,
     scrubbing: bool,
@@ -192,6 +198,8 @@ impl AppState {
             sort: (SortKey::Cpu, true),
             tree: false,
             collapsed: HashSet::new(),
+            selections: HashMap::new(),
+            cursor: None,
             filter,
             timeline,
             scrubbing: false,
@@ -663,6 +671,12 @@ impl AppState {
         let mono = theme.mono_font_family.clone();
         let rows = Rc::new(self.table_lines(host, cx));
         let this = cx.entity().downgrade();
+        let picked: Rc<HashMap<ProcKey, usize>> = Rc::new(
+            self.selection()
+                .map(|s| s.iter().map(|p| (p.target.key(), p.slot)).collect())
+                .unwrap_or_default(),
+        );
+        let cursor = self.cursor;
         let mem_total = host.snapshot.mem.total.max(1) as f32;
 
         let (sort_key, desc) = self.sort;
@@ -696,6 +710,7 @@ impl AppState {
             .text_color(theme.muted_foreground)
             .border_b_1()
             .border_color(theme.border)
+            .child(div().w(px(14.)))
             .child(header_cell(SortKey::Pid, "PID", Some(64.), cx))
             .child(header_cell(SortKey::User, "USER", Some(80.), cx))
             .child(div().w(px(16.)).child("S"))
@@ -712,7 +727,27 @@ impl AppState {
                     let line = &rows[i];
                     let p = &line.row;
                     let dim = p.stale || line.tree.as_ref().is_some_and(|t| !t.matched);
+                    let slot = picked.get(&p.key).copied();
+                    let on_row = {
+                        let (this, rows) = (this.clone(), rows.clone());
+                        move |ev: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            let m = ev.modifiers();
+                            let _ = this.update(cx, |app, cx| {
+                                app.row_clicked(&rows, i, m.control || m.platform, m.shift, cx)
+                            });
+                        }
+                    };
+                    let on_pick = {
+                        let (this, target) = (this.clone(), line.target());
+                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            cx.stop_propagation();
+                            let _ = this.update(cx, |app, cx| app.toggle_pick(target, cx));
+                        }
+                    };
                     div()
+                        .id(("row", i))
+                        .test_support()
+                        .on_click(on_row)
                         .flex()
                         .gap_2()
                         .px_2()
@@ -721,7 +756,27 @@ impl AppState {
                         .text_xs()
                         .font_family(mono.clone())
                         .when(i % 2 == 1, |d| d.bg(theme.muted.opacity(0.3)))
+                        .when(cursor == Some(p.key), |d| d.bg(theme.accent))
                         .when(dim, |d| d.text_color(theme.muted_foreground))
+                        .child(
+                            // Graph checkbox; filled with the line's colour when picked.
+                            div()
+                                .id(("pick", i))
+                                .test_support()
+                                .flex_none()
+                                .size(px(10.))
+                                .mx(px(2.))
+                                .rounded_sm()
+                                .border_1()
+                                .cursor_pointer()
+                                .map(|d| match slot {
+                                    Some(s) => {
+                                        d.bg(selection::color(s)).border_color(selection::color(s))
+                                    }
+                                    None => d.border_color(theme.muted_foreground),
+                                })
+                                .on_click(on_pick),
+                        )
                         .child(div().w(px(64.)).child(p.key.pid.to_string()))
                         .child(
                             div().w(px(80.)).overflow_hidden().child(
@@ -804,11 +859,110 @@ impl AppState {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("{count} shown")),
+                            .child(match self.selection().filter(|s| !s.is_empty()) {
+                                Some(sel) => format!("{count} shown · {} graphed", sel.len()),
+                                None => format!("{count} shown"),
+                            }),
                     ),
             )
             .child(header)
             .child(list)
+    }
+
+    fn selection(&self) -> Option<&Selection> {
+        self.selected
+            .and_then(|host| self.selections.get(&(self.view, host)))
+    }
+
+    fn selection_mut(&mut self) -> Option<&mut Selection> {
+        let host = self.selected?;
+        Some(self.selections.entry((self.view, host)).or_default())
+    }
+
+    fn report_full(&mut self, result: Result<(), selection::Full>) {
+        if result.is_err() {
+            self.error = Some(format!(
+                "At most {} processes can be graphed at once",
+                selection::MAX_SERIES
+            ));
+        }
+    }
+
+    /// A click on row `i` of `lines`: moves the cursor; Ctrl toggles the row
+    /// in the graph, Shift adds the range from the last toggled row.
+    fn row_clicked(
+        &mut self,
+        lines: &[Line],
+        i: usize,
+        ctrl: bool,
+        shift: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(line) = lines.get(i) else {
+            return;
+        };
+        self.cursor = Some(line.row.key);
+        let result = if shift {
+            let anchor = self
+                .selection()
+                .and_then(|s| s.anchor)
+                .and_then(|a| lines.iter().position(|l| l.row.key == a))
+                .unwrap_or(i);
+            let (lo, hi) = (anchor.min(i), anchor.max(i));
+            let targets: Vec<_> = lines[lo..=hi].iter().map(Line::target).collect();
+            self.selection_mut().map(|s| s.add_all(targets))
+        } else if ctrl {
+            self.selection_mut().map(|s| s.toggle(line.target()))
+        } else {
+            None
+        };
+        if let Some(r) = result {
+            self.report_full(r);
+        }
+        cx.notify();
+    }
+
+    fn toggle_pick(&mut self, target: SeriesTarget, cx: &mut Context<Self>) {
+        if let Some(r) = self.selection_mut().map(|s| s.toggle(target)) {
+            self.report_full(r);
+        }
+        cx.notify();
+    }
+
+    /// Move the cursor by `delta` rows in the table's current order.
+    fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(host) = self.selected.and_then(|id| self.hosts().get(&id)) else {
+            return;
+        };
+        let lines = self.table_lines(host, cx);
+        if lines.is_empty() {
+            return;
+        }
+        let pos = self
+            .cursor
+            .and_then(|c| lines.iter().position(|l| l.row.key == c));
+        let next = match pos {
+            None => 0,
+            Some(p) => (p as isize + delta).clamp(0, lines.len() as isize - 1) as usize,
+        };
+        self.cursor = Some(lines[next].row.key);
+        self.scroll.scroll_to_item(next, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// Toggle the cursor row in the graph.
+    fn toggle_cursor(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = self.selected.and_then(|id| self.hosts().get(&id)) else {
+            return;
+        };
+        let lines = self.table_lines(host, cx);
+        if let Some(line) = self
+            .cursor
+            .and_then(|c| lines.iter().find(|l| l.row.key == c))
+        {
+            let target = line.target();
+            self.toggle_pick(target, cx);
+        }
     }
 
     /// Sort by `key`, or flip the direction if already sorted by it.
@@ -924,6 +1078,17 @@ impl AppState {
             .on_action(
                 cx.listener(|this, _: &SortByCommand, _, cx| this.sort_by(SortKey::Command, cx)),
             )
+            .on_action(cx.listener(|this, _: &CursorUp, _, cx| this.move_cursor(-1, cx)))
+            .on_action(cx.listener(|this, _: &CursorDown, _, cx| this.move_cursor(1, cx)))
+            .on_action(cx.listener(|this, _: &CursorPageUp, _, cx| this.move_cursor(-20, cx)))
+            .on_action(cx.listener(|this, _: &CursorPageDown, _, cx| this.move_cursor(20, cx)))
+            .on_action(cx.listener(|this, _: &ToggleGraph, _, cx| this.toggle_cursor(cx)))
+            .on_action(cx.listener(|this, _: &ClearGraph, _, cx| {
+                if let Some(s) = this.selection_mut() {
+                    s.clear();
+                }
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &TogglePause, _, _| {
                 if this.view == View::Replay {
                     this.control(Control::TogglePause);
@@ -1130,6 +1295,17 @@ struct Line {
     tree: Option<TreeLine>,
 }
 
+impl Line {
+    /// What picking this row graphs: its whole subtree when it's a collapsed
+    /// tree node, otherwise just the process.
+    fn target(&self) -> SeriesTarget {
+        match &self.tree {
+            Some(t) if t.collapsed && t.has_children => SeriesTarget::Subtree(self.row.key),
+            _ => SeriesTarget::Process(self.row.key),
+        }
+    }
+}
+
 /// The COMMAND cell: in tree mode, guide lines, a clickable expand/collapse
 /// marker, and a summary of what a collapsed subtree hides.
 fn command_cell(
@@ -1153,6 +1329,7 @@ fn command_cell(
         let this = this.clone();
         div()
             .id(("twisty", i))
+            .test_support()
             .flex_none()
             .w(px(14.))
             .cursor_pointer()
@@ -1167,7 +1344,11 @@ fn command_cell(
                 });
             })
     } else {
-        div().id(("twisty", i)).flex_none().w(px(14.))
+        div()
+            .id(("twisty", i))
+            .test_support()
+            .flex_none()
+            .w(px(14.))
     };
     cell.child(
         div()
@@ -1264,6 +1445,19 @@ impl Render for AppState {
 mod tests {
     // Explicit imports: the gpui glob would shadow `#[test]`.
     use super::{AppState, SortKey, Start, View, apply};
+    use gpui_kit::Modifiers;
+    use sysmon_model::SeriesTarget;
+    use sysmon_proto::ProcKey;
+
+    fn picked(app: &AppState) -> Vec<SeriesTarget> {
+        app.selection()
+            .map(|s| s.iter().map(|p| p.target).collect())
+            .unwrap_or_default()
+    }
+
+    fn key(pid: u32) -> ProcKey {
+        ProcKey { pid, starttime: 0 }
+    }
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
         AnyWindowHandle, AppContext as _, Bounds, Entity, TestAppContext, WindowBounds,
@@ -1347,12 +1541,30 @@ mod tests {
     /// Give the app one live host so the process table (and its filter) renders.
     fn add_host(app: &Entity<AppState>, cx: &mut TestAppContext) {
         app.update(cx, |app, cx| {
+            // 1 ─┬─ 10 ── 11
+            //    └─ 20
+            let proc = |pid: u32, ppid: u32, comm: &str| sysmon_proto::ProcSample {
+                pid,
+                ppid,
+                starttime: 0,
+                state: b'S',
+                utime: 0,
+                stime: 0,
+                rss_pages: pid as u64,
+                threads: 1,
+                comm: comm.into(),
+            };
             let frame = sysmon_proto::Frame {
                 host_id: 1,
                 boot_id: 1,
                 seq: 0,
                 system: Some(sysmon_proto::SystemSample::default()),
-                procs: Vec::new(),
+                procs: vec![
+                    proc(1, 0, "init"),
+                    proc(10, 1, "bash"),
+                    proc(11, 10, "vim"),
+                    proc(20, 1, "sshd"),
+                ],
                 complete: true,
             };
             apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
@@ -1393,6 +1605,107 @@ mod tests {
         step(cx, &|window, cx| window.press("escape", cx));
         app.read_with(cx, |app, cx| {
             assert_eq!(app.filter.read(cx).value().as_ref(), "")
+        });
+    }
+
+    #[gpui_kit::test]
+    fn rows_are_picked_by_checkbox_ctrl_and_shift_click(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        let ctrl = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        let shift = Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        // Rows sort by CPU (all equal here), then PID: 1, 10, 11, 20.
+        step(cx, &|window, cx| window.click(("pick", 0usize), cx));
+        step(cx, &|window, cx| {
+            window.click_with_modifiers(("row", 2usize), ctrl, cx)
+        });
+        app.read_with(cx, |app, _| {
+            assert_eq!(
+                picked(app),
+                [
+                    SeriesTarget::Process(key(1)),
+                    SeriesTarget::Process(key(11))
+                ]
+            );
+            assert_eq!(app.cursor, Some(key(11)));
+        });
+
+        // A plain click only moves the cursor.
+        step(cx, &|window, cx| window.click(("row", 3usize), cx));
+        app.read_with(cx, |app, _| {
+            assert_eq!(picked(app).len(), 2);
+            assert_eq!(app.cursor, Some(key(20)));
+        });
+
+        // Picks are by process, so they survive re-sorting.
+        step(cx, &|window, cx| window.press("shift-m", cx)); // RSS, largest first: 20, 11, 10, 1
+        step(cx, &|window, cx| {
+            window.click_with_modifiers(("row", 0usize), ctrl, cx)
+        });
+        app.read_with(cx, |app, _| {
+            assert_eq!(picked(app).len(), 3);
+            assert!(picked(app).contains(&SeriesTarget::Process(key(20))));
+        });
+
+        // Shift+click adds the range from the last toggled row (20 at row 0).
+        step(cx, &|window, cx| {
+            window.click_with_modifiers(("row", 2usize), shift, cx)
+        });
+        app.read_with(cx, |app, _| assert_eq!(picked(app).len(), 4));
+
+        step(cx, &|window, cx| window.press("ctrl-g", cx));
+        app.read_with(cx, |app, _| assert!(picked(app).is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn g_graphs_the_cursor_row_and_a_collapsed_row_as_its_subtree(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        step(cx, &|window, cx| {
+            window.press("down", cx); // cursor on row 0 (pid 1)
+            window.press("down", cx); // pid 10
+            window.press("g", cx);
+        });
+        app.read_with(cx, |app, _| {
+            assert_eq!(picked(app), [SeriesTarget::Process(key(10))])
+        });
+
+        // In tree view, collapse pid 10 and pick it again: now its subtree.
+        step(cx, &|window, cx| {
+            window.press("g", cx); // unpick
+            window.press("t", cx);
+        });
+        // Tree order: 1, 10, 11, 20; row 1 is pid 10.
+        step(cx, &|window, cx| window.click(("twisty", 1usize), cx));
+        step(cx, &|window, cx| window.press("g", cx));
+        app.read_with(cx, |app, _| {
+            assert_eq!(picked(app), [SeriesTarget::Subtree(key(10))]);
+            assert_eq!(
+                app.hosts()[&1].latest(
+                    SeriesTarget::Subtree(key(10)),
+                    sysmon_model::Metric::Threads
+                ),
+                Some((2.0, 2)),
+                "pid 10 and its child 11"
+            );
         });
     }
 }

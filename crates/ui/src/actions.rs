@@ -35,6 +35,12 @@ actions!(
         SortByUser,
         SortByCommand,
         ToggleShortcuts,
+        CursorUp,
+        CursorDown,
+        CursorPageUp,
+        CursorPageDown,
+        ToggleGraph,
+        ClearGraph,
     ]
 );
 
@@ -112,6 +118,24 @@ pub const SHORTCUTS: &[Shortcut] = &[
         false,
         "Collapse all (tree)"
     ),
+    shortcut!("Processes", ["up", "k"], CursorUp, false, "Previous row"),
+    shortcut!("Processes", ["down", "j"], CursorDown, false, "Next row"),
+    shortcut!("Processes", ["pageup"], CursorPageUp, false, "Up 20 rows"),
+    shortcut!(
+        "Processes",
+        ["pagedown"],
+        CursorPageDown,
+        false,
+        "Down 20 rows"
+    ),
+    shortcut!(
+        "Graph",
+        ["g"],
+        ToggleGraph,
+        false,
+        "Graph the row (collapsed: its subtree)"
+    ),
+    shortcut!("Graph", ["ctrl-g"], ClearGraph, true, "Remove all lines"),
     shortcut!("Processes", ["shift-p"], SortByCpu, false, "Sort by CPU"),
     shortcut!(
         "Processes",
@@ -196,6 +220,10 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Command", SortByCommand),
             ])),
         ]),
+        Menu::new("Graph").items([
+            MenuItem::action("Graph Selected Row", ToggleGraph),
+            MenuItem::action("Clear Graph", ClearGraph),
+        ]),
         Menu::new("Playback").items([
             MenuItem::action("Play / Pause", TogglePause),
             MenuItem::action("Faster", Faster),
@@ -231,6 +259,8 @@ pub fn display_key(k: &str) -> String {
             "space" => "Space".to_string(),
             "escape" => "Esc".to_string(),
             "home" => "Home".to_string(),
+            "pageup" => "PgUp".to_string(),
+            "pagedown" => "PgDn".to_string(),
             "end" => "End".to_string(),
             p if p.len() == 1 => p.to_uppercase(),
             p => p.to_uppercase(),

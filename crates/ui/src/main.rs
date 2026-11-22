@@ -5,6 +5,7 @@ mod actions;
 mod app;
 mod format;
 mod pipeline;
+mod selection;
 mod widgets;
 
 use std::net::SocketAddr;
