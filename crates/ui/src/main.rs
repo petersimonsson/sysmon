@@ -1,6 +1,7 @@
 //! sysmon-ui: receives agent datagrams, records them, and shows them live, or
 //! replays a recording.
 
+mod actions;
 mod app;
 mod format;
 mod pipeline;
@@ -83,6 +84,7 @@ fn main() -> anyhow::Result<()> {
 
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
+        actions::init(cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,

@@ -41,7 +41,10 @@ fn main() -> std::io::Result<()> {
             println!("== {} ==", host.name());
             for line in sysmon_model::tree::build(&rows, None, &Default::default()) {
                 let r = &rows[line.row];
-                println!("{:>7} {:5.1}% {}{}", r.key.pid, r.cpu_pct, line.guides, r.comm);
+                println!(
+                    "{:>7} {:5.1}% {}{}",
+                    r.key.pid, r.cpu_pct, line.guides, r.comm
+                );
             }
         }
     }

@@ -264,6 +264,9 @@ agent or the monitor was offline) are skipped rather than waited out.
   queue, and calls `cx.notify()` once per batch. A 200 ms ticker moves the
   timeline slider and position while replaying.
 - **Views** (built from `gpui_kit::component`):
+  - a menu bar (File, View, Processes, Playback, Help). On Linux and
+    Windows it's gpui-kit's in-window `AppMenuBar`; on macOS it's the native
+    menu bar (`cx.set_menus`). Menu items show their shortcuts;
   - a toolbar with Live / Recording and Open recording… (the system file
     picker, via `cx.prompt_for_paths`);
   - a sidebar listing hosts with a liveness dot ("silent for N") and the
@@ -282,6 +285,27 @@ agent or the monitor was offline) are skipped rather than waited out.
   - in the Recording view, a replay bar: play/pause, 1× to 256× speed, a
     timeline `Slider` that seeks on release, and start, position and end
     times (UTC).
+- **Keyboard:** every command is a gpui action (`crates/ui/src/actions.rs`).
+  `SHORTCUTS` is the single table that both binds the keys and fills the
+  F1 / `?` overlay. The root element sets the `SysmonApp` key context and
+  holds focus; when the filter loses focus to nothing, focus returns to the
+  root. Shortcuts without a modifier use the predicate
+  `SysmonApp && !Input`, so they're off while typing in the filter.
+
+  | Keys | Action |
+  |---|---|
+  | Ctrl+O, Ctrl+Q | Open recording, quit |
+  | Ctrl+1, Ctrl+2 | Live view, Recording view |
+  | Ctrl+↓, Ctrl+↑ | Next / previous host |
+  | Ctrl+F or `/` | Filter processes (Enter returns, Esc clears) |
+  | `t`, `e`, `c` | Tree view, expand all, collapse all |
+  | Shift+P / M / N / U / C | Sort by CPU / memory / PID / user / command (again flips) |
+  | Space, `]`, `[` | Play/pause, faster, slower |
+  | ←/→, Shift+←/→, Home/End | Seek 10 s, 1 min, to start/end |
+  | F1 or `?` | Shortcuts overlay |
+- **Tests:** headless UI tests (`gpui-kit` `test-support`, dev-only) press
+  keys in a real window and check the resulting state, including that
+  single-key shortcuts don't fire while the filter has focus.
 - **Opening recordings:** Open recording…, or
   `sysmon-ui --replay <data_dir>/<host>/…` (which doesn't listen).
 
@@ -357,13 +381,13 @@ Implemented, and covered by tests where noted:
 - `model`: CPU, per-process, net and disk rates, rows carried over lost
   chunks, process tree building (tested); playback clock (tested); multi-host merged replay with
   seek, and the paced replay engine (tested); `replay` example.
-- `ui`: everything in section 6. It is checked by running it, but has no
-  automated UI tests.
+- `ui`: everything in section 6. Keyboard handling has headless UI tests;
+  the rest is checked by running it.
 
 Possible next steps:
 
-1. UI tests with gpui-kit's `test-support` (headless windows and
-   accessibility snapshots).
+1. More UI tests: clicks, the replay bar, and accessibility snapshots of the
+   process table.
 2. Per-process sparklines and a details pane (per-interface and per-disk
    rates are already in the model).
 3. Thumbnails on the timeline (CPU across the whole recording, from the

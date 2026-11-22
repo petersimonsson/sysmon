@@ -6,8 +6,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::AppMenuBar;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::prelude::*;
@@ -18,10 +20,12 @@ use sysmon_model::{
 };
 use sysmon_proto::ProcKey;
 
+use crate::actions::{self, *};
 use crate::format;
 use crate::widgets::{bar, sparkline};
 
 const ROW_HEIGHT: f32 = 20.;
+const MENU_BAR_HEIGHT: f32 = 30.;
 /// Slider resolution: positions are mapped onto 0..TIMELINE_STEPS.
 const TIMELINE_STEPS: f32 = 10_000.;
 const SPEEDS: [f64; 5] = [1., 4., 16., 64., 256.];
@@ -77,6 +81,10 @@ pub struct AppState {
     error: Option<String>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
+    focus: FocusHandle,
+    /// In-window menu bar (not used on macOS, which has a native one).
+    menu_bar: Option<Entity<AppMenuBar>>,
+    show_shortcuts: bool,
 }
 
 impl AppState {
@@ -132,11 +140,26 @@ impl AppState {
         }));
 
         let subscriptions = vec![
-            cx.subscribe_in(&filter, window, |_, _, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            }),
+            cx.subscribe_in(
+                &filter,
+                window,
+                |this, _, event: &InputEvent, window, cx| {
+                    match event {
+                        InputEvent::Change => cx.notify(),
+                        // Enter hands the keyboard back to the shortcuts.
+                        InputEvent::PressEnter { .. } => this.focus.focus(window, cx),
+                        // Clicking away from the filter leaves nothing focused;
+                        // take focus back so shortcuts keep working, unless
+                        // something else (a menu) has it.
+                        InputEvent::Blur => cx.defer_in(window, |this, window, cx| {
+                            if window.focused(cx).is_none() {
+                                this.focus.focus(window, cx);
+                            }
+                        }),
+                        InputEvent::Focus => {}
+                    }
+                },
+            ),
             cx.subscribe_in(
                 &timeline,
                 window,
@@ -151,7 +174,14 @@ impl AppState {
             ),
         ];
 
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        let menu_bar = (!cfg!(target_os = "macos")).then(|| AppMenuBar::new(cx));
+
         let mut this = Self {
+            focus,
+            menu_bar,
+            show_shortcuts: false,
             view: View::Live,
             live_enabled: start.live.is_some(),
             live_hosts: BTreeMap::new(),
@@ -298,6 +328,9 @@ impl AppState {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let mut bar = div()
+            .id("toolbar")
+            .test_support()
+            .flex_none()
             .flex()
             .items_center()
             .gap_2()
@@ -647,16 +680,7 @@ impl AppState {
                     .child(label)
                     .children(arrow.map(|a| div().flex_none().child(a)))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.sort = if this.sort.0 == key {
-                            (key, !this.sort.1)
-                        } else {
-                            // Numbers sort high-to-low first, text A-to-Z.
-                            (
-                                key,
-                                matches!(key, SortKey::Cpu | SortKey::Mem | SortKey::Threads),
-                            )
-                        };
-                        cx.notify();
+                        this.sort_by(key, cx);
                     }));
                 match width {
                     Some(w) => cell.w(px(w)),
@@ -785,6 +809,229 @@ impl AppState {
             )
             .child(header)
             .child(list)
+    }
+
+    /// Sort by `key`, or flip the direction if already sorted by it.
+    fn sort_by(&mut self, key: SortKey, cx: &mut Context<Self>) {
+        self.sort = if self.sort.0 == key {
+            (key, !self.sort.1)
+        } else {
+            // Numbers sort high-to-low first, text A-to-Z.
+            (
+                key,
+                matches!(key, SortKey::Cpu | SortKey::Mem | SortKey::Threads),
+            )
+        };
+        cx.notify();
+    }
+
+    fn show(&mut self, view: View, cx: &mut Context<Self>) {
+        let available = match view {
+            View::Live => self.live_enabled,
+            View::Replay => self.replay.is_some(),
+        };
+        if available {
+            self.view = view;
+            self.ensure_selection();
+            cx.notify();
+        }
+    }
+
+    fn step_host(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let ids: Vec<u64> = self.hosts().keys().copied().collect();
+        if ids.is_empty() {
+            return;
+        }
+        let pos = self.selected.and_then(|s| ids.iter().position(|&i| i == s));
+        let next = match (pos, forward) {
+            (None, _) => 0,
+            (Some(p), true) => (p + 1) % ids.len(),
+            (Some(p), false) => (p + ids.len() - 1) % ids.len(),
+        };
+        self.selected = Some(ids[next]);
+        cx.notify();
+    }
+
+    fn seek_by(&self, delta_s: i64) {
+        if self.view != View::Replay {
+            return;
+        }
+        if let Some(st) = self.status() {
+            let delta = delta_s.unsigned_abs() * 1_000_000_000;
+            let ts = if delta_s < 0 {
+                st.position_ns.saturating_sub(delta)
+            } else {
+                st.position_ns.saturating_add(delta)
+            };
+            self.control(Control::Seek(ts.clamp(st.start_ns, st.end_ns)));
+        }
+    }
+
+    fn change_speed(&self, faster: bool) {
+        let Some(st) = self.status() else {
+            return;
+        };
+        let i = SPEEDS
+            .iter()
+            .position(|&s| s >= st.speed - f64::EPSILON)
+            .unwrap_or(SPEEDS.len() - 1);
+        let i = if faster {
+            (i + 1).min(SPEEDS.len() - 1)
+        } else {
+            i.saturating_sub(1)
+        };
+        self.control(Control::SetSpeed(SPEEDS[i]));
+    }
+
+    /// Hook every action up to the root element.
+    fn actions(&self, root: Div, cx: &mut Context<Self>) -> Div {
+        root.on_action(cx.listener(|this, _: &OpenRecording, _, cx| this.open_recording(cx)))
+            .on_action(cx.listener(|this, _: &ShowLive, _, cx| this.show(View::Live, cx)))
+            .on_action(cx.listener(|this, _: &ShowRecording, _, cx| this.show(View::Replay, cx)))
+            .on_action(cx.listener(|this, _: &NextHost, _, cx| this.step_host(true, cx)))
+            .on_action(cx.listener(|this, _: &PreviousHost, _, cx| this.step_host(false, cx)))
+            .on_action(cx.listener(|this, _: &FocusFilter, window, cx| {
+                this.filter.update(cx, |f, cx| f.focus(window, cx));
+            }))
+            .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
+                if this.show_shortcuts {
+                    this.show_shortcuts = false;
+                } else {
+                    this.filter.update(cx, |f, cx| f.set_value("", window, cx));
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleShortcuts, _, cx| {
+                this.show_shortcuts = !this.show_shortcuts;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTree, _, cx| {
+                this.tree = !this.tree;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ExpandAll, _, cx| {
+                this.collapsed.clear();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &CollapseAll, _, cx| {
+                this.collapse_all();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SortByCpu, _, cx| this.sort_by(SortKey::Cpu, cx)))
+            .on_action(cx.listener(|this, _: &SortByMemory, _, cx| this.sort_by(SortKey::Mem, cx)))
+            .on_action(cx.listener(|this, _: &SortByPid, _, cx| this.sort_by(SortKey::Pid, cx)))
+            .on_action(cx.listener(|this, _: &SortByUser, _, cx| this.sort_by(SortKey::User, cx)))
+            .on_action(
+                cx.listener(|this, _: &SortByCommand, _, cx| this.sort_by(SortKey::Command, cx)),
+            )
+            .on_action(cx.listener(|this, _: &TogglePause, _, _| {
+                if this.view == View::Replay {
+                    this.control(Control::TogglePause);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Faster, _, _| this.change_speed(true)))
+            .on_action(cx.listener(|this, _: &Slower, _, _| this.change_speed(false)))
+            .on_action(cx.listener(|this, _: &SeekBackward, _, _| {
+                this.seek_by(-(actions::SEEK_SHORT_S as i64))
+            }))
+            .on_action(
+                cx.listener(|this, _: &SeekForward, _, _| {
+                    this.seek_by(actions::SEEK_SHORT_S as i64)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &SeekBackwardLong, _, _| {
+                this.seek_by(-(actions::SEEK_LONG_S as i64))
+            }))
+            .on_action(cx.listener(|this, _: &SeekForwardLong, _, _| {
+                this.seek_by(actions::SEEK_LONG_S as i64)
+            }))
+            .on_action(cx.listener(|this, _: &SeekStart, _, _| {
+                if let Some(st) = this.status().filter(|_| this.view == View::Replay) {
+                    this.control(Control::Seek(st.start_ns));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SeekEnd, _, _| {
+                if let Some(st) = this.status().filter(|_| this.view == View::Replay) {
+                    this.control(Control::Seek(st.end_ns));
+                }
+            }))
+    }
+
+    /// Overlay listing every shortcut, grouped as in [`actions::SHORTCUTS`].
+    fn render_shortcuts(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let mut groups: Vec<(&str, Vec<&actions::Shortcut>)> = Vec::new();
+        for s in actions::SHORTCUTS {
+            match groups.last_mut() {
+                Some((g, list)) if *g == s.group => list.push(s),
+                _ => groups.push((s.group, vec![s])),
+            }
+        }
+        let mut columns = div().flex().gap_8();
+        for (group, list) in groups {
+            let mut col = div().flex().flex_col().gap_1().child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .pb_1()
+                    .child(group),
+            );
+            for s in list {
+                let keys = s
+                    .keys
+                    .iter()
+                    .map(|k| actions::display_key(k))
+                    .collect::<Vec<_>>()
+                    .join("  ");
+                col = col.child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .text_xs()
+                        .child(
+                            div()
+                                .w(px(110.))
+                                .font_family(theme.mono_font_family.clone())
+                                .text_color(theme.primary)
+                                .child(keys),
+                        )
+                        .child(s.description),
+                );
+            }
+            columns = columns.child(col);
+        }
+        div()
+            .id("shortcuts-overlay")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme.background.opacity(0.6))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.show_shortcuts = false;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .p_6()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.popover)
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .child(div().text_lg().child("Keyboard shortcuts"))
+                    .child(columns)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child("Single-key shortcuts are off while the filter has focus. Esc or click to close."),
+                    ),
+            )
     }
 
     /// Collapse every process that has children in the selected host.
@@ -980,14 +1227,172 @@ impl Render for AppState {
                 }),
         };
 
-        div()
+        let shortcuts = self.show_shortcuts.then(|| self.render_shortcuts(cx));
+        let root = div()
+            .key_context(actions::CONTEXT)
+            .track_focus(&self.focus)
+            .relative()
             .flex()
             .flex_col()
             .size_full()
             .bg(theme.background)
-            .text_color(theme.foreground)
+            .text_color(theme.foreground);
+        self.actions(root, cx)
+            .children(self.menu_bar.clone().map(|bar| {
+                // AppMenuBar fills its parent (it's designed for a title
+                // bar), so give it a fixed-height strip of its own; otherwise
+                // the column stretches it and the menus drift down the window.
+                div()
+                    .id("menu-bar")
+                    .test_support()
+                    .flex_none()
+                    .w_full()
+                    .h(px(MENU_BAR_HEIGHT))
+                    .px_1()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(bar)
+            }))
             .child(toolbar)
             .child(div().flex().flex_1().min_h_0().child(sidebar).child(main))
             .children(timeline)
+            .children(shortcuts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Explicit imports: the gpui glob would shadow `#[test]`.
+    use super::{AppState, SortKey, Start, View, apply};
+    use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Bounds, Entity, TestAppContext, WindowBounds,
+        WindowOptions, point, px, size,
+    };
+
+    fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<AppState>) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::actions::init(cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: point(px(0.), px(0.)),
+                    size: size(px(1200.), px(800.)),
+                })),
+                ..Default::default()
+            };
+            let start = Start {
+                live: None,
+                replay: None,
+                replay_label: String::new(),
+                data_dir: std::env::temp_dir(),
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| AppState::new(start, window, cx))
+            })
+            .expect("open test window")
+        })
+    }
+
+    #[gpui_kit::test]
+    fn menu_bar_is_a_strip_at_the_top(cx: &mut TestAppContext) {
+        for with_host in [false, true] {
+            let (window, app) = open(cx);
+            if with_host {
+                add_host(&app, cx);
+            }
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                let bar = window.find("menu-bar").bounds();
+                assert_eq!(bar.origin.y, px(0.), "menu bar starts at the top");
+                assert_eq!(bar.size.height, px(super::MENU_BAR_HEIGHT));
+                assert_eq!(bar.size.width, px(1200.));
+                let toolbar = window.find("toolbar").bounds();
+                assert_eq!(toolbar.origin.y, bar.size.height, "toolbar follows it");
+            })
+            .unwrap();
+        }
+    }
+
+    #[gpui_kit::test]
+    fn shortcuts_change_view_state(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        cx.update_window(window, |_, window, cx| {
+            window.press("t", cx);
+            assert!(app.read(cx).tree, "t toggles the tree");
+
+            window.press("shift-m", cx);
+            assert_eq!(app.read(cx).sort, (SortKey::Mem, true));
+            window.press("shift-m", cx);
+            assert_eq!(
+                app.read(cx).sort,
+                (SortKey::Mem, false),
+                "again flips direction"
+            );
+            window.press("shift-n", cx);
+            assert_eq!(app.read(cx).sort, (SortKey::Pid, false));
+
+            window.press("f1", cx);
+            assert!(app.read(cx).show_shortcuts);
+            window.press("escape", cx);
+            assert!(!app.read(cx).show_shortcuts, "escape closes the overlay");
+
+            // No recording is open, so the Recording view isn't available.
+            window.press("ctrl-2", cx);
+            assert_eq!(app.read(cx).view, View::Live);
+        })
+        .unwrap();
+    }
+
+    /// Give the app one live host so the process table (and its filter) renders.
+    fn add_host(app: &Entity<AppState>, cx: &mut TestAppContext) {
+        app.update(cx, |app, cx| {
+            let frame = sysmon_proto::Frame {
+                host_id: 1,
+                boot_id: 1,
+                seq: 0,
+                system: Some(sysmon_proto::SystemSample::default()),
+                procs: Vec::new(),
+                complete: true,
+            };
+            apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+            app.ensure_selection();
+            cx.notify();
+        });
+    }
+
+    #[gpui_kit::test]
+    fn single_key_shortcuts_are_off_while_typing_in_the_filter(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        // Each step is its own update so subscriptions (the filter's Enter
+        // event) are delivered between steps, as they are for real input.
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+
+        step(cx, &|window, cx| {
+            window.press("ctrl-f", cx);
+            window.press("t", cx);
+            window.input("bash", cx);
+        });
+        app.read_with(cx, |app, cx| {
+            assert!(!app.tree, "t is typed into the filter, not a shortcut");
+            assert_eq!(app.filter.read(cx).value().as_ref(), "tbash");
+        });
+
+        // Enter returns focus to the app; single-key shortcuts work again.
+        step(cx, &|window, cx| window.press("enter", cx));
+        step(cx, &|window, cx| window.press("t", cx));
+        app.read_with(cx, |app, _| assert!(app.tree));
+
+        // Escape outside the filter clears it.
+        step(cx, &|window, cx| window.press("escape", cx));
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.filter.read(cx).value().as_ref(), "")
+        });
     }
 }
