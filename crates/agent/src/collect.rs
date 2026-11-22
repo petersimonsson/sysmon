@@ -296,25 +296,38 @@ fn read_net() -> Vec<NetIf> {
 }
 
 fn read_disks() -> Vec<DiskStat> {
-    with_file("/proc/diskstats", |s| {
-        s.lines()
-            .filter_map(|l| {
-                let f: Vec<&str> = l.split_ascii_whitespace().collect();
-                let name = *f.get(2)?;
-                if name.starts_with("loop") || name.starts_with("ram") || name.starts_with("zram") {
-                    return None;
-                }
-                let n = |i: usize| f.get(i).and_then(|v| v.parse::<u64>().ok());
-                Some(DiskStat {
-                    name: name.to_string(),
-                    sectors_read: n(5)?,
-                    sectors_written: n(9)?,
-                    io_ms: n(12)?,
-                })
+    with_file("/proc/diskstats", |s| parse_diskstats(s, is_physical_disk)).unwrap_or_default()
+}
+
+/// Whether a block device is a disk in its own right. `/proc/diskstats` also
+/// lists partitions, device-mapper devices (LUKS, LVM), software RAID, loop
+/// and RAM disks, whose I/O is already counted on the disks underneath;
+/// summing them all counted the same I/O two or three times. Only disks
+/// backed by a device (`/sys/block/<name>/device`) are kept.
+fn is_physical_disk(name: &str) -> bool {
+    std::path::Path::new("/sys/block")
+        .join(name)
+        .join("device")
+        .exists()
+}
+
+fn parse_diskstats(s: &str, keep: impl Fn(&str) -> bool) -> Vec<DiskStat> {
+    s.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_ascii_whitespace().collect();
+            let name = *f.get(2)?;
+            if !keep(name) {
+                return None;
+            }
+            let n = |i: usize| f.get(i).and_then(|v| v.parse::<u64>().ok());
+            Some(DiskStat {
+                name: name.to_string(),
+                sectors_read: n(5)?,
+                sectors_written: n(9)?,
+                io_ms: n(12)?,
             })
-            .collect()
-    })
-    .unwrap_or_default()
+        })
+        .collect()
 }
 
 fn hostname() -> String {
@@ -364,6 +377,30 @@ mod tests {
         child.kill().ok();
         child.wait().ok();
         assert_eq!(found.as_deref(), Some("\u{FFFD}hidden"));
+    }
+
+    #[test]
+    fn only_physical_disks_are_reported() {
+        let diskstats = "\
+ 259       0 nvme0n1 100 0 3000 0 50 0 800 0 0 400 0 0 0 0 0 0 0
+ 259       1 nvme0n1p1 10 0 300 0 5 0 80 0 0 40 0 0 0 0 0 0 0
+ 259       2 nvme0n1p2 90 0 2700 0 45 0 720 0 0 360 0 0 0 0 0 0 0
+ 254       0 dm-0 90 0 2700 0 45 0 720 0 0 360 0 0 0 0 0 0 0
+   7       0 loop0 1 0 2 0 0 0 0 0 0 1 0 0 0 0 0 0 0
+";
+        let disks = parse_diskstats(diskstats, |n| n == "nvme0n1");
+        assert_eq!(disks.len(), 1);
+        assert_eq!(
+            (disks[0].sectors_read, disks[0].sectors_written),
+            (3000, 800)
+        );
+
+        // On this machine: every disk reported is a real one, and none of
+        // the partitions or mapped devices are.
+        for d in read_disks() {
+            assert!(is_physical_disk(&d.name), "{}", d.name);
+            assert!(!d.name.starts_with("dm-") && !d.name.starts_with("loop"));
+        }
     }
 
     #[test]
