@@ -187,6 +187,11 @@ binary to `/usr/local/bin`, the key to `/etc/sysmon/key`, put
 While listening, the UI records everything it receives, under
 `<data dir>/<host>/<boot>/<YYYY-MM-DDTHH>.seg`, with one file per host per
 hour (named in UTC). It goes on recording while you look at an old recording.
+Stopping the UI (Ctrl+C, `SIGTERM`, Ctrl+Q or closing the window) writes out
+what it has received first. A restarted UI carries on in the same files,
+and the time it was down shows as a gap. For up to 30 s after it starts, the
+command lines and users of processes that were already running may be
+missing, until the agents' next full metadata refresh.
 
 To replay a recording, use **File → Open Recording…** (Ctrl+O), or start with
 `sysmon-ui --replay ~/.local/share/sysmon`. You can open the whole data

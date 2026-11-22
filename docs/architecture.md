@@ -114,8 +114,13 @@ pub enum Msg {
 
 - A **sample** is one tick. It is sent as one `System` datagram (chunk 0)
   followed by as many `Procs` datagrams as needed, all with the same `seq`.
-- `HostInfo` is sent at start-up and then every ~10 s, so a monitor that
-  starts late learns about the host quickly.
+- `HostInfo` and `Users` are sent with every sample (about 150 bytes,
+  `--host-info-every`), so a monitor that starts or restarts while agents
+  keep running knows each host's name, settings and users from its first
+  sample. `ProcMeta` for processes that already exist only comes with the
+  next full refresh (every 30 samples, about 14 KB), so until then a newly
+  started monitor shows those processes as `[comm]` without user or command
+  line.
 - `ProcMeta` carries the strings that rarely change (full command line, uid).
   The agent sends it for processes it hasn't seen before, and sends a full
   refresh every ~30 s. `ProcSample` carries only `comm` (≤ 16 bytes).
@@ -249,6 +254,13 @@ record := recv_ts_ns:u64le  len:u16le  datagram[len]
   hour. The recorder runs it every 10 minutes.
 - The writer runs on its own thread so a disk stall never reaches the socket
   or the UI.
+- **Stopping the monitor:** blocks are buffered for up to 10 s or 64 KB, so
+  stopping would lose that much. SIGINT, SIGTERM and SIGHUP, and quitting
+  the app (gpui's `on_app_quit`), call `RecorderHandle::stop()`, which writes
+  out everything received before the process exits (waiting at most 2 s).
+  After an unclean stop (SIGKILL, power loss) the next monitor truncates the
+  torn tail, rebuilds the index if needed, and appends to the same hour's
+  segment; the downtime shows as a gap in replay.
 
 ## 5. `sysmon-model`: state and data sources
 
