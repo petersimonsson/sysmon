@@ -79,8 +79,9 @@ agent ──► proto ◄── ingest ◄──┐
 
 - `magic` and `version` sit at fixed offsets, so a reader can reject foreign
   traffic and old recordings before it tries to deserialize anything.
-- `flags` is reserved for payload compression (zstd/lz4) and authenticated
-  encryption (see [Security](#security)).
+- `flags` marks a zstd-compressed payload (`COMPRESSED`) and an encrypted,
+  authenticated one (`ENCRYPTED`); see [Security](#security). Unknown bits
+  are rejected.
 - Each datagram is at most `MAX_DATAGRAM` (1200 bytes) so it fits in one
   packet on any reasonable path MTU.
 
@@ -104,6 +105,7 @@ pub enum Msg {
     System(SystemSample),       // chunk 0 of a sample: timestamp, per-CPU, memory, load, net, disk
     Procs(Vec<ProcSample>),     // chunks 1..n of a sample: whole process records
     ProcMeta(Vec<ProcMeta>),    // cmdline/uid for (pid, starttime)
+    Users(Vec<UserName>),       // uid → name for the uids of running processes
 }
 ```
 
@@ -114,6 +116,9 @@ pub enum Msg {
 - `ProcMeta` carries the strings that rarely change (full command line, uid).
   The agent sends it for processes it hasn't seen before, and sends a full
   refresh every ~30 s. `ProcSample` carries only `comm` (≤ 16 bytes).
+- `Users` is sent with `HostInfo` and lists only uids that running processes
+  use, read from the agent's `/etc/passwd`.
+- New `Msg` variants are only ever appended, so old recordings keep decoding.
 - **Process identity** is `(pid, starttime)`, so a reused PID never merges two
   processes' histories.
 
@@ -138,17 +143,22 @@ pub struct Frame {
   `loop { collect(); encode(); send(); sleep_until(next_tick) }` with a
   blocking `std::net::UdpSocket`.
 - It reads `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`, `/proc/[pid]/stat`,
-  `/proc/net/dev` and `/proc/diskstats`. Buffers are reused between ticks.
+  `/proc/net/dev` and `/proc/diskstats` into one reused buffer.
 - It tracks the set of known `(pid, starttime)` pairs to decide when to emit
   `ProcMeta`.
-- CLI (`clap`): `--target host:port` (repeatable), `--interval 1s`,
-  and later `--key-file`.
-- Deployment: a static musl build plus a systemd unit.
+- CLI (`clap`): `--target host:port` (repeatable), `--interval-ms`,
+  `--compress`, `--key-file`, and `--generate-key <path>`.
+- Deployment: a static musl build
+  (`rustup target add x86_64-unknown-linux-musl`, then
+  `cargo build --release -p sysmon-agent --target x86_64-unknown-linux-musl`)
+  plus the sandboxed systemd unit in `crates/agent/dist/sysmon-agent.service`.
 
 ## 3. `sysmon-ingest`: receiver
 
-- A dedicated thread does a blocking `recv_from` and hands each datagram to:
-  - the **store** channel, as raw bytes plus the receive timestamp, and
+- A dedicated thread does a blocking `recv_from`, then **opens** each
+  datagram with the configured key (dropping anything that fails to
+  authenticate), and hands the opened datagram to:
+  - the **store** channel, as bytes plus the receive timestamp, and
   - the **assembler**, which decodes the datagram.
 - The `Assembler` keys partial samples by `(host_id, seq)`. It emits a `Frame`
   as soon as all `chunks` have arrived, or with `complete = false` once a
@@ -182,10 +192,17 @@ record := recv_ts_ns:u64le  len:u16le  datagram[len]
   whichever comes first. It calls fsync per block, not per record.
 - **Crash recovery:** files are append-only. When the writer opens an existing
   segment, it validates the blocks and truncates a torn tail.
-- **Index:** one `(first_ts, last_ts, offset)` entry per block. Seeking is a
-  binary search plus decompressing one block. The index can be rebuilt from
-  the segment if it is missing.
-- **Retention:** delete whole hour files beyond a configured age or total size.
+- **Index:** `<name>.idx` holds one 28-byte `(first_ts, last_ts, offset, len)`
+  entry per block, appended by the writer after each block. Seeking is a
+  binary search plus decompressing one block. The index is derived data:
+  readers trust only the prefix of entries that chains through the segment
+  and scan any blocks after it, and the writer rewrites a stale index when it
+  reopens a segment. Only the writer writes `.idx` files.
+- **Catalog:** `list_segments` finds every segment under a directory and
+  parses host, boot and hour from its path.
+- **Retention:** `prune` deletes whole hour files beyond a maximum age or total
+  size (`--keep-hours`, `--max-gib`), oldest first, and never the current
+  hour. The recorder runs it every 10 minutes.
 - The writer runs on its own thread so a disk stall never reaches the socket
   or the UI.
 
@@ -200,35 +217,67 @@ pub trait DataSource: Send {
 ```
 
 - `LiveSource` wraps the ingest `Receiver<Event>`.
-- `ReplaySource` wraps a `SegmentReader` and an `Assembler`, paced by a
-  `PlaybackClock` (speed, pause, seek).
+- `ReplaySource` opens every segment under a path, groups them into one
+  stream per (host, boot), and merges the streams by **receive time**, which
+  is the monitor's single clock. It feeds records through an `Assembler`
+  exactly as live traffic is fed, and seeks each stream through the index.
 
-`HostModel` is fed `Frame`s and keeps:
+### Replay engine
 
-- the previous and current samples, used for CPU %, memory, and net/disk rates;
-- per-process `%CPU = Δ(utime + stime) / clk_tck / Δwall`;
-- a ring buffer of derived system metrics (default 10 minutes) for sparklines;
-- a process table `HashMap<(pid, starttime), ProcRow>`, joined with `ProcMeta`;
-- liveness: when the last packet arrived, and the chunk loss rate.
+`replay::spawn(source, speed)` runs a thread that emits events when a
+`PlaybackClock` (which maps wall time onto recording time, with speed, pause
+and seek) reaches them. It returns a `ReplayHandle`:
+
+- `feed: Receiver<Feed>`, where `Feed` is `Event(Event)` or `Reset`. `Reset`
+  is sent on every seek, so the UI discards models built before the jump;
+- `send(Control)`: `SetPaused`, `TogglePause`, `SetSpeed`, `Seek(ts)`;
+- `status()`: start, end, position, speed, paused, finished.
+
+A seek starts reading 3 s before the target, so the models already have
+rates when the target is shown. Gaps in the recording longer than 5 s (an
+agent or the monitor was offline) are skipped rather than waited out.
+
+### `HostModel`
+
+`HostModel` is fed events and keeps:
+
+- the previous and current samples, used for CPU %, memory, and per-interface
+  and per-disk rates (bytes/s and disk busy %);
+- per-process `%CPU = Δ(utime + stime) / clk_tck / Δt`, where each process
+  remembers when its ticks were read;
+- after an incomplete frame, the rows that didn't arrive, carried over and
+  marked `stale` (a complete frame drops processes that really exited);
+- a ring buffer of derived system metrics (10 minutes at 1 Hz) for sparklines;
+- the process table, joined with `ProcMeta` (cmdline, uid) and `Users`;
+- liveness: when the last sample was taken, and the incomplete-frame rate.
 
 ## 6. `sysmon-ui`: gpui-kit application
 
 - **Entry point:** `gpui_kit::application().run(..)`, then `gpui_kit::init(cx)`,
   then `gpui_kit::open_window(..)`.
-- **Entities:** `AppState` (hosts, selection, live/replay mode) owns one
-  `Entity<HostModel>` per host.
-- **Bridge:** a foreground task spawned with `cx.spawn` drains the frame
-  channel, applies frames with `model.update(cx, ..)`, and calls `cx.notify()`.
-  Repaints are coalesced to at most the display rate.
+- **State:** one `AppState` entity holds two sets of `HostModel`s: live ones,
+  and those of the open recording (a `ReplaySession`). The toolbar switches
+  between the **Live** and **Recording** views. Live data keeps being received
+  and recorded while a recording is open.
+- **Bridges:** foreground tasks (`cx.spawn`) drain the live `Event` channel and
+  the replay `Feed` channel. Each wakes on one item, drains the rest of the
+  queue, and calls `cx.notify()` once per batch. A 200 ms ticker moves the
+  timeline slider and position while replaying.
 - **Views** (built from `gpui_kit::component`):
-  - a sidebar listing hosts with liveness and loss indicators;
-  - a header with per-core CPU bars, memory and swap bars, the load average,
-    and sparklines;
-  - a process table: a virtualized list, sortable columns (CPU, MEM, PID,
-    user, command), a filter, and an optional tree view by `ppid`;
-  - in replay mode, a timeline scrubber and play/pause/speed controls.
-- **Opening recordings:** File → Open recording, or
-  `sysmon-ui --replay <data_dir>/<host>/…`.
+  - a toolbar with Live / Recording and Open recording… (the system file
+    picker, via `cx.prompt_for_paths`);
+  - a sidebar listing hosts with a liveness dot ("silent for N") and the
+    incomplete-frame rate;
+  - a header with CPU, memory, network and disk figures, each with a
+    sparkline (canvas paths), plus per-core bars and host details;
+  - a process table: a virtualized `uniform_list`, clickable column headers
+    to sort (PID, user, %CPU, RSS, threads, command), a filter input (command,
+    user or exact PID), and stale rows dimmed;
+  - in the Recording view, a replay bar: play/pause, 1× to 256× speed, a
+    timeline `Slider` that seeks on release, and start, position and end
+    times (UTC).
+- **Opening recordings:** Open recording…, or
+  `sysmon-ui --replay <data_dir>/<host>/…` (which doesn't listen).
 
 ## Threading (monitoring host)
 
@@ -237,66 +286,85 @@ pub trait DataSource: Send {
 | gpui main | Rendering and `HostModel` updates (cheap: the difference between two frames) |
 | net | `recv_from`, decode, assemble |
 | store | Compress, append and rotate segments; apply retention |
-| replay (on demand) | Read and decompress blocks; pace frames by the playback clock |
+| replay (per open recording) | Read and decompress blocks; pace events by the playback clock |
 
 ## Security
 
-UDP is unauthenticated, and on an untrusted network anyone can inject samples.
-There are two options:
+UDP is unauthenticated, and on an untrusted network anyone can inject samples
+or read them. There are two options, which can be combined:
 
-1. Run the traffic over WireGuard or Tailscale. This is the recommended
-   default, and nothing in sysmon changes.
-2. Use a pre-shared key with `chacha20poly1305` AEAD per datagram. This is
-   signalled by a bit in `flags`, and the nonce is derived from
-   `(boot_id, seq, chunk)`.
+1. Run the traffic over WireGuard or Tailscale.
+2. Use sysmon's pre-shared key (`proto::seal`). `sysmon-agent --generate-key
+   <path>` writes a 256-bit key (mode 0600). Give the same file to
+   `--key-file` on the agent and on the monitor.
+   - Each datagram is sealed with **XChaCha20-Poly1305**. The 4-byte preamble
+     is the associated data, so flags can't be altered. The nonce is a random
+     192 bits, carried in the datagram, so nonce reuse is not a practical
+     concern even across agent restarts.
+   - Layout: `preamble | nonce:24 | ciphertext | tag:16`. Chunk budgets
+     always reserve these 40 bytes.
+   - With a key, the monitor accepts **only** datagrams that authenticate
+     with it. Without a key, it rejects encrypted datagrams.
+   - Datagrams are decrypted before recording, so recordings don't need the
+     key. Keep the data directory as private as the network.
+   - Replayed datagrams that are still authentic are mostly harmless: the
+     assembler drops sequence numbers it has already emitted for that boot.
+
+Compression (`--compress`) runs before encryption and is applied only when it
+shrinks the payload. On a host with about 490 processes, one tick was
+14.5 KB uncompressed and 8.6 KB compressed and encrypted.
 
 ## Running
 
 ```sh
-# Monitoring machine: listen, record to ~/.local/share/sysmon, show live
-cargo run --release -p sysmon-ui -- --listen 0.0.0.0:9876
+# Once: make a shared key and copy it to both machines
+cargo run --release -p sysmon-agent -- --generate-key sysmon.key
+
+# Monitoring machine: listen, record to ~/.local/share/sysmon (keep a week), show live
+cargo run --release -p sysmon-ui -- --listen 0.0.0.0:9876 --key-file sysmon.key --keep-hours 168
 
 # Remote machine
-cargo run --release -p sysmon-agent -- --target monitor-host:9876
+cargo run --release -p sysmon-agent -- --target monitor-host:9876 --compress --key-file sysmon.key
 
 # Offline: replay a recording (a data dir, host dir, boot dir or one .seg file)
 cargo run --release -p sysmon-ui -- --replay ~/.local/share/sysmon --speed 4
 
 # Headless tools
-cargo run -p sysmon-ingest --example dump -- 0.0.0.0:9876     # print received frames
+cargo run -p sysmon-ingest --example dump -- 0.0.0.0:9876 [key] # print received frames
 cargo run -p sysmon-model --example replay -- <path>           # print a recording
 ```
 
 ## Status
 
-Implemented in the scaffold, and covered by tests where noted:
+Implemented, and covered by tests where noted:
 
-- `proto`: all types, framing, chunking of samples and of `ProcMeta` (tested).
-- `agent`: CPU, memory, load, net, disk and process collection from `/proc`;
-  HostInfo and ProcMeta scheduling; drift-free tick loop (parser tested).
-- `ingest`: receive thread and assembler: completion, loss, timeout and
-  reboot handling (tested); `dump` example.
-- `store`: segment writer and reader, torn-tail recovery, per-host, per-boot,
-  per-hour rotation (tested).
-- `model`: CPU % and per-process %CPU from counter deltas (tested), history
-  ring buffer, `LiveSource`, `ReplaySource`; `replay` example.
-- `ui`: gpui-kit window with a host sidebar, CPU and memory bars, load
-  average, and a process table sorted by CPU. It records in live mode and
-  plays back paced recordings in replay mode.
+- `proto`: types, framing, chunking of samples, `ProcMeta` and `Users`; zstd
+  compression; XChaCha20-Poly1305 sealing, including tamper, wrong-key and
+  plaintext rejection (tested).
+- `agent`: collection from `/proc` with a reused buffer; HostInfo, ProcMeta
+  and Users scheduling; compression, encryption, key generation; systemd
+  unit (parser tested).
+- `ingest`: authenticated receive thread and assembler: completion, loss,
+  timeout and reboot handling (tested); `dump` example.
+- `store`: segment writer and reader, torn-tail recovery, sparse index with
+  seek and rebuild, catalog, retention (tested).
+- `model`: CPU, per-process, net and disk rates, rows carried over lost
+  chunks (tested); playback clock (tested); multi-host merged replay with
+  seek, and the paced replay engine (tested); `replay` example.
+- `ui`: everything in section 6. It is checked by running it, but has no
+  automated UI tests.
 
-Next steps:
+Possible next steps:
 
-1. Store: `.idx` sparse index, seek, retention.
-2. Model: `PlaybackClock` (pause, speed, seek), with pacing moved out of the
-   UI; carrying forward process rows that were in lost chunks; net and disk
-   rates.
-3. UI: a virtualized `uniform_list` process table with sortable columns and a
-   filter; sparklines from `history`; a timeline scrubber in replay mode;
-   File → Open recording; uid → user name (needs `HostInfo` to carry
-   `/etc/passwd` names, or a `UserMeta` message).
-4. Agent: a systemd unit, a musl release build, and reusing `/proc` read
-   buffers.
-5. Protocol: zstd payload compression and AEAD (the `flags` bits are reserved).
+1. UI tests with gpui-kit's `test-support` (headless windows and
+   accessibility snapshots).
+2. A process tree view by `ppid`, per-process sparklines, and a details pane
+   (per-interface and per-disk rates are already in the model).
+3. Thumbnails on the timeline (CPU across the whole recording, from the
+   index or a summary file), and multiple selected hosts side by side.
+4. Agent: per-process I/O (`/proc/[pid]/io`, needs privileges), cgroup and
+   container grouping, and GPU stats.
+5. Key rotation (several accepted keys, identified by a key-id byte).
 
 ## Version control
 
