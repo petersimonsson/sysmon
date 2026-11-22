@@ -461,6 +461,23 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   timeline slider and position while replaying, redrawing only when the
   status shown (position to the second, speed, paused) changed, so a paused
   replay costs nothing.
+- **Redraws** (a full redraw is about 2.4 ms with 490 processes):
+  - Live: only the selected host's samples, or the host list changing,
+    redraw at once. Other hosts' samples mark the sidebar out of date, and
+    the ticker redraws it once a second; it also redraws once a second
+    while any host is silent, so its dot turns red even when nothing at all
+    arrives.
+  - Replay: a seek delivers the 10 minutes before the target at once
+    (about 120 ms of work per host). The feed is queued and applied in
+    slices of at most 8 ms with frames drawn between, and anything queued
+    before the last reset is skipped. Measured with 10 hosts: 986 ms of
+    work in 92 slices, the longest 12 ms.
+  - Graph lines are kept between redraws (`graph::LineCache`, per view,
+    host, target and metric) and extended by the samples added since, as
+    the chart redraws on every mouse move; a subtree's line walks every
+    process of every sample. With 8 subtree lines a redraw went from 39 to
+    2.8 ms. A line is computed afresh when the history no longer matches
+    (cleared after a clock step), and all are dropped on a replay reset.
 - **Live hosts are forgotten** after an hour of silence (their history and
   graph selection with them), and at most 256 are kept, the longest silent
   going first: each can hold tens of MB of history, and without a key anyone
