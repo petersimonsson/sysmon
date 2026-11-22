@@ -121,8 +121,10 @@ pub fn build(
                 }
                 line.hidden += 1;
                 line.hidden_cpu_pct += rows[d].cpu_pct;
-                line.hidden_rss_kib += rows[d].rss_kib;
-                line.hidden_virt_kib += rows[d].virt_kib.unwrap_or(0);
+                line.hidden_rss_kib = line.hidden_rss_kib.saturating_add(rows[d].rss_kib);
+                line.hidden_virt_kib = line
+                    .hidden_virt_kib
+                    .saturating_add(rows[d].virt_kib.unwrap_or(0));
                 pending.extend(&children[d]);
             }
         } else {

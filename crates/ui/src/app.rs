@@ -523,7 +523,8 @@ impl AppState {
         };
         let mem = s.mem;
         let mem_pct = if mem.total > 0 {
-            (mem.total - mem.available) as f32 / mem.total as f32 * 100.0
+            // From the network: available can be bogus (above total).
+            mem.total.saturating_sub(mem.available) as f32 / mem.total as f32 * 100.0
         } else {
             0.0
         };
@@ -2987,5 +2988,35 @@ mod tests {
                 thread.description()
             );
         });
+    }
+
+    #[gpui_kit::test]
+    fn bogus_memory_figures_dont_crash_the_header(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        app.update(cx, |app, cx| {
+            let frame = sysmon_proto::Frame {
+                host_id: 1,
+                boot_id: 1,
+                seq: 0,
+                system: Some(sysmon_proto::SystemSample {
+                    ts_unix_ns: 1_000_000_000,
+                    // Available above total, as a buggy or hostile agent might send.
+                    mem: sysmon_proto::MemInfo {
+                        total: 1000,
+                        available: 2000,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                procs: vec![],
+                threads: vec![],
+                complete: true,
+            };
+            apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+            app.ensure_selection();
+            cx.notify();
+        });
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .unwrap();
     }
 }

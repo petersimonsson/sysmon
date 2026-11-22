@@ -250,7 +250,8 @@ impl HostModel {
             .into_iter()
             .map(|p| {
                 let key = p.key();
-                let ticks = p.utime + p.stime;
+                // Values from the network: saturate rather than overflow.
+                let ticks = p.utime.saturating_add(p.stime);
                 proc_ticks.insert(key, (ticks, clock));
                 let cpu = rate(
                     prev.as_ref().and_then(|prev| prev.proc_ticks.get(&key)),
@@ -263,9 +264,9 @@ impl HostModel {
                     ppid: p.ppid,
                     state: p.state as char,
                     cpu_pct: cpu,
-                    rss_kib: p.rss_pages * page_kib,
+                    rss_kib: p.rss_pages.saturating_mul(page_kib),
                     virt_kib: p.vsize_bytes.map(|b| b / 1024),
-                    shr_kib: p.shared_pages.map(|s| s * page_kib),
+                    shr_kib: p.shared_pages.map(|s| s.saturating_mul(page_kib)),
                     threads: p.threads,
                     comm: p.comm,
                     cmdline: meta.map(|m| m.cmdline.clone()),
@@ -302,7 +303,7 @@ impl HostModel {
             .into_iter()
             .map(|t| {
                 let key = t.key();
-                let ticks = t.utime + t.stime;
+                let ticks = t.utime.saturating_add(t.stime);
                 thread_ticks.insert(key, (ticks, clock));
                 ThreadRow {
                     key,
@@ -785,6 +786,47 @@ mod tests {
         // Newer samples still apply, with rates against the last good one.
         m.apply(frame(2, 102, 200, 0, vec![proc(10, 150)], true));
         assert_eq!(m.snapshot.procs[0].cpu_pct, 50.0);
+    }
+
+    #[test]
+    fn extreme_values_from_the_network_dont_panic() {
+        let max = CpuCounters {
+            user: u64::MAX,
+            nice: u64::MAX,
+            system: u64::MAX,
+            idle: u64::MAX,
+            iowait: u64::MAX,
+            irq: u64::MAX,
+            softirq: u64::MAX,
+            steal: u64::MAX,
+        };
+        assert_eq!(max.total(), u64::MAX);
+        let mut huge = proc(10, u64::MAX);
+        huge.stime = u64::MAX;
+        huge.rss_pages = u64::MAX;
+        huge.shared_pages = Some(u64::MAX);
+        let mut m = HostModel::new(1);
+        for i in 0..3u32 {
+            let Event::Frame(mut f) = frame(
+                i,
+                100 + i as u64,
+                0,
+                0,
+                vec![huge.clone(), proc(11, 0)],
+                true,
+            ) else {
+                unreachable!()
+            };
+            let sys = f.system.as_mut().unwrap();
+            sys.cpus = vec![max];
+            sys.mem.total = 1;
+            sys.mem.available = u64::MAX;
+            m.apply(Event::Frame(f));
+        }
+        assert_eq!(m.snapshot.procs[0].rss_kib, u64::MAX);
+        let rows = m.snapshot.procs.clone();
+        let collapsed = std::collections::HashSet::from([rows[0].key]);
+        let _ = crate::tree::build(&rows, None, &collapsed);
     }
 
     #[test]

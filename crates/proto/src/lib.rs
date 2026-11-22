@@ -121,19 +121,27 @@ pub struct CpuCounters {
 }
 
 impl CpuCounters {
+    /// Saturating: these come from the network, and a bogus value must not
+    /// overflow (a panic in debug builds).
     pub fn total(&self) -> u64 {
-        self.user
-            + self.nice
-            + self.system
-            + self.idle
-            + self.iowait
-            + self.irq
-            + self.softirq
-            + self.steal
+        [
+            self.user,
+            self.nice,
+            self.system,
+            self.idle,
+            self.iowait,
+            self.irq,
+            self.softirq,
+            self.steal,
+        ]
+        .into_iter()
+        .fold(0u64, u64::saturating_add)
     }
 
     pub fn busy(&self) -> u64 {
-        self.total() - self.idle - self.iowait
+        self.total()
+            .saturating_sub(self.idle)
+            .saturating_sub(self.iowait)
     }
 }
 
