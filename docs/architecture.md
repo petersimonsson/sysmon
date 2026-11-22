@@ -171,8 +171,22 @@ pub struct Frame {
 - No async runtime. The main thread runs the sampling loop,
   `loop { collect(); encode(); send(); sleep_until(next_tick) }`, with
   blocking `std::net::UdpSocket`s: one per address family the targets use,
-  since a socket bound to `0.0.0.0` can't reach IPv6 addresses (`send::Sender`).
-  A second thread does user-name lookups (below).
+  since a socket bound to `0.0.0.0` can't reach IPv6 addresses
+  (`send::Sender`; each is created when first needed). Two more threads do
+  lookups: user names (below), and monitor addresses (`targets::Targets`),
+  which are resolved again every 60 s so a monitor that moves is followed. A
+  name that doesn't resolve yet (DNS not up at boot) doesn't stop the agent;
+  it's sent to once it resolves, and the last good address is kept while
+  lookups fail. Malformed targets (no port) are rejected at start-up.
+- Nothing that can't be encoded stops the agent: each part of a sample is
+  encoded and sealed separately, and a part that fails is skipped and
+  logged once. User names over 256 bytes, and hostname and kernel strings
+  over 255, are cut so they always fit.
+- The sample counter wraps after 2^32 samples; the monitor takes the new 0
+  as an agent restart.
+- `--interval-ms` is at least 10 ms, and `HostInfo` reports the interval
+  actually used. `HostInfo.cpu_count` is the number of CPUs in `/proc/stat`,
+  not the CPUs the agent may run on.
 - Logging defaults to `info` (`RUST_LOG` overrides it), so the start-up
   line and send failures reach the terminal or the journal.
 - It reads `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`, `/proc/[pid]/stat`,
