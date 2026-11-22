@@ -1,0 +1,21 @@
+name: Security advisories
+
+# New RustSec advisories can land against dependencies that haven't changed,
+# so check daily, not only when someone pushes (CI's cargo-deny job does that).
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: RustSec advisories (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories

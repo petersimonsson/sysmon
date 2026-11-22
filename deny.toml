@@ -1,0 +1,54 @@
+# cargo-deny: checks dependencies for security advisories, licenses we
+# haven't accepted, banned or duplicate crates, and unexpected sources.
+# Run with `cargo deny check`.
+
+[graph]
+# No `targets` list, so every platform's dependencies are checked, not only
+# the host's (the UI also builds on macOS). Optional features count too.
+all-features = true
+
+[advisories]
+# Unmaintained crates deep in gpui's tree aren't ours to replace, so only
+# report them for our own direct dependencies.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# Permissive licenses, plus MPL-2.0 (file-level copyleft: fine to link,
+# changes to those files themselves would have to be shared).
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+# The workspace crates aren't published (publish = false).
+ignore = true
+
+[bans]
+# gpui's tree pulls in several versions of some crates; that's worth
+# seeing but not worth failing over.
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace path dependencies have no version, which is fine for crates
+# that aren't published.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
