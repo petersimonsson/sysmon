@@ -786,12 +786,15 @@ impl AppState {
         };
         let (key, desc) = self.sort;
 
-        // Threads by owner, in the current sort order where it applies.
+        // Threads by owner, in the current sort order where it applies (PID
+        // sorts by TID). Threads have no user or memory of their own (those
+        // cells show "–"), so for those columns they stay in TID order.
         let mut threads_of: HashMap<u32, Vec<ThreadRow>> = HashMap::new();
         if self.show_threads {
             for t in &host.snapshot.threads {
                 threads_of.entry(t.tgid).or_default().push(t.clone());
             }
+            let applies = matches!(key, SortKey::Pid | SortKey::Cpu | SortKey::Command);
             for list in threads_of.values_mut() {
                 list.sort_by(|a, b| {
                     let ord = match key {
@@ -799,11 +802,7 @@ impl AppState {
                         SortKey::Command => a.comm.cmp(&b.comm),
                         _ => a.key.pid.cmp(&b.key.pid),
                     };
-                    let ord = if desc && matches!(key, SortKey::Cpu | SortKey::Command) {
-                        ord.reverse()
-                    } else {
-                        ord
-                    };
+                    let ord = if desc && applies { ord.reverse() } else { ord };
                     ord.then(a.key.pid.cmp(&b.key.pid))
                 });
             }
@@ -3296,6 +3295,63 @@ mod tests {
             assert_eq!(app.host_order(), [3, 2, 1]);
             app.ensure_selection();
             assert_eq!(app.selected, Some(3));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn threads_follow_a_descending_pid_sort(cx: &mut TestAppContext) {
+        let (_window, app) = open(cx);
+        app.update(cx, |app, cx| {
+            let proc = sysmon_proto::ProcSample {
+                pid: 10,
+                ppid: 0,
+                starttime: 0,
+                state: b'S',
+                utime: 0,
+                stime: 0,
+                rss_pages: 1,
+                threads: 3,
+                comm: "p".into(),
+                vsize_bytes: None,
+                shared_pages: None,
+                kernel_thread: Some(false),
+            };
+            let threads = [10u32, 11, 12]
+                .map(|tid| sysmon_proto::ThreadSample {
+                    tgid: 10,
+                    tid,
+                    starttime: 0,
+                    state: b'S',
+                    utime: 0,
+                    stime: 0,
+                    comm: format!("t{tid}"),
+                })
+                .to_vec();
+            let frame = sysmon_proto::Frame {
+                host_id: 1,
+                boot_id: 1,
+                seq: 0,
+                system: Some(sysmon_proto::SystemSample {
+                    ts_unix_ns: 1_000_000_000,
+                    ..Default::default()
+                }),
+                procs: vec![proc],
+                threads,
+                complete: true,
+                received_ns: 0,
+            };
+            apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+            app.ensure_selection();
+            app.show_threads = true;
+            app.sort = (SortKey::Pid, true);
+            let host = &app.live_hosts[&1];
+            let tids: Vec<u32> = app
+                .table_lines(host, cx)
+                .iter()
+                .filter(|l| l.thread.is_some())
+                .map(|l| l.key().pid)
+                .collect();
+            assert_eq!(tids, [12, 11, 10]);
         });
     }
 }
