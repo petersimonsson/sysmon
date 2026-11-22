@@ -13,13 +13,13 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::AppMenuBar;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use sysmon_ingest::Event;
 use sysmon_model::{
-    Control, Feed, HISTORY_LEN, HostModel, Metric, ProcRow, ReplayHandle, ReplayStatus,
-    SeriesTarget, ThreadRow, TreeLine,
+    Control, Feed, HISTORY_LEN, HostModel, LogKind, LogRow, Metric, ProcRow, ReplayHandle,
+    ReplayStatus, SeriesTarget, ThreadRow, TreeLine,
 };
 use sysmon_proto::ProcKey;
 
@@ -122,6 +122,14 @@ pub struct AppState {
     graph_height: Pixels,
     /// While dragging the divider: pointer y and panel height at the start.
     graph_drag: Option<(Pixels, Pixels)>,
+    /// The bottom panel shows the host's logs instead of the graph.
+    show_logs: bool,
+    /// Keep the newest log line in view; scrolling up stops it.
+    log_follow: bool,
+    log_scroll: UniformListScrollHandle,
+    /// The highlighted log line, by its receive and log times (which survive
+    /// the model being rebuilt by a seek, unlike row ids).
+    log_cursor: Option<(u64, u64)>,
     filter: Entity<InputState>,
     timeline: Entity<SliderState>,
     scrubbing: bool,
@@ -262,6 +270,10 @@ impl AppState {
             graph_names: HashMap::new(),
             graph_height: px(GRAPH_HEIGHT),
             graph_drag: None,
+            show_logs: false,
+            log_follow: true,
+            log_scroll: UniformListScrollHandle::new(),
+            log_cursor: None,
             filter,
             timeline,
             scrubbing: false,
@@ -1450,6 +1462,11 @@ impl AppState {
         cx.notify();
     }
 
+    /// Whether the bottom panel is open, with the graph or the logs.
+    fn panel_shown(&self) -> bool {
+        self.show_logs || self.graph_shown()
+    }
+
     fn graph_shown(&self) -> bool {
         self.graph_visible && self.selection().is_some_and(|s| !s.is_empty())
     }
@@ -1498,14 +1515,14 @@ impl AppState {
             .graph_hover
             .map(|f| start + ((end - start) as f64 * f as f64) as u64);
 
-        // Toolbar: metric, window, clear, hide.
-        let mut toolbar = div().flex().items_center().gap_1().px_2().py_1().child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .mr_1()
-                .child("Graph"),
-        );
+        // Toolbar: tabs, metric, window, clear, hide.
+        let mut toolbar = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .child(self.render_panel_tabs(cx));
         for (i, m) in Metric::ALL.into_iter().enumerate() {
             toolbar = toolbar.child(
                 Button::new(("metric", i))
@@ -1718,6 +1735,241 @@ impl AppState {
             )
     }
 
+    /// Graph / Logs, at the left of the bottom panel's toolbar.
+    fn render_panel_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let picked = self.selection().is_some_and(|s| !s.is_empty());
+        div()
+            .flex()
+            .gap_1()
+            .mr_2()
+            .child(
+                Button::new("tab-graph")
+                    .label("Graph")
+                    .small()
+                    .when(!self.show_logs, |b| b.primary())
+                    .when(self.show_logs, |b| b.ghost())
+                    // There's nothing to graph until processes are picked.
+                    .disabled(!picked)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_logs = false;
+                        this.graph_visible = true;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("tab-logs")
+                    .label("Logs")
+                    .small()
+                    .when(self.show_logs, |b| b.primary())
+                    .when(!self.show_logs, |b| b.ghost())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_logs = true;
+                        cx.notify();
+                    })),
+            )
+    }
+
+    fn render_logs(&self, host: &HostModel, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        let mono = theme.mono_font_family.clone();
+        let border = theme.border;
+        let rows: Rc<Vec<LogRow>> = Rc::new(host.logs.rows().iter().cloned().collect());
+        let count = rows.len();
+        if self.log_follow && count > 0 {
+            self.log_scroll
+                .scroll_to_item(count - 1, ScrollStrategy::Bottom);
+        }
+        let status = if host.logs.enabled() {
+            format!("{count} lines")
+        } else {
+            "No logs from this host: start its agent with --logs".into()
+        };
+        let toolbar = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .child(self.render_panel_tabs(cx))
+            .child(
+                div()
+                    .id("logs-status")
+                    .test_support()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .aria_description(status.clone())
+                    .child(status),
+            )
+            .child(div().flex_1())
+            .when(!self.log_follow, |d| {
+                d.child(
+                    Button::new("logs-latest")
+                        .label("Jump to latest")
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.log_follow = true;
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                Button::new("logs-hide")
+                    .label("Hide")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_logs = false;
+                        cx.notify();
+                    })),
+            );
+        let header = div()
+            .flex()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .border_b_1()
+            .border_color(theme.border)
+            .child(div().w(px(LOG_TIME_COL)).child("TIME"))
+            .child(div().w(px(LOG_PRI_COL)).child("PRI"))
+            .child(div().w(px(LOG_SOURCE_COL)).child("UNIT"))
+            .child(div().w(px(LOG_PID_COL)).child("PID"))
+            .child(div().flex_1().child("MESSAGE"));
+
+        let this = cx.entity().downgrade();
+        let cursor = self.log_cursor;
+        let list = uniform_list("logs", count, move |range, _, _| {
+            range
+                .map(|i| {
+                    let row = &rows[i];
+                    let key = (row.received_ns, row.ts_unix_ns);
+                    let on_click = {
+                        let this = this.clone();
+                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            let _ = this.update(cx, |app, cx| {
+                                app.log_cursor = Some(key);
+                                // Keep the clicked line where it is.
+                                app.log_follow = false;
+                                cx.notify();
+                            });
+                        }
+                    };
+                    let base = div()
+                        .id(("log-row", i))
+                        .test_support()
+                        .on_click(on_click)
+                        .w_full()
+                        .flex()
+                        .gap_2()
+                        .px_2()
+                        .h(px(ROW_HEIGHT))
+                        .items_center()
+                        .text_xs()
+                        .font_family(mono.clone())
+                        .when(i % 2 == 1, |d| d.bg(theme.muted.opacity(0.3)))
+                        .when(cursor == Some(key), |d| d.bg(theme.accent))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(LOG_TIME_COL))
+                                .child(format::time(row.ts_unix_ns)),
+                        );
+                    match &row.kind {
+                        LogKind::Line(e) => {
+                            let (label, color) = priority_style(e.priority, &theme);
+                            let source = e.unit.clone().unwrap_or_else(|| e.ident.clone());
+                            let source_tip = match &e.unit {
+                                Some(u) => format!("{u} · {}", e.ident),
+                                None => e.ident.clone(),
+                            };
+                            let first = e.message.lines().next().unwrap_or("");
+                            let more = e.message.contains('\n');
+                            let text = if more {
+                                format!("{first} ⏎…")
+                            } else {
+                                first.to_string()
+                            };
+                            let tip = if e.truncated {
+                                format!("{} … (cut by the agent)", e.message)
+                            } else {
+                                e.message.clone()
+                            };
+                            base.child(
+                                div()
+                                    .flex_none()
+                                    .w(px(LOG_PRI_COL))
+                                    .text_color(color)
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(LOG_SOURCE_COL))
+                                    .flex()
+                                    .child(clipped(("log-source", i), source, source_tip)),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(LOG_PID_COL))
+                                    .child(e.pid.map_or_else(|| "–".into(), |p| p.to_string())),
+                            )
+                            .child(clipped(
+                                ("log-message", i),
+                                text,
+                                tip,
+                            ))
+                        }
+                        LogKind::Lost(n) | LogKind::Dropped(n) => {
+                            let what = match row.kind {
+                                LogKind::Lost(_) => "lost on the way (datagrams didn't arrive)",
+                                _ => "dropped by the agent (over its rate limit)",
+                            };
+                            let text = format!("{n} line{} {what}", if *n == 1 { "" } else { "s" });
+                            base.text_color(theme.muted_foreground)
+                                .child(div().flex_none().w(px(LOG_PRI_COL)))
+                                .child(div().flex_none().w(px(LOG_SOURCE_COL)))
+                                .child(div().flex_none().w(px(LOG_PID_COL)))
+                                .child(clipped(("log-message", i), text.clone(), text))
+                        }
+                    }
+                })
+                .collect()
+        })
+        .track_scroll(&self.log_scroll)
+        .flex_1();
+
+        div()
+            .id("logs-panel")
+            .test_support()
+            .flex()
+            .flex_col()
+            .size_full()
+            .border_t_1()
+            .border_color(border)
+            .child(toolbar)
+            .child(header)
+            .child(
+                div()
+                    .id("logs-list")
+                    .test_support()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    // Scrolling up to read stops following new lines.
+                    .on_scroll(cx.listener(|this, ev: &ScrollEvent, _, cx| {
+                        if ev.delta.pixel_delta(px(ROW_HEIGHT)).y > px(0.) && this.log_follow {
+                            this.log_follow = false;
+                            cx.notify();
+                        }
+                    }))
+                    .child(list),
+            )
+    }
+
     /// Sort by `key`, or flip the direction if already sorted by it.
     fn sort_by(&mut self, key: SortKey, cx: &mut Context<Self>) {
         self.sort = if self.sort.0 == key {
@@ -1853,6 +2105,10 @@ impl AppState {
             .on_action(cx.listener(|this, _: &ToggleGraph, _, cx| this.toggle_cursor(cx)))
             .on_action(cx.listener(|this, _: &ClearGraph, _, cx| this.clear_graph(cx)))
             .on_action(cx.listener(|this, _: &About, window, cx| this.open_about(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleLogs, _, cx| {
+                this.show_logs = !this.show_logs;
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ToggleGraphPanel, _, cx| {
                 this.graph_visible = !this.graph_visible;
                 cx.notify();
@@ -2246,6 +2502,27 @@ fn mono_char_width(window: &Window, cx: &App) -> Pixels {
         .unwrap_or(size * 0.6)
 }
 
+/// Widths of the log table's fixed columns.
+const LOG_TIME_COL: f32 = 64.;
+const LOG_PRI_COL: f32 = 52.;
+const LOG_SOURCE_COL: f32 = 160.;
+const LOG_PID_COL: f32 = 56.;
+
+/// A syslog priority's label and colour: errors and worse red, warnings
+/// orange, notices plain, info and debug muted.
+fn priority_style(p: u8, theme: &gpui_kit::component::Theme) -> (&'static str, Hsla) {
+    const LABELS: [&str; 8] = [
+        "EMERG", "ALERT", "CRIT", "ERR", "WARN", "NOTICE", "INFO", "DEBUG",
+    ];
+    let color = match p {
+        0..=3 => theme.danger,
+        4 => theme.warning,
+        5 => theme.foreground,
+        _ => theme.muted_foreground,
+    };
+    (LABELS[p.min(7) as usize], color)
+}
+
 /// A size in KiB as table text; "–" when the agent didn't report it.
 fn size_cell(kib: Option<u64>) -> String {
     kib.map_or_else(|| "–".into(), |k| format::bytes(k as f64 * 1024.0))
@@ -2262,7 +2539,7 @@ impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mono_char = mono_char_width(window, cx);
         self.refresh_graph_names();
-        let graph_shown = self.graph_shown();
+        let panel_shown = self.panel_shown();
         // Keep the panel within the window if the window shrank.
         let max_graph = (window.viewport_size().height - px(GRAPH_MIN_LIST)).max(px(GRAPH_MIN));
         self.graph_height = self.graph_height.clamp(px(GRAPH_MIN), max_graph);
@@ -2273,7 +2550,13 @@ impl Render for AppState {
 
         let main = match self.selected.and_then(|id| self.hosts().get(&id)) {
             Some(host) => {
-                let graph = graph_shown.then(|| self.render_graph(host, cx));
+                let graph = panel_shown.then(|| {
+                    if self.show_logs {
+                        self.render_logs(host, cx).into_any_element()
+                    } else {
+                        self.render_graph(host, cx).into_any_element()
+                    }
+                });
                 div()
                     .flex()
                     .flex_col()
@@ -3571,5 +3854,170 @@ mod tests {
                 (4096.0, 8192.0)
             );
         });
+    }
+
+    /// A host with one sample and, unless `lines` is empty, log lines
+    /// numbered from 0 with a gap of two after the first.
+    fn host_with_logs(app: &Entity<AppState>, cx: &mut TestAppContext, lines: &[&str]) {
+        app.update(cx, |app, cx| {
+            let frame = sysmon_proto::Frame {
+                host_id: 1,
+                boot_id: 1,
+                seq: 0,
+                system: Some(sysmon_proto::SystemSample {
+                    ts_unix_ns: 1_000_000_000,
+                    ..Default::default()
+                }),
+                procs: vec![],
+                threads: vec![],
+                complete: true,
+                received_ns: 1,
+            };
+            apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+            let entry = |msg: &str| sysmon_proto::LogEntry {
+                ts_unix_ns: 1_000_000_000,
+                priority: 3,
+                unit: Some("web.service".into()),
+                ident: "web".into(),
+                pid: Some(42),
+                message: msg.into(),
+                truncated: false,
+            };
+            for (i, msg) in lines.iter().enumerate() {
+                let first_seq = if i == 0 { 0 } else { i as u64 + 2 };
+                apply(
+                    &mut app.live_hosts,
+                    sysmon_ingest::Event::Logs {
+                        host_id: 1,
+                        boot_id: 1,
+                        batch: sysmon_proto::LogBatch {
+                            run: 7,
+                            first_seq,
+                            dropped: 0,
+                            entries: vec![entry(msg)],
+                        },
+                        received_ns: 10 + i as u64,
+                    },
+                );
+            }
+            // Past the reorder wait, so the gap is called lost.
+            apply(
+                &mut app.live_hosts,
+                sysmon_ingest::Event::Logs {
+                    host_id: 1,
+                    boot_id: 1,
+                    batch: sysmon_proto::LogBatch {
+                        run: 7,
+                        first_seq: if lines.is_empty() {
+                            0
+                        } else {
+                            lines.len() as u64 + 2
+                        },
+                        dropped: 0,
+                        entries: vec![],
+                    },
+                    received_ns: 20 + sysmon_model::logs::REORDER_WAIT_NS,
+                },
+            );
+            app.ensure_selection();
+            cx.notify();
+        });
+    }
+
+    #[gpui_kit::test]
+    fn the_logs_tab_lists_lines_and_follows_until_scrolled(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        host_with_logs(&app, cx, &["first\nmore", "second", "third"]);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                f(window, cx)
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        step(cx, &|w, cx| w.press("l", cx));
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            w.render_frame(cx);
+            let msg = |i: usize| {
+                w.find(("log-message", i))
+                    .description()
+                    .map(|d| d.to_string())
+            };
+            assert_eq!(msg(0).as_deref(), Some("first\nmore"), "full text on hover");
+            assert_eq!(
+                msg(1).as_deref(),
+                Some("2 lines lost on the way (datagrams didn't arrive)")
+            );
+            assert_eq!(msg(3).as_deref(), Some("third"));
+            assert_eq!(
+                w.find("logs-status")
+                    .description()
+                    .map(|d| d.to_string())
+                    .as_deref(),
+                Some("4 lines")
+            );
+            assert!(w.try_find("logs-latest").is_none(), "following");
+        })
+        .unwrap();
+
+        // Nothing is picked, so the Graph tab can't be chosen.
+        step(cx, &|w, cx| w.click("tab-graph", cx));
+        assert!(app.read_with(cx, |a, _| a.show_logs));
+
+        // Scrolling up stops following; Jump to latest resumes.
+        step(cx, &|w, cx| {
+            let at = w.find("logs-list").bounds().center();
+            w.dispatch_event(
+                gpui_kit::PlatformInput::Scroll(gpui_kit::ScrollEvent {
+                    position: at,
+                    delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                        gpui_kit::px(0.),
+                        gpui_kit::px(40.),
+                    )),
+                    ..Default::default()
+                }),
+                cx,
+            );
+        });
+        assert!(!app.read_with(cx, |a, _| a.log_follow));
+        step(cx, &|w, cx| w.click("logs-latest", cx));
+        assert!(app.read_with(cx, |a, _| a.log_follow));
+
+        // Clicking a line highlights it.
+        step(cx, &|w, cx| w.click(("log-row", 2usize), cx));
+        app.read_with(cx, |a, _| {
+            assert_eq!(a.log_cursor, Some((11, 1_000_000_000)));
+            assert!(!a.log_follow);
+        });
+        step(cx, &|w, cx| w.press("l", cx));
+        assert!(!app.read_with(cx, |a, _| a.show_logs));
+    }
+
+    #[gpui_kit::test]
+    fn the_logs_tab_says_when_a_host_sends_none(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        host_with_logs(&app, cx, &[]);
+        app.update(cx, |a, _| {
+            a.live_hosts.get_mut(&1).unwrap().logs = Default::default()
+        });
+        cx.update_window(window, |_, w, cx| {
+            w.press("l", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert_eq!(
+                w.find("logs-status")
+                    .description()
+                    .map(|d| d.to_string())
+                    .as_deref(),
+                Some("No logs from this host: start its agent with --logs")
+            );
+        })
+        .unwrap();
     }
 }
