@@ -26,8 +26,11 @@ pub struct HostModel {
     pub proc_history: VecDeque<ProcFrame>,
     pub frames_received: u64,
     pub frames_incomplete: u64,
-    /// Sample timestamp of the last frame that had one.
+    /// Sample timestamp of the last frame that had one (the agent's clock).
     pub last_seen_ns: u64,
+    /// When the monitor last received a sample from this host (the
+    /// monitor's clock); what "silent" is judged by.
+    pub last_received_ns: u64,
 
     meta: HashMap<ProcKey, ProcMeta>,
     users: HashMap<u32, String>,
@@ -169,6 +172,7 @@ impl HostModel {
 
     fn apply_frame(&mut self, frame: Frame) {
         self.frames_received += 1;
+        self.last_received_ns = self.last_received_ns.max(frame.received_ns);
         if !frame.complete {
             self.frames_incomplete += 1;
         }
@@ -532,6 +536,7 @@ mod tests {
             procs,
             threads: Vec::new(),
             complete,
+            received_ns: 0,
         })
     }
 

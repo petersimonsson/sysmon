@@ -455,10 +455,6 @@ impl AppState {
             .gap_1()
             .border_r_1()
             .border_color(theme.border);
-        let now = match self.view {
-            View::Live => sysmon_ingest::unix_now_ns(),
-            View::Replay => self.status().map_or(0, |s| s.position_ns),
-        };
         for (&id, host) in self.hosts() {
             let selected = self.selected == Some(id);
             let loss = if host.frames_received == 0 {
@@ -466,15 +462,11 @@ impl AppState {
             } else {
                 host.frames_incomplete as f32 / host.frames_received as f32 * 100.0
             };
-            let interval_ns = host.info.as_ref().map_or(1000, |i| i.interval_ms) as u64 * 1_000_000;
-            let stale = now.saturating_sub(host.last_seen_ns) > 3 * interval_ns;
-            let detail = if stale && self.view == View::Live {
-                format!(
-                    "silent {}",
-                    format::duration(now.saturating_sub(host.last_seen_ns))
-                )
-            } else {
-                format!("{loss:.1}% incomplete")
+            let silence = self.silence(host);
+            let stale = silence.is_some();
+            let detail = match silence {
+                Some(ns) if self.view == View::Live => format!("silent {}", format::duration(ns)),
+                _ => format!("{loss:.1}% incomplete"),
             };
             list = list.child(
                 div()
@@ -513,6 +505,20 @@ impl AppState {
             );
         }
         list
+    }
+
+    /// How long `host` has been silent, if it has missed a few intervals.
+    /// Judged by when the monitor received its last sample, on the
+    /// monitor's clock (the playback position when replaying), so a skewed
+    /// clock on the agent doesn't matter.
+    fn silence(&self, host: &HostModel) -> Option<u64> {
+        let now = match self.view {
+            View::Live => sysmon_ingest::unix_now_ns(),
+            View::Replay => self.status().map_or(0, |s| s.position_ns),
+        };
+        let interval_ns = host.info.as_ref().map_or(1000, |i| i.interval_ms) as u64 * 1_000_000;
+        let since = now.saturating_sub(host.last_received_ns);
+        (host.last_received_ns == 0 || since > 3 * interval_ns).then_some(since)
     }
 
     fn render_header(host: &HostModel, cx: &Context<Self>) -> impl IntoElement + use<> {
@@ -2336,6 +2342,7 @@ mod tests {
                     })
                     .collect(),
                 complete: true,
+                received_ns: 0,
             };
             apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
             app.ensure_selection();
@@ -3011,6 +3018,7 @@ mod tests {
                 procs: vec![],
                 threads: vec![],
                 complete: true,
+                received_ns: 0,
             };
             apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
             app.ensure_selection();
@@ -3018,5 +3026,47 @@ mod tests {
         });
         cx.update_window(window, |_, window, cx| window.render_frame(cx))
             .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn silence_is_judged_by_the_monitors_clock_not_the_agents(cx: &mut TestAppContext) {
+        let (_window, app) = open(cx);
+        let now = sysmon_ingest::unix_now_ns();
+        let sample = |agent_ts: u64, received: u64| sysmon_proto::Frame {
+            host_id: 1,
+            boot_id: 1,
+            seq: 0,
+            system: Some(sysmon_proto::SystemSample {
+                ts_unix_ns: agent_ts,
+                ..Default::default()
+            }),
+            procs: vec![],
+            threads: vec![],
+            complete: true,
+            received_ns: received,
+        };
+        // The agent's clock is 10 s behind, but the sample just arrived.
+        app.update(cx, |app, _| {
+            apply(
+                &mut app.live_hosts,
+                sysmon_ingest::Event::Frame(sample(now - 10_000_000_000, now)),
+            );
+        });
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.silence(&app.live_hosts[&1]), None)
+        });
+
+        // A host whose last sample arrived 10 s ago is silent, whatever its clock says.
+        app.update(cx, |app, _| {
+            app.live_hosts.clear();
+            apply(
+                &mut app.live_hosts,
+                sysmon_ingest::Event::Frame(sample(now, now - 10_000_000_000)),
+            );
+        });
+        app.read_with(cx, |app, _| {
+            let s = app.silence(&app.live_hosts[&1]).expect("silent");
+            assert!(s >= 10_000_000_000);
+        });
     }
 }

@@ -63,9 +63,10 @@ fn run(socket: UdpSocket, opener: sysmon_proto::Opener, sinks: Sinks) {
                     }
                 };
                 let bytes = &bytes[..];
+                let recv_ns = unix_now_ns();
                 if let Some(raw) = &sinks.raw {
                     let item = RawDatagram {
-                        recv_ts_ns: unix_now_ns(),
+                        recv_ts_ns: recv_ns,
                         from,
                         bytes: bytes.to_vec(),
                     };
@@ -74,7 +75,7 @@ fn run(socket: UdpSocket, opener: sysmon_proto::Opener, sinks: Sinks) {
                     }
                 }
                 match sysmon_proto::decode(bytes) {
-                    Ok((header, msg)) => assembler.push(header, msg, now),
+                    Ok((header, msg)) => assembler.push(header, msg, now, recv_ns),
                     Err(err) => tracing::debug!(%from, %err, "undecodable datagram"),
                 }
             }

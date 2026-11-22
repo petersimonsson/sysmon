@@ -141,7 +141,7 @@ impl ReplaySource {
         let base = self.range.map_or(0, |r| r.0);
         let now = self.epoch + Duration::from_nanos(ts.saturating_sub(base));
         if let Ok((h, m)) = sysmon_proto::decode(&record.datagram) {
-            self.assembler.push(h, m, now);
+            self.assembler.push(h, m, now, ts);
         }
         self.assembler.flush_stale(now);
         self.pending.extend(self.assembler.drain());

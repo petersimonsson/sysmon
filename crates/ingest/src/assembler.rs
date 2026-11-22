@@ -63,7 +63,9 @@ impl Assembler {
         }
     }
 
-    pub fn push(&mut self, h: Header, msg: Msg, now: Instant) {
+    /// Add a datagram received at `now` (for timeouts) and `recv_ns` (the
+    /// monitor's clock, recorded on the frame).
+    pub fn push(&mut self, h: Header, msg: Msg, now: Instant, recv_ns: u64) {
         match msg {
             Msg::HostInfo(info) => {
                 self.out.push(Event::HostInfo {
@@ -134,12 +136,14 @@ impl Assembler {
                 procs: Vec::new(),
                 threads: Vec::new(),
                 complete: false,
+                received_ns: recv_ns,
             },
         });
         if h.chunks != partial.chunks || partial.received[h.chunk as usize] {
             return;
         }
         partial.received[h.chunk as usize] = true;
+        partial.frame.received_ns = partial.frame.received_ns.max(recv_ns);
         match msg {
             Msg::System(s) => partial.frame.system = Some(s),
             Msg::Procs(p) => partial.frame.procs.extend(p),
@@ -235,7 +239,7 @@ mod tests {
         let mut a = Assembler::new(Duration::from_secs(1));
         let dgrams = datagrams(1, 0);
         for (h, m) in dgrams.iter().cloned() {
-            a.push(h, m, now);
+            a.push(h, m, now, 0);
         }
         let out = frames(&mut a);
         assert_eq!(out.len(), 1);
@@ -244,7 +248,7 @@ mod tests {
 
         // Duplicates arriving late are ignored.
         let (h, m) = dgrams[1].clone();
-        a.push(h, m, now);
+        a.push(h, m, now, 0);
         assert!(frames(&mut a).is_empty());
     }
 
@@ -269,7 +273,7 @@ mod tests {
             .collect();
         let mut a = Assembler::new(Duration::from_secs(1));
         for (h, m) in dgrams.iter().cloned() {
-            a.push(h, m, now);
+            a.push(h, m, now, 0);
         }
         let out = frames(&mut a);
         assert_eq!(out.len(), 1);
@@ -279,7 +283,7 @@ mod tests {
         // Losing a thread chunk makes the sample incomplete.
         let mut a = Assembler::new(Duration::from_secs(1));
         for (h, m) in dgrams.iter().take(dgrams.len() - 1).cloned() {
-            a.push(h, m, now);
+            a.push(h, m, now, 0);
         }
         a.flush_stale(now + Duration::from_secs(2));
         let out = frames(&mut a);
@@ -292,12 +296,12 @@ mod tests {
         let now = Instant::now();
         let mut a = Assembler::new(Duration::from_secs(1));
         for (h, m) in datagrams(1, 0).into_iter().skip(1) {
-            a.push(h, m, now);
+            a.push(h, m, now, 0);
         }
         assert!(frames(&mut a).is_empty());
 
         let (h, m) = datagrams(2, 0).remove(0);
-        a.push(h, m, now);
+        a.push(h, m, now, 0);
         let out = frames(&mut a);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].seq, 1);
@@ -310,11 +314,24 @@ mod tests {
         let now = Instant::now();
         let mut a = Assembler::new(Duration::from_secs(1));
         let (h, m) = datagrams(1, 0).remove(0);
-        a.push(h, m, now);
+        a.push(h, m, now, 0);
         a.flush_stale(now + Duration::from_millis(500));
         assert!(frames(&mut a).is_empty());
         a.flush_stale(now + Duration::from_secs(2));
         assert_eq!(frames(&mut a).len(), 1);
+    }
+
+    #[test]
+    fn frames_record_when_the_monitor_received_them() {
+        let now = Instant::now();
+        let mut a = Assembler::new(Duration::from_secs(1));
+        let dgrams = datagrams(1, 0);
+        let n = dgrams.len() as u64;
+        // Chunks arriving at monitor times 100, 101, ...; the frame keeps the newest.
+        for (i, (h, m)) in dgrams.into_iter().enumerate() {
+            a.push(h, m, now, 100 + i as u64);
+        }
+        assert_eq!(frames(&mut a)[0].received_ns, 100 + n - 1);
     }
 
     #[test]
@@ -323,7 +340,7 @@ mod tests {
         let mut a = Assembler::new(Duration::from_secs(1));
         for seq in 0..500 {
             for (h, m) in datagrams(seq, 1) {
-                a.push(h, m, now);
+                a.push(h, m, now, 0);
             }
         }
         assert_eq!(frames(&mut a).len(), 500);
@@ -331,7 +348,7 @@ mod tests {
         // Same host and boot, numbering starts again at 0.
         for seq in 0..5 {
             for (h, m) in datagrams(seq, 1) {
-                a.push(h, m, now);
+                a.push(h, m, now, 0);
             }
         }
         let out = frames(&mut a);
@@ -348,13 +365,13 @@ mod tests {
         let mut a = Assembler::new(Duration::from_secs(1));
         for seq in 0..500 {
             for (h, m) in datagrams(seq, 1) {
-                a.push(h, m, now);
+                a.push(h, m, now, 0);
             }
         }
         frames(&mut a);
         // Samples 0-2 of the new run are lost; 3 is far behind 499.
         for (h, m) in datagrams(3, 1) {
-            a.push(h, m, now);
+            a.push(h, m, now, 0);
         }
         assert_eq!(
             frames(&mut a).iter().map(|f| f.seq).collect::<Vec<_>>(),
@@ -368,13 +385,13 @@ mod tests {
         let mut a = Assembler::new(Duration::from_secs(1));
         for seq in 0..100 {
             for (h, m) in datagrams(seq, 1) {
-                a.push(h, m, now);
+                a.push(h, m, now, 0);
             }
         }
         frames(&mut a);
         // A duplicate of sample 98 turning up late is not a restart.
         for (h, m) in datagrams(98, 1) {
-            a.push(h, m, now);
+            a.push(h, m, now, 0);
         }
         assert!(frames(&mut a).is_empty());
     }
@@ -384,10 +401,10 @@ mod tests {
         let now = Instant::now();
         let mut a = Assembler::new(Duration::from_secs(1));
         for (h, m) in datagrams(100, 1) {
-            a.push(h, m, now);
+            a.push(h, m, now, 0);
         }
         for (h, m) in datagrams(0, 2) {
-            a.push(h, m, now);
+            a.push(h, m, now, 0);
         }
         let out = frames(&mut a);
         assert_eq!(out.len(), 2);
