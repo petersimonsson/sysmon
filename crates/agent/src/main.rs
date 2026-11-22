@@ -39,8 +39,10 @@ struct Args {
     /// software in this binary, then exit.
     #[arg(long, exclusive = true)]
     licenses: bool,
-    /// Send HostInfo and user names every this many samples.
-    #[arg(long, default_value_t = 10)]
+    /// Send HostInfo and user names every this many samples. Every sample
+    /// by default (about 150 bytes), so a monitor that starts or restarts
+    /// knows the host's name, settings and users from its first sample.
+    #[arg(long, default_value_t = 1)]
     host_info_every: u32,
     /// Resend metadata for every process every this many samples.
     #[arg(long, default_value_t = 30)]
@@ -118,9 +120,9 @@ fn main() -> anyhow::Result<()> {
 
         if host_tick {
             datagrams.push(host_info_datagram(host_id, boot_id, seq, &info)?);
-            if seq % (host_info_every * 6) == 0 {
-                users.refresh();
-            }
+        }
+        if seq % USER_REFRESH_EVERY == 0 {
+            users.refresh();
         }
         // Names for the uids in use: with every HostInfo, and as soon as a
         // lookup brings a new one, so users don't show as numbers for long.
@@ -177,6 +179,10 @@ fn main() -> anyhow::Result<()> {
     }
     unreachable!()
 }
+
+/// Look user names up again every this many samples (they rarely change,
+/// and directory lookups shouldn't be hammered).
+const USER_REFRESH_EVERY: u32 = 60;
 
 fn write_new_key(path: &std::path::Path) -> anyhow::Result<()> {
     use std::io::Write;
