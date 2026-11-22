@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=sysmon
+GenericName=System Monitor
+Comment=Watch and record remote machines' processes and resources
+Exec=sysmon-ui
+Terminal=false
+Categories=System;Monitor;
+StartupWMClass=sysmon

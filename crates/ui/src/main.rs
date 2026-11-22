@@ -53,6 +53,24 @@ struct Args {
     licenses: bool,
 }
 
+/// Wayland app ID / X11 WM_CLASS; matches `dist/sysmon.desktop`, so
+/// desktops can group the window with its entry and icon.
+const APP_ID: &str = "sysmon";
+
+/// gpui leaves the title and app ID empty, which shows as an untitled
+/// window in task switchers.
+fn window_options(bounds: Bounds<Pixels>) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            title: Some("sysmon".into()),
+            ..Default::default()
+        }),
+        app_id: Some(APP_ID.into()),
+        ..Default::default()
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -107,14 +125,7 @@ fn main() -> anyhow::Result<()> {
             })
             .detach();
         }
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                size(px(1200.), px(800.)),
-                cx,
-            ))),
-            ..Default::default()
-        };
+        let options = window_options(Bounds::centered(None, size(px(1200.), px(800.)), cx));
         gpui_kit::open_window(options, cx, |window, cx| {
             cx.new(|cx| app::AppState::new(start, window, cx))
         })
@@ -160,4 +171,22 @@ fn default_data_dir() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
         .unwrap_or_else(|| PathBuf::from("."))
         .join("sysmon")
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[core::prelude::v1::test]
+    fn the_window_has_a_title_and_app_id() {
+        let o = window_options(Bounds::default());
+        assert_eq!(
+            o.titlebar
+                .and_then(|t| t.title)
+                .as_ref()
+                .map(|t| t.as_ref()),
+            Some("sysmon")
+        );
+        assert_eq!(o.app_id.as_deref(), Some(APP_ID));
+    }
 }
