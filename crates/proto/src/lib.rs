@@ -54,6 +54,15 @@ pub enum Msg {
     /// Chunks 1..n of a sample.
     Procs(Vec<ProcSample>),
     ProcMeta(Vec<ProcMeta>),
+    /// Names for the uids of running processes. New variants go last so
+    /// existing recordings keep decoding.
+    Users(Vec<UserName>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserName {
+    pub uid: u32,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -265,6 +274,26 @@ pub fn encode_proc_meta(
     seq: u32,
     meta: &[ProcMeta],
 ) -> Result<Vec<Vec<u8>>> {
+    encode_standalone(host_id, boot_id, seq, meta, Msg::ProcMeta)
+}
+
+/// Encode user names as standalone datagrams, like [`encode_proc_meta`].
+pub fn encode_users(
+    host_id: u64,
+    boot_id: u128,
+    seq: u32,
+    users: &[UserName],
+) -> Result<Vec<Vec<u8>>> {
+    encode_standalone(host_id, boot_id, seq, users, Msg::Users)
+}
+
+fn encode_standalone<T: Serialize + Clone>(
+    host_id: u64,
+    boot_id: u128,
+    seq: u32,
+    items: &[T],
+    wrap: fn(Vec<T>) -> Msg,
+) -> Result<Vec<Vec<u8>>> {
     let header = Header {
         host_id,
         boot_id,
@@ -272,9 +301,9 @@ pub fn encode_proc_meta(
         chunk: 0,
         chunks: 1,
     };
-    pack(meta)?
+    pack(items)?
         .into_iter()
-        .map(|range| encode(&header, &Msg::ProcMeta(meta[range].to_vec())))
+        .map(|range| encode(&header, &wrap(items[range].to_vec())))
         .collect()
 }
 

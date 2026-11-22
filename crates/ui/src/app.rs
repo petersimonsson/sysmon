@@ -53,10 +53,7 @@ impl AppState {
     }
 
     fn apply(&mut self, event: Event) {
-        let host_id = match &event {
-            Event::Frame(f) => f.host_id,
-            Event::HostInfo { host_id, .. } | Event::ProcMeta { host_id, .. } => *host_id,
-        };
+        let host_id = event.host_id();
         self.hosts
             .entry(host_id)
             .or_insert_with(|| HostModel::new(host_id))

@@ -104,7 +104,10 @@ mod tests {
         write(&path, &records(10));
 
         // Simulate a crash in the middle of writing the next block.
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         f.write_all(&[0xff; 7]).unwrap();
         drop(f);
 
@@ -168,7 +171,8 @@ mod tests {
         let mut rec = Recorder::new(&dir);
         for h in 0..5u64 {
             for i in 0..10 {
-                rec.append(1, 2, base + h * hour + i * SEC, &[0u8; 200]).unwrap();
+                rec.append(1, 2, base + h * hour + i * SEC, &[0u8; 200])
+                    .unwrap();
             }
         }
         rec.append(3, 4, base, b"other host").unwrap();
@@ -186,7 +190,10 @@ mod tests {
         let report = prune(&dir, &by_age, now).unwrap();
         // Hours 07 and 08 (both hosts' 07) ended more than two hours ago.
         assert_eq!(report.removed_segments, 3);
-        assert!(!dir.join(format!("{:016x}", 3)).exists(), "empty host dir removed");
+        assert!(
+            !dir.join(format!("{:016x}", 3)).exists(),
+            "empty host dir removed"
+        );
 
         let by_size = Retention {
             max_age: None,

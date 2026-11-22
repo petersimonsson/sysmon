@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use sysmon_ingest::{Event, RawDatagram, Sinks};
-use sysmon_model::{DataSource, ReplaySource};
+use sysmon_model::{Feed, ReplaySource};
 use sysmon_store::Recorder;
 
 const EVENT_QUEUE: usize = 4096;
@@ -58,7 +58,7 @@ fn record(dir: PathBuf, rx: flume::Receiver<RawDatagram>) {
             Err(flume::RecvTimeoutError::Disconnected) => break,
         }
         if last_flush.elapsed() >= Duration::from_secs(10) {
-            if let Err(e) = recorder.flush() {
+            if let Err(e) = recorder.maintain(sysmon_ingest::unix_now_ns()) {
                 tracing::error!(error = %e, "flushing recording failed");
             }
             last_flush = Instant::now();
@@ -68,34 +68,17 @@ fn record(dir: PathBuf, rx: flume::Receiver<RawDatagram>) {
 }
 
 pub fn start_replay(path: &Path, speed: f64) -> anyhow::Result<flume::Receiver<Event>> {
-    let mut source = if path.is_dir() {
-        ReplaySource::from_dir(path).with_context(|| format!("reading {}", path.display()))?
-    } else {
-        ReplaySource::new(vec![path.to_path_buf()])
-    };
-    let speed = if speed > 0.0 { speed } else { 1.0 };
+    let source = ReplaySource::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let handle = sysmon_model::replay::spawn(source, speed)?;
     let (tx, rx) = flume::bounded(EVENT_QUEUE);
-
-    // TODO: move pacing into sysmon-model's PlaybackClock, with pause and seek.
-    std::thread::Builder::new()
-        .name("sysmon-replay".into())
-        .spawn(move || {
-            let mut last_ts: Option<u64> = None;
-            while let Some(event) = source.next_event() {
-                if let Event::Frame(f) = &event
-                    && let Some(s) = &f.system
-                {
-                    if let Some(prev) = last_ts {
-                        let gap = s.ts_unix_ns.saturating_sub(prev) as f64 / 1e9 / speed;
-                        std::thread::sleep(Duration::from_secs_f64(gap.min(2.0)));
-                    }
-                    last_ts = Some(s.ts_unix_ns);
-                }
-                if tx.send(event).is_err() {
-                    return;
-                }
+    std::thread::spawn(move || {
+        for feed in handle.feed.iter() {
+            if let Feed::Event(e) = feed
+                && tx.send(e).is_err()
+            {
+                return;
             }
-            tracing::info!("end of recording");
-        })?;
+        }
+    });
     Ok(rx)
 }

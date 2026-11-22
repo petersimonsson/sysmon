@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-use sysmon_proto::{Frame, Header, HostInfo, Msg, ProcMeta};
+use sysmon_proto::{Frame, Header, HostInfo, Msg, ProcMeta, UserName};
 
 /// Output of the assembler.
 #[derive(Debug, Clone, PartialEq)]
@@ -9,6 +9,18 @@ pub enum Event {
     Frame(Frame),
     HostInfo { host_id: u64, info: HostInfo },
     ProcMeta { host_id: u64, meta: Vec<ProcMeta> },
+    Users { host_id: u64, users: Vec<UserName> },
+}
+
+impl Event {
+    pub fn host_id(&self) -> u64 {
+        match self {
+            Event::Frame(f) => f.host_id,
+            Event::HostInfo { host_id, .. }
+            | Event::ProcMeta { host_id, .. }
+            | Event::Users { host_id, .. } => *host_id,
+        }
+    }
 }
 
 /// Reassembles chunked samples into [`Frame`]s.
@@ -59,6 +71,13 @@ impl Assembler {
                 self.out.push(Event::ProcMeta {
                     host_id: h.host_id,
                     meta,
+                });
+                return;
+            }
+            Msg::Users(users) => {
+                self.out.push(Event::Users {
+                    host_id: h.host_id,
+                    users,
                 });
                 return;
             }
