@@ -45,6 +45,12 @@ const GRAPH_MIN_LIST: f32 = 300.;
 /// Slider resolution: positions are mapped onto 0..TIMELINE_STEPS.
 const TIMELINE_STEPS: f32 = 10_000.;
 const SPEEDS: [f64; 5] = [1., 4., 16., 64., 256.];
+/// A live host not heard from for this long is dropped, history and all.
+const FORGET_AFTER_NS: u64 = 3600 * 1_000_000_000;
+/// At most this many live hosts are kept; past it, the one silent longest
+/// goes. Each can hold tens of MB of history, and without a key anyone can
+/// send datagrams under made-up host IDs.
+const MAX_LIVE_HOSTS: usize = 256;
 
 /// What the app starts with; built in `main` before the window opens.
 pub struct Start {
@@ -85,6 +91,8 @@ pub struct AppState {
     view: View,
     live_enabled: bool,
     live_hosts: BTreeMap<u64, HostModel>,
+    /// When the monitor last got anything from each live host (its clock).
+    live_heard: HashMap<u64, u64>,
     replay: Option<ReplaySession>,
     next_session: u64,
     data_dir: PathBuf,
@@ -149,9 +157,11 @@ impl AppState {
                     let batch: Vec<Event> =
                         std::iter::once(first).chain(events.try_iter()).collect();
                     let alive = this.update(cx, |this, cx| {
+                        let now = sysmon_ingest::unix_now_ns();
                         for event in batch {
-                            apply(&mut this.live_hosts, event);
+                            this.apply_live(event, now);
                         }
+                        this.forget_hosts(now);
                         if this.view == View::Live {
                             this.ensure_selection();
                             cx.notify();
@@ -229,6 +239,7 @@ impl AppState {
             view: View::Live,
             live_enabled: start.live.is_some(),
             live_hosts: BTreeMap::new(),
+            live_heard: HashMap::new(),
             replay: None,
             next_session: 0,
             data_dir: start.data_dir,
@@ -268,6 +279,39 @@ impl AppState {
         match (self.view, &self.replay) {
             (View::Replay, Some(s)) => &s.hosts,
             _ => &self.live_hosts,
+        }
+    }
+
+    fn apply_live(&mut self, event: Event, now: u64) {
+        self.live_heard.insert(event.host_id(), now);
+        apply(&mut self.live_hosts, event);
+    }
+
+    /// Drop live hosts silent for [`FORGET_AFTER_NS`], then the longest
+    /// silent while there are more than [`MAX_LIVE_HOSTS`].
+    fn forget_hosts(&mut self, now: u64) {
+        let heard = |id: &u64| self.live_heard.get(id).copied().unwrap_or(0);
+        let mut gone: Vec<u64> = self
+            .live_hosts
+            .keys()
+            .filter(|id| now.saturating_sub(heard(id)) > FORGET_AFTER_NS)
+            .copied()
+            .collect();
+        let left = self.live_hosts.len() - gone.len();
+        if left > MAX_LIVE_HOSTS {
+            let mut rest: Vec<u64> = self
+                .live_hosts
+                .keys()
+                .filter(|id| !gone.contains(id))
+                .copied()
+                .collect();
+            rest.sort_by_key(|id| heard(id));
+            gone.extend(&rest[..left - MAX_LIVE_HOSTS]);
+        }
+        for id in gone {
+            self.live_hosts.remove(&id);
+            self.live_heard.remove(&id);
+            self.selections.remove(&(View::Live, id));
         }
     }
 
@@ -2226,7 +2270,9 @@ impl Render for AppState {
 #[cfg(test)]
 mod tests {
     // Explicit imports: the gpui glob would shadow `#[test]`.
-    use super::{AppState, SortKey, Start, View, apply};
+    use super::{
+        AppState, FORGET_AFTER_NS, MAX_LIVE_HOSTS, Selection, SortKey, Start, View, apply,
+    };
     use gpui_kit::Modifiers;
     use sysmon_model::SeriesTarget;
     use sysmon_proto::ProcKey;
@@ -3173,5 +3219,44 @@ mod tests {
         app.update(cx, |a, _| a.error = Some("boom".into()));
         step(cx, &|w, cx| w.press("escape", cx));
         assert_eq!(app.read_with(cx, |a, _| a.error.clone()), None);
+    }
+
+    #[gpui_kit::test]
+    fn live_hosts_that_go_away_are_forgotten(cx: &mut TestAppContext) {
+        let (_window, app) = open(cx);
+        let info = |host_id: u64| sysmon_ingest::Event::HostInfo {
+            host_id,
+            info: sysmon_proto::HostInfo {
+                hostname: format!("h{host_id}"),
+                kernel: "6".into(),
+                cpu_count: 1,
+                mem_total_kib: 1 << 20,
+                clk_tck: 100,
+                page_size: 4096,
+                interval_ms: 1000,
+                sends_threads: false,
+            },
+        };
+        let hour = FORGET_AFTER_NS;
+        app.update(cx, |app, _| {
+            app.apply_live(info(1), 1_000);
+            app.apply_live(info(2), 1_000 + hour);
+            app.selections.insert((View::Live, 1), Selection::default());
+            app.forget_hosts(1_000 + hour + 1);
+            assert_eq!(app.live_hosts.keys().copied().collect::<Vec<_>>(), [2]);
+            assert!(!app.selections.contains_key(&(View::Live, 1)));
+
+            // A flood of host IDs: the longest silent go first.
+            for id in 10..10 + MAX_LIVE_HOSTS as u64 + 5 {
+                app.apply_live(info(id), 2 * hour + id);
+            }
+            app.forget_hosts(2 * hour + 1_000);
+            assert_eq!(app.live_hosts.len(), MAX_LIVE_HOSTS);
+            assert!(!app.live_hosts.contains_key(&2));
+            assert!(
+                app.live_hosts
+                    .contains_key(&(10 + MAX_LIVE_HOSTS as u64 + 4))
+            );
+        });
     }
 }
