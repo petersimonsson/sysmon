@@ -3,9 +3,10 @@
 //! Everything here returns raw cumulative counters; rates are the monitor's job.
 
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 
 use sysmon_proto::{
     CpuCounters, DiskStat, HostInfo, MemInfo, NetIf, ProcKey, ProcMeta, ProcSample, SystemSample,
@@ -33,8 +34,37 @@ thread_local! {
 /// interface) from the monitor. Invalid bytes become U+FFFD instead.
 fn with_file<T>(path: &str, f: impl FnOnce(&str) -> T) -> Option<T> {
     BUF.with_borrow_mut(|buf| {
-        buf.clear();
-        fs::File::open(path).ok()?.read_to_end(buf).ok()?;
+        let mut file = fs::File::open(path).ok()?;
+        read_all(buf, |chunk, _| file.read(chunk)).ok()?;
+        Some(f(&String::from_utf8_lossy(buf)))
+    })
+}
+
+/// Fill `buf` with a whole file through `read(chunk, offset)`. Not
+/// `read_to_end`, which first asks for the file's size and position: two
+/// wasted system calls per file, as `/proc` files report a size of 0.
+fn read_all(
+    buf: &mut Vec<u8>,
+    mut read: impl FnMut(&mut [u8], u64) -> std::io::Result<usize>,
+) -> std::io::Result<()> {
+    buf.clear();
+    loop {
+        let start = buf.len();
+        buf.resize(start + 4096, 0);
+        let n = read(&mut buf[start..], start as u64)?;
+        buf.truncate(start + n);
+        // A /proc file is produced whole on the first read when it fits, so
+        // a short read is the end; a full one may have more after it.
+        if n < 4096 {
+            return Ok(());
+        }
+    }
+}
+
+/// Read a kept-open file from its start, as [`with_file`] does a path.
+fn with_open_file<T>(file: &fs::File, f: impl FnOnce(&str) -> T) -> Option<T> {
+    BUF.with_borrow_mut(|buf| {
+        read_all(buf, |chunk, offset| file.read_at(chunk, offset)).ok()?;
         Some(f(&String::from_utf8_lossy(buf)))
     })
 }
@@ -89,39 +119,249 @@ pub fn system(ts_unix_ns: u64) -> SystemSample {
     }
 }
 
-/// Every process in `/proc`, and with `threads`, every thread of every user
-/// process other than its main thread. Processes and threads that exit
-/// mid-scan are skipped.
-pub fn procs(out: &mut Vec<ProcSample>, mut threads: Option<&mut Vec<ThreadSample>>) {
-    out.clear();
-    if let Some(t) = threads.as_deref_mut() {
-        t.clear();
+/// Reads every process (and thread) each sample, keeping their `/proc`
+/// files open in between.
+///
+/// Opening a `/proc/[pid]` file costs far more than reading it: with ~480
+/// processes, opening, reading and closing `stat` and `statm` took 4.3 ms
+/// per sample, and re-reading them open from offset 0 took 1.0 ms. A read
+/// from offset 0 produces the file afresh. Once its process has exited, a
+/// file kept open fails to read rather than showing another process, so a
+/// reused pid is never mixed up: the file is just opened again.
+///
+/// At most [`Collector::max_open`] files are kept (the rest are opened per
+/// read as before), under the open-file limit, which [`Collector::new`]
+/// raises to its hard maximum.
+pub struct Collector {
+    procs: HashMap<u32, ProcFiles>,
+    threads: HashMap<u32, fs::File>,
+    open: usize,
+    max_open: usize,
+}
+
+#[derive(Default)]
+struct ProcFiles {
+    stat: Option<fs::File>,
+    statm: Option<fs::File>,
+}
+
+/// Open-file limit kept free for everything else (sockets, journalctl's
+/// pipe, one-off reads).
+const SPARE_FDS: u64 = 256;
+
+impl Collector {
+    pub fn new() -> Self {
+        Self::with_max_open(raise_fd_limit().saturating_sub(SPARE_FDS) as usize)
     }
-    let Ok(dir) = fs::read_dir("/proc") else {
-        return;
-    };
-    for entry in dir.flatten() {
-        let name = entry.file_name();
-        let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
-            continue;
+
+    fn with_max_open(max_open: usize) -> Self {
+        Self {
+            procs: HashMap::new(),
+            threads: HashMap::new(),
+            open: 0,
+            max_open,
+        }
+    }
+
+    /// Every process in `/proc`, and with `threads`, every thread of every
+    /// user process other than its main thread. Processes and threads that
+    /// exit mid-scan are skipped.
+    pub fn procs(
+        &mut self,
+        out: &mut Vec<ProcSample>,
+        mut threads: Option<&mut Vec<ThreadSample>>,
+    ) {
+        out.clear();
+        if let Some(t) = threads.as_deref_mut() {
+            t.clear();
+        }
+        let Ok(dir) = fs::read_dir("/proc") else {
+            return;
         };
-        if let Some(mut p) =
-            with_file(&format!("/proc/{pid}/stat"), |s| parse_proc_stat(pid, s)).flatten()
-        {
+        let mut seen = HashSet::new();
+        let mut seen_threads = HashSet::new();
+        for entry in dir.flatten() {
+            let name = entry.file_name();
+            let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
+            seen.insert(pid);
+            let files = self.procs.entry(pid).or_default();
+            let budget = Budget {
+                open: &mut self.open,
+                max: self.max_open,
+            };
+            let Some(mut p) = read_kept(
+                &mut files.stat,
+                budget,
+                || format!("/proc/{pid}/stat"),
+                |s| parse_proc_stat(pid, s),
+            )
+            .flatten() else {
+                continue;
+            };
             // SHR is only in statm. If the process exits in between, it's
             // simply unknown for this sample.
-            p.shared_pages = with_file(&format!("/proc/{pid}/statm"), parse_statm_shared).flatten();
+            let budget = Budget {
+                open: &mut self.open,
+                max: self.max_open,
+            };
+            p.shared_pages = read_kept(
+                &mut files.statm,
+                budget,
+                || format!("/proc/{pid}/statm"),
+                parse_statm_shared,
+            )
+            .flatten();
             // Kernel threads are single-threaded; a process with one thread
             // has only its main thread, which is the process row itself.
             if let Some(t) = threads.as_deref_mut()
                 && p.kernel_thread != Some(true)
                 && p.threads > 1
             {
-                read_threads(pid, t);
+                self.read_threads(pid, t, &mut seen_threads);
             }
             out.push(p);
         }
+        // Close the files of what's gone.
+        let mut closed = 0;
+        self.procs.retain(|pid, f| {
+            let keep = seen.contains(pid);
+            if !keep {
+                closed += f.stat.is_some() as usize + f.statm.is_some() as usize;
+            }
+            keep
+        });
+        self.threads.retain(|tid, _| {
+            let keep = seen_threads.contains(tid);
+            closed += !keep as usize;
+            keep
+        });
+        self.open -= closed;
     }
+
+    fn read_threads(&mut self, tgid: u32, out: &mut Vec<ThreadSample>, seen: &mut HashSet<u32>) {
+        let Ok(dir) = fs::read_dir(format!("/proc/{tgid}/task")) else {
+            return;
+        };
+        for entry in dir.flatten() {
+            let Some(tid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|s| s.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if tid == tgid {
+                continue;
+            }
+            let mut slot = self.threads.remove(&tid);
+            let budget = Budget {
+                open: &mut self.open,
+                max: self.max_open,
+            };
+            let t = read_kept(
+                &mut slot,
+                budget,
+                || format!("/proc/{tgid}/task/{tid}/stat"),
+                |s| parse_thread_stat(tgid, tid, s),
+            )
+            .flatten();
+            // Without a file (over budget, or it couldn't be read),
+            // read_kept has already counted it as closed.
+            if let Some(f) = slot {
+                self.threads.insert(tid, f);
+                seen.insert(tid);
+            }
+            out.extend(t);
+        }
+    }
+
+    /// Files kept open now.
+    #[cfg(test)]
+    fn open_files(&self) -> usize {
+        self.open
+    }
+}
+
+/// The count of kept files, and the most allowed.
+struct Budget<'a> {
+    open: &'a mut usize,
+    max: usize,
+}
+
+/// Read `slot`'s file from the start, or open `path()` if it's not open (or
+/// the open one failed: its process exited), keeping it in `slot` while
+/// under the budget.
+fn read_kept<T>(
+    slot: &mut Option<fs::File>,
+    budget: Budget,
+    path: impl FnOnce() -> String,
+    f: impl FnOnce(&str) -> T,
+) -> Option<T> {
+    if let Some(file) = slot {
+        // Can't hand `f` to two reads: on failure, fall through with it unused.
+        let mut f = Some(f);
+        let r = BUF.with_borrow_mut(|buf| {
+            read_all(buf, |chunk, offset| file.read_at(chunk, offset))
+                .ok()
+                .map(|()| (f.take().unwrap())(&String::from_utf8_lossy(buf)))
+        });
+        if r.is_some() {
+            return r;
+        }
+        *slot = None;
+        *budget.open -= 1;
+        let f = f.unwrap();
+        return open_and_read(slot, budget, path, f);
+    }
+    open_and_read(slot, budget, path, f)
+}
+
+fn open_and_read<T>(
+    slot: &mut Option<fs::File>,
+    budget: Budget,
+    path: impl FnOnce() -> String,
+    f: impl FnOnce(&str) -> T,
+) -> Option<T> {
+    let file = fs::File::open(path()).ok()?;
+    let r = with_open_file(&file, f)?;
+    if *budget.open < budget.max {
+        *slot = Some(file);
+        *budget.open += 1;
+    }
+    Some(r)
+}
+
+/// Raise the soft open-file limit to the hard one (systemd's default soft
+/// limit is 1024; keeping files open needs one per process, and with
+/// `--threads` one per thread), and return the soft limit in effect.
+fn raise_fd_limit() -> u64 {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `lim` is a valid rlimit for getrlimit/setrlimit.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return 1024;
+        }
+        // An unlimited hard limit isn't a usable soft one; this is plenty.
+        let want = lim.rlim_max.min(1 << 20);
+        if want > lim.rlim_cur {
+            let raised = libc::rlimit {
+                rlim_cur: want,
+                rlim_max: lim.rlim_max,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &raised) == 0 {
+                lim.rlim_cur = want;
+            }
+        }
+    }
+    // rlim_t is 32 bits on some targets.
+    #[allow(clippy::unnecessary_cast)]
+    let soft = lim.rlim_cur as u64;
+    soft
 }
 
 pub fn proc_meta(key: ProcKey) -> Option<ProcMeta> {
@@ -139,31 +379,6 @@ pub fn proc_meta(key: ProcKey) -> Option<ProcMeta> {
         cmdline.truncate(end);
     }
     Some(ProcMeta { key, uid, cmdline })
-}
-
-fn read_threads(tgid: u32, out: &mut Vec<ThreadSample>) {
-    let Ok(dir) = fs::read_dir(format!("/proc/{tgid}/task")) else {
-        return;
-    };
-    for entry in dir.flatten() {
-        let Some(tid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|s| s.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if tid == tgid {
-            continue;
-        }
-        if let Some(t) = with_file(&format!("/proc/{tgid}/task/{tid}/stat"), |s| {
-            parse_thread_stat(tgid, tid, s)
-        })
-        .flatten()
-        {
-            out.push(t);
-        }
-    }
 }
 
 /// A thread's `stat` has the same layout as a process's.
@@ -384,9 +599,10 @@ mod tests {
             .spawn()
             .expect("python3 for the test");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut collector = Collector::new();
         let found = loop {
             let mut ps = Vec::new();
-            procs(&mut ps, None);
+            collector.procs(&mut ps, None);
             if let Some(p) = ps
                 .iter()
                 .find(|p| p.pid == child.id() && p.comm.ends_with("hidden"))
@@ -489,6 +705,113 @@ mod tests {
         assert_eq!(parse_statm_shared("5000 2048"), None);
     }
 
+    /// A busy child process, its pid, and its utime as `Collector` sees it.
+    fn spin() -> std::process::Child {
+        std::process::Command::new("sh")
+            .args(["-c", "while :; do :; done"])
+            .spawn()
+            .unwrap()
+    }
+
+    fn utime_of(c: &mut Collector, pid: u32) -> Option<u64> {
+        let mut ps = Vec::new();
+        c.procs(&mut ps, None);
+        ps.iter().find(|p| p.pid == pid).map(|p| p.utime)
+    }
+
+    #[test]
+    fn kept_files_read_fresh_values_and_close_when_processes_exit() {
+        let mut child = spin();
+        let pid = child.id();
+        let mut c = Collector::new();
+        let first = utime_of(&mut c, pid).unwrap();
+        let open = c.open_files();
+        assert!(open >= 2, "stat and statm of every process kept open");
+        assert!(c.procs.get(&pid).is_some_and(|f| f.stat.is_some()));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(utime_of(&mut c, pid).unwrap() > first, "read afresh");
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(utime_of(&mut c, pid), None);
+        // (The total can still grow: other tests start processes meanwhile.)
+        assert!(!c.procs.contains_key(&pid), "its files are closed");
+        // The count matches the files really held.
+        let held: usize = c
+            .procs
+            .values()
+            .map(|f| f.stat.is_some() as usize + f.statm.is_some() as usize)
+            .sum();
+        assert_eq!(c.open_files(), held + c.threads.len());
+    }
+
+    #[test]
+    fn past_the_budget_files_are_opened_per_read() {
+        let mut child = spin();
+        let mut c = Collector::with_max_open(3);
+        let mut ps = Vec::new();
+        c.procs(&mut ps, None);
+        assert!(ps.len() > 3, "still every process");
+        assert_eq!(c.open_files(), 3);
+        let mine = ps.iter().find(|p| p.pid == child.id()).unwrap();
+        assert!(
+            mine.shared_pages.is_some(),
+            "statm read without a kept file"
+        );
+        let a = ps.iter().find(|p| p.pid == child.id()).unwrap().utime;
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        c.procs(&mut ps, None);
+        assert!(ps.iter().find(|p| p.pid == child.id()).unwrap().utime > a);
+        assert_eq!(c.open_files(), 3);
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn thread_files_are_kept_and_closed_too() {
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::Builder::new()
+            .name("kept-thread".into())
+            .spawn(move || {
+                let _ = stop_rx.recv();
+            })
+            .unwrap();
+        let me = std::process::id();
+        let mut c = Collector::new();
+        let (mut ps, mut ts) = (Vec::new(), Vec::new());
+        c.procs(&mut ps, Some(&mut ts));
+        let tid = ts
+            .iter()
+            .find(|t| t.tgid == me && t.comm == "kept-thread")
+            .unwrap()
+            .tid;
+        assert!(c.threads.contains_key(&tid));
+        drop(stop_tx);
+        worker.join().unwrap();
+        c.procs(&mut ps, Some(&mut ts));
+        assert!(!ts.iter().any(|t| t.tid == tid));
+        assert!(
+            !c.threads.contains_key(&tid),
+            "closed once the thread is gone"
+        );
+    }
+
+    #[test]
+    fn whole_files_are_read_past_one_chunk() {
+        // Longer than read_all's 4096-byte chunks.
+        let path = std::env::temp_dir().join(format!("sysmon-read-all-{}", std::process::id()));
+        let text = "x".repeat(10_000);
+        std::fs::write(&path, &text).unwrap();
+        assert_eq!(with_file(path.to_str().unwrap(), |s| s.len()), Some(10_000));
+        let f = std::fs::File::open(&path).unwrap();
+        assert_eq!(with_open_file(&f, |s| s.len()), Some(10_000));
+        assert_eq!(
+            with_open_file(&f, |s| s.len()),
+            Some(10_000),
+            "again from the start"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn reads_this_machine() {
         let s = system(0);
@@ -504,7 +827,7 @@ mod tests {
             .unwrap();
         let mut ps = Vec::new();
         let mut ts = Vec::new();
-        procs(&mut ps, Some(&mut ts));
+        Collector::new().procs(&mut ps, Some(&mut ts));
         let me = std::process::id();
         assert!(
             ts.iter().any(|t| t.tgid == me && t.comm == "probe-thread"),

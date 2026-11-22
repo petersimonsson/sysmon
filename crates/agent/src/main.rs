@@ -50,7 +50,7 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     meta_refresh_every: u32,
     /// Also send every thread of every user process (off by default: about
-    /// 2.5x the agent's CPU and bandwidth on a desktop with ~1700 threads).
+    /// 3x the agent's CPU and 2.5x its bandwidth on a desktop with ~1750 threads).
     #[arg(long)]
     threads: bool,
     /// Also send journal lines (needs journalctl; to see system logs the
@@ -151,6 +151,7 @@ fn main() -> anyhow::Result<()> {
     let mut known: HashMap<ProcKey, u32> = HashMap::new();
     let mut users = users::UserNames::spawn();
     let mut sent_users: HashMap<u32, String> = HashMap::new();
+    let mut collector = collect::Collector::new();
     let mut procs = Vec::new();
     let mut threads = Vec::new();
     let mut next_tick = Instant::now();
@@ -164,7 +165,7 @@ fn main() -> anyhow::Result<()> {
         let host_tick = seq.is_multiple_of(host_info_every);
 
         let system = collect::system(unix_now_ns());
-        collect::procs(&mut procs, args.threads.then_some(&mut threads));
+        collector.procs(&mut procs, args.threads.then_some(&mut threads));
 
         // Metadata for new processes, or for all of them on a refresh tick.
         let refresh = seq.is_multiple_of(args.meta_refresh_every.max(1));

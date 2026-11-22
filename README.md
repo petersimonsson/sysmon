@@ -104,8 +104,8 @@ The host shows up in the sidebar within a second.
    with 500 processes). `--target` can be given several times to send to more
    than one monitor, by name or by IPv4 or IPv6 address (e.g.
    `[2001:db8::7]:9876`). Add `--threads` to send every thread as well, so the UI
-   can list them. That costs about 2.5× the agent's CPU and bandwidth
-   (measured with ~1700 threads: 17 ms and 26 KB per sample), so it's off by
+   can list them. That costs about 3× the agent's CPU and 2.5× its bandwidth
+   (measured with ~1750 threads: 9 ms and 26 KB per sample), so it's off by
    default.
 
    Add `--logs` to send the machine's journal lines too (warning and above;

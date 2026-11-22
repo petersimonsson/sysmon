@@ -17,7 +17,7 @@ After=network-online.target
 EnvironmentFile=/etc/default/sysmon-agent
 LoadCredential=key:/etc/sysmon/key
 ExecStart=/usr/local/bin/sysmon-agent --target ${SYSMON_TARGET} --compress --key-file ${CREDENTIALS_DIRECTORY}/key
-# To send threads too (about 2.5x the CPU and bandwidth), use this instead:
+# To send threads too (about 3x the CPU and 2.5x the bandwidth), use this instead:
 #ExecStart=/usr/local/bin/sysmon-agent --target ${SYSMON_TARGET} --compress --key-file ${CREDENTIALS_DIRECTORY}/key --threads
 # To send journal lines (warning and above) too, use this instead; the
 # group and state directory below give it the journal and a place to keep

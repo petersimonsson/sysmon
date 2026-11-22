@@ -215,9 +215,20 @@ pub struct Frame {
   rename itself to bytes that aren't UTF-8, which a strict read would skip,
   hiding that process. Only physical disks are sent (`/sys/block/<name>/device`
   exists): partitions, device-mapper, RAID, loop and RAM devices would count
-  the same I/O again. `statm` is read only for SHR (its third field). That second read
-  per process costs about 57 % more agent CPU: 4.1 → 6.5 ms per sample of
-  about 495 processes, or 0.4 % → 0.65 % of a core at 1 Hz.
+  the same I/O again. `statm` is read only for SHR (its third field).
+- **Kept-open files** (`collect::Collector`): opening a `/proc/[pid]` file
+  costs far more than reading it, so each process's `stat` and `statm`
+  (and with `--threads`, each thread's `stat`) stay open between samples
+  and are re-read from offset 0, which produces them afresh. A file whose
+  process has exited fails to read rather than showing another process, so
+  a reused pid is just opened again; files of what's gone are closed each
+  sample. At start-up the agent raises its soft open-file limit to the hard
+  one (systemd's default soft limit is 1024) and keeps at most that minus
+  256 files open, opening the rest per read. Files are read with plain
+  `read`/`pread` calls, not `read_to_end`, which first asks for the size and
+  position (two wasted system calls, as `/proc` files report size 0).
+  Measured with ~490 processes at 1 Hz: 7 → 3 ms per sample (0.3 % of a
+  core), with about 975 files open.
 - User names come from `getpwuid_r`, so they follow `/etc/nsswitch.conf`:
   local files plus systemd's dynamic and homed users, LDAP, SSSD and so on
   (`users::UserNames`). A directory lookup can be slow, or hang while a
@@ -262,9 +273,9 @@ pub struct Frame {
   read, so it costs nothing.
 - `--threads` (off by default) also reads `/proc/[pid]/task/*/stat` for every
   user process with more than one thread, and sends all threads but the main
-  one, which is the process row. Measured with ~470 processes and ~1700
-  threads: 6.8 → 17 ms per sample, and 10.1 → 26.5 KB per sample
-  compressed.
+  one, which is the process row. Measured with ~490 processes and ~1750
+  threads: 3 → 9 ms per sample (about 2,200 files kept open), and 10.1 →
+  26.5 KB per sample compressed.
 - Deployment: the sandboxed systemd unit in
   `crates/agent/dist/sysmon-agent.service` (which allows `AF_UNIX` besides IP,
   because user lookups reach systemd's user database, SSSD and nscd over Unix
@@ -667,7 +678,7 @@ Implemented, and covered by tests where noted:
   `Users` and log batches; zstd compression;
   XChaCha20-Poly1305 sealing, including tamper, wrong-key and plaintext
   rejection (tested).
-- `agent`: collection from `/proc` with a reused buffer and lenient
+- `agent`: collection from `/proc` with kept-open files and lenient
   decoding, including VIRT, SHR, kernel threads, physical disks only and
   (with `--threads`) threads; a boot-time clock in every sample; IPv4 and
   IPv6 targets; user names through NSS on a background thread; HostInfo,
