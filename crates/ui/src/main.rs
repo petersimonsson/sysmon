@@ -2,10 +2,13 @@
 //! replays a recording.
 
 mod app;
+mod format;
 mod pipeline;
+mod widgets;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::Parser;
 use gpui_kit::*;
@@ -26,8 +29,14 @@ struct Args {
     /// Don't record received data to disk.
     #[arg(long)]
     no_record: bool,
-    /// Replay a recording (a data dir, host dir, boot dir, or a single .seg file)
-    /// instead of listening.
+    /// Delete recordings older than this many hours.
+    #[arg(long, value_name = "HOURS")]
+    keep_hours: Option<u64>,
+    /// Delete the oldest recordings once they take more than this many GiB.
+    #[arg(long, value_name = "GIB")]
+    max_gib: Option<f64>,
+    /// Open a recording (a data dir, host dir, boot dir, or a single .seg
+    /// file) instead of listening for agents.
     #[arg(long)]
     replay: Option<PathBuf>,
     /// Replay speed multiplier.
@@ -37,19 +46,38 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
     let args = Args::parse();
+    let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
 
-    let (events, mode) = match &args.replay {
-        Some(path) => (pipeline::start_replay(path, args.speed)?, app::Mode::Replay),
+    let start = match &args.replay {
+        Some(path) => app::Start {
+            live: None,
+            replay: Some(pipeline::open_replay(path, args.speed)?),
+            replay_label: path.display().to_string(),
+            data_dir,
+        },
         None => {
-            let data_dir =
-                (!args.no_record).then(|| args.data_dir.clone().unwrap_or_else(default_data_dir));
-            (
-                pipeline::start_live(args.listen, opener(&args)?, data_dir)?,
-                app::Mode::Live,
-            )
+            let recording = (!args.no_record).then(|| pipeline::Recording {
+                dir: data_dir.clone(),
+                retention: sysmon_store::Retention {
+                    max_age: args.keep_hours.map(|h| Duration::from_secs(h * 3600)),
+                    max_bytes: args.max_gib.map(|g| (g * (1u64 << 30) as f64) as u64),
+                },
+            });
+            app::Start {
+                live: Some(pipeline::start_live(
+                    args.listen,
+                    opener(&args)?,
+                    recording,
+                )?),
+                replay: None,
+                replay_label: String::new(),
+                data_dir,
+            }
         }
     };
 
@@ -58,13 +86,13 @@ fn main() -> anyhow::Result<()> {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
-                size(px(1100.), px(750.)),
+                size(px(1200.), px(800.)),
                 cx,
             ))),
             ..Default::default()
         };
-        gpui_kit::open_window(options, cx, |_, cx| {
-            cx.new(|cx| app::AppState::new(events, mode, cx))
+        gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| app::AppState::new(start, window, cx))
         })
         .expect("failed to open window");
         cx.activate(true);
