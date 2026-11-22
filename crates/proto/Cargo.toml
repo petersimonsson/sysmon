@@ -1,0 +1,11 @@
+[package]
+name = "sysmon-proto"
+description = "sysmon wire protocol: types, framing and chunking"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true

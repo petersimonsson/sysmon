@@ -1,0 +1,18 @@
+[package]
+name = "sysmon-ui"
+description = "sysmon desktop monitor built with gpui-kit"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+sysmon-proto.workspace = true
+sysmon-ingest.workspace = true
+sysmon-store.workspace = true
+sysmon-model.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+flume.workspace = true
+gpui-kit.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

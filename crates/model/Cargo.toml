@@ -1,0 +1,12 @@
+[package]
+name = "sysmon-model"
+description = "sysmon state: rate computation, history and data sources"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+sysmon-proto.workspace = true
+sysmon-ingest.workspace = true
+sysmon-store.workspace = true
+flume.workspace = true
