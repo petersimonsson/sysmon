@@ -14,6 +14,7 @@ sysmon-model.workspace = true
 sysmon-notices.workspace = true
 anyhow.workspace = true
 jiff.workspace = true
+signal-hook.workspace = true
 clap.workspace = true
 flume.workspace = true
 gpui-kit.workspace = true

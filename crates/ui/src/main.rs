@@ -65,6 +65,8 @@ fn main() -> anyhow::Result<()> {
     }
     let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
 
+    // Stops the recorder cleanly when the app quits or is signalled.
+    let mut stopper: Option<pipeline::RecorderHandle> = None;
     let start = match &args.replay {
         Some(path) => app::Start {
             live: None,
@@ -80,12 +82,13 @@ fn main() -> anyhow::Result<()> {
                     max_bytes: args.max_gib.map(|g| (g * (1u64 << 30) as f64) as u64),
                 },
             });
+            let (live, recorder) = pipeline::start_live(args.listen, opener(&args)?, recording)?;
+            if let Some(r) = &recorder {
+                stop_recording_on_signals(r.clone())?;
+            }
+            stopper = recorder;
             app::Start {
-                live: Some(pipeline::start_live(
-                    args.listen,
-                    opener(&args)?,
-                    recording,
-                )?),
+                live: Some(live),
                 replay: None,
                 replay_label: String::new(),
                 data_dir,
@@ -96,6 +99,14 @@ fn main() -> anyhow::Result<()> {
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
         actions::init(cx);
+        // Ctrl+Q, File → Quit and closing the window all end up here.
+        if let Some(r) = stopper.clone() {
+            cx.on_app_quit(move |_| {
+                r.stop(STOP_TIMEOUT);
+                async {}
+            })
+            .detach();
+        }
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
@@ -110,6 +121,27 @@ fn main() -> anyhow::Result<()> {
         .expect("failed to open window");
         cx.activate(true);
     });
+    Ok(())
+}
+
+/// Longest to wait for the recording to be written out when stopping.
+const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// On SIGINT (Ctrl+C), SIGTERM (e.g. systemd) or SIGHUP, write out the
+/// recording before exiting, instead of losing what was still buffered.
+fn stop_recording_on_signals(recorder: pipeline::RecorderHandle) -> anyhow::Result<()> {
+    use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
+    let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP])?;
+    std::thread::Builder::new()
+        .name("sysmon-signals".into())
+        .spawn(move || {
+            if let Some(sig) = signals.forever().next() {
+                tracing::info!(signal = sig, "stopping");
+                recorder.stop(STOP_TIMEOUT);
+                // The conventional status for "terminated by this signal".
+                std::process::exit(128 + sig);
+            }
+        })?;
     Ok(())
 }
 
