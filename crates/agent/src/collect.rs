@@ -99,9 +99,12 @@ pub fn procs(out: &mut Vec<ProcSample>) {
         let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
             continue;
         };
-        if let Some(p) =
+        if let Some(mut p) =
             with_file(&format!("/proc/{pid}/stat"), |s| parse_proc_stat(pid, s)).flatten()
         {
+            // SHR is only in statm. If the process exits in between, it's
+            // simply unknown for this sample.
+            p.shared_pages = with_file(&format!("/proc/{pid}/statm"), parse_statm_shared).flatten();
             out.push(p);
         }
     }
@@ -124,6 +127,12 @@ pub fn proc_meta(key: ProcKey) -> Option<ProcMeta> {
     Some(ProcMeta { key, uid, cmdline })
 }
 
+/// The third field of `/proc/[pid]/statm`: resident shared pages (file-backed
+/// and shared memory), which htop shows as SHR.
+fn parse_statm_shared(s: &str) -> Option<u64> {
+    s.split_ascii_whitespace().nth(2)?.parse().ok()
+}
+
 fn parse_proc_stat(pid: u32, s: &str) -> Option<ProcSample> {
     // `comm` is in parentheses and may itself contain spaces or ')'.
     let open = s.find('(')?;
@@ -143,8 +152,8 @@ fn parse_proc_stat(pid: u32, s: &str) -> Option<ProcSample> {
         rss_pages: num(24)?,
         threads: num(20)? as u32,
         comm,
-        // Collected from the next change on.
-        vsize_bytes: None,
+        vsize_bytes: num(23),
+        // From statm; filled in by the caller.
         shared_pages: None,
     })
 }
@@ -287,6 +296,9 @@ mod tests {
         assert_eq!((p.state, p.ppid), (b'S', 1));
         assert_eq!((p.utime, p.stime), (250, 75));
         assert_eq!((p.threads, p.starttime, p.rss_pages), (3, 98765, 2048));
+        assert_eq!(p.vsize_bytes, Some(123456789));
+        assert_eq!(parse_statm_shared("5000 2048 512 100 0 900 0\n"), Some(512));
+        assert_eq!(parse_statm_shared("5000 2048"), None);
     }
 
     #[test]
@@ -296,6 +308,8 @@ mod tests {
         assert!(s.mem.total > 0);
         let mut ps = Vec::new();
         procs(&mut ps);
-        assert!(ps.iter().any(|p| p.pid == std::process::id()));
+        let me = ps.iter().find(|p| p.pid == std::process::id()).unwrap();
+        assert!(me.vsize_bytes.unwrap() > me.rss_pages * 4096 / 2);
+        assert!(me.shared_pages.is_some());
     }
 }
