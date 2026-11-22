@@ -167,6 +167,8 @@ impl HostModel {
                 }
             }
             Event::Frame(frame) => self.apply_frame(frame),
+            // Kept by the model from the next change on.
+            Event::Logs { .. } => {}
         }
     }
 
