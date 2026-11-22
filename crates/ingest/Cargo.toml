@@ -3,6 +3,7 @@ name = "sysmon-ingest"
 description = "sysmon receiver: UDP socket, chunk reassembly and fan-out"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 

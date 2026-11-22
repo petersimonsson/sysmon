@@ -18,8 +18,9 @@ See [docs/architecture.md](docs/architecture.md) for how it works inside.
 
 ## Requirements
 
-- **Rust 1.88 or newer** (the code uses edition 2024 and `let` chains).
-  Install it with [rustup](https://rustup.rs).
+- **Rust 1.98 or newer** for the UI (gpui needs it), or **1.93 or newer**
+  for just the agent (`cargo build -p sysmon-agent`). Install it with
+  [rustup](https://rustup.rs).
 - **Agent:** Linux (it reads `/proc`). Nothing else.
 - **UI:** developed and tested on Linux. It's built with
   [gpui-kit](https://gpui-kit.com), which also supports macOS and Windows,
@@ -266,6 +267,18 @@ cargo fmt --all
 
 The UI tests open real windows headlessly through gpui-kit's `test-support`
 feature, press keys, click and check the results. They need no display.
+
+CI (`.github/workflows/ci.yml`, GitHub Actions) runs on pushes to `main` and
+on pull requests:
+
+- formatting (`cargo fmt --check`);
+- clippy with warnings as errors, and all tests, on stable;
+- the minimum Rust versions: the agent's tests on 1.93, and the whole
+  workspace built on 1.98;
+- a static musl build of the agent, kept as a downloadable artifact for 14
+  days.
+
+`.github/install-deps.sh` installs the UI's Ubuntu build packages.
 
 The repository uses [jj](https://jj-vcs.github.io/jj/), colocated with git:
 start a piece of work with `jj new -m "<crate>: <what>"`, and see
