@@ -119,8 +119,8 @@ pub enum Msg {
 - `ProcMeta` carries the strings that rarely change (full command line, uid).
   The agent sends it for processes it hasn't seen before, and sends a full
   refresh every ~30 s. `ProcSample` carries only `comm` (≤ 16 bytes).
-- `Users` is sent with `HostInfo` and lists only uids that running processes
-  use, read from the agent's `/etc/passwd`.
+- `Users` lists only uids that running processes use. It's sent with
+  `HostInfo`, and also as soon as a newly resolved name is available.
 - New `Msg` variants are only ever appended, so old recordings keep decoding.
 - **Versions:** changing a type's fields changes the encoding (postcard isn't
   self-describing), so it bumps `VERSION`. The old types are frozen in a
@@ -163,6 +163,13 @@ pub struct Frame {
   buffer. `statm` is read only for SHR (its third field). That second read
   per process costs about 57 % more agent CPU: 4.1 → 6.5 ms per sample of
   about 495 processes, or 0.4 % → 0.65 % of a core at 1 Hz.
+- User names come from `getpwuid_r`, so they follow `/etc/nsswitch.conf`:
+  local files plus systemd's dynamic and homed users, LDAP, SSSD and so on
+  (`users::UserNames`). A directory lookup can be slow, or hang while a
+  server is unreachable, so lookups run on their own thread and the
+  sampling loop only reads the cache. Each uid is looked up again every
+  60 samples. musl has no NSS modules, so a static musl build sees only
+  `/etc/passwd` (or nscd).
 - It tracks the set of known `(pid, starttime)` pairs to decide when to emit
   `ProcMeta`.
 - CLI (`clap`): `--target host:port` (repeatable), `--interval-ms`,
@@ -315,7 +322,12 @@ agent or the monitor was offline) are skipped rather than waited out.
   - a process table: a virtualized `uniform_list`, clickable column headers
     to sort (PID, user, %CPU, VIRT, RES, SHR, threads, command; RES is the
     resident set size (RSS), and "–" marks sizes a v1 agent didn't send), a filter input (command,
-    user or exact PID), and stale rows dimmed;
+    user or exact PID), and stale rows dimmed. The USER column fits the
+    longest name shown (measured with the monospace font), 4–16 characters;
+    longer names keep both ends around `…` (`format::fit`), since names often
+    share a prefix like `systemd-`. Hostnames, commands and legend labels end
+    in `…` instead (their start is what tells them apart). Each shortened
+    text has the full text as a tooltip and accessible description;
   - a **Tree** toggle that groups processes under their parent
     (`sysmon_model::tree::build`). Siblings follow the current sort, guide
     lines show the structure, and ▾/▸ collapse a subtree. A collapsed row

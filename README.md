@@ -144,6 +144,15 @@ binary to `/usr/local/bin`, the key to `/etc/sysmon/key`, put
   **RES** (resident set size, RSS) and **SHR** (resident memory shared
   with other processes, e.g. libraries), plus %MEM (RES as a share of RAM).
   "–" means the agent didn't report it (agents older than protocol v2).
+  - The USER column is as wide as the longest name shown, up to 16
+    characters. Longer names are shortened in the middle, keeping both ends
+    (`systemd-journal-remote` → `systemd-…-remote`), because many names share
+    a prefix. Hover for the full name and uid. Long hostnames, commands and
+    graph legend labels end in `…` instead, with the full text on hover.
+  - User names come from the monitored machine's user lookup (as `getent
+    passwd` would find them), so LDAP, SSSD and systemd dynamic users are
+    named too. A user shows as a number until its name arrives. The static
+    musl build of the agent can only see users in `/etc/passwd`.
   - Click a column header to sort, and click it again to reverse.
   - Type in the filter box to match command, user or an exact PID.
   - **Tree** groups processes under their parent. Click ▾/▸ to collapse a
