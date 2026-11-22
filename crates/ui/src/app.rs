@@ -138,6 +138,11 @@ pub struct AppState {
     log_reveal: std::cell::Cell<bool>,
     /// A seek to a log line is under way; reveal it after the reset.
     log_reveal_after_reset: bool,
+    /// Log filters: text (message, unit or identifier), lowest priority
+    /// shown (7 = all), and one unit or identifier.
+    log_filter: Entity<InputState>,
+    log_min_priority: u8,
+    log_source: Option<String>,
     filter: Entity<InputState>,
     timeline: Entity<SliderState>,
     scrubbing: bool,
@@ -158,6 +163,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(start: Start, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter processes"));
+        let log_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Filter logs"));
         let timeline = cx.new(|_| {
             SliderState::new()
                 .min(0.)
@@ -211,27 +217,31 @@ impl AppState {
             }
         }));
 
-        let subscriptions = vec![
-            cx.subscribe_in(
-                &filter,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    match event {
-                        InputEvent::Change => cx.notify(),
-                        // Enter hands the keyboard back to the shortcuts.
-                        InputEvent::PressEnter { .. } => this.focus.focus(window, cx),
-                        // Clicking away from the filter leaves nothing focused;
-                        // take focus back so shortcuts keep working, unless
-                        // something else (a menu) has it.
-                        InputEvent::Blur => cx.defer_in(window, |this, window, cx| {
-                            if window.focused(cx).is_none() {
-                                this.focus.focus(window, cx);
-                            }
-                        }),
-                        InputEvent::Focus => {}
+        // Both filters: typing redraws, Enter or clicking away gives the
+        // keyboard back to the shortcuts.
+        let on_filter = |this: &mut Self,
+                         _: &Entity<InputState>,
+                         event: &InputEvent,
+                         window: &mut Window,
+                         cx: &mut Context<Self>| {
+            match event {
+                InputEvent::Change => cx.notify(),
+                // Enter hands the keyboard back to the shortcuts.
+                InputEvent::PressEnter { .. } => this.focus.focus(window, cx),
+                // Clicking away from the filter leaves nothing focused;
+                // take focus back so shortcuts keep working, unless
+                // something else (a menu) has it.
+                InputEvent::Blur => cx.defer_in(window, |this, window, cx| {
+                    if window.focused(cx).is_none() {
+                        this.focus.focus(window, cx);
                     }
-                },
-            ),
+                }),
+                InputEvent::Focus => {}
+            }
+        };
+        let subscriptions = vec![
+            cx.subscribe_in(&filter, window, on_filter),
+            cx.subscribe_in(&log_filter, window, on_filter),
             cx.subscribe_in(
                 &timeline,
                 window,
@@ -284,6 +294,9 @@ impl AppState {
             log_cursor: None,
             log_reveal: Default::default(),
             log_reveal_after_reset: false,
+            log_filter,
+            log_min_priority: 7,
+            log_source: None,
             filter,
             timeline,
             scrubbing: false,
@@ -1649,6 +1662,7 @@ impl AppState {
                     end_ns: end,
                     y_max,
                     hover_ns,
+                    mark: self.log_cursor.map(|(_, ts)| (ts, theme.warning)),
                     grid: theme.border,
                     crosshair: theme.muted_foreground,
                 },
@@ -1661,7 +1675,21 @@ impl AppState {
             .text_xs()
             .text_color(theme.muted_foreground)
             .child(format::time(start))
-            .child(hover_ns.map(format::time).unwrap_or_default())
+            .child(match (hover_ns, self.log_cursor) {
+                (Some(h), _) => div().child(format::time(h)).into_any_element(),
+                // The selected log line's time, drawn as a line on the chart.
+                (None, Some((_, ts))) if (start..=end).contains(&ts) => {
+                    let text = format!("log line {}", format::time(ts));
+                    div()
+                        .id("graph-log-mark")
+                        .test_support()
+                        .text_color(theme.warning)
+                        .aria_description(text.clone())
+                        .child(text)
+                        .into_any_element()
+                }
+                _ => div().into_any_element(),
+            })
             .child(format::time(end));
         let chart = div()
             .flex()
@@ -1770,6 +1798,61 @@ impl AppState {
             )
     }
 
+    /// The selected host's log rows that pass the filters. Lost and dropped
+    /// rows only show unfiltered, where they say something about what's around.
+    fn log_rows(&self, host: &HostModel, cx: &App) -> Vec<LogRow> {
+        let needle = self.log_filter.read(cx).value().to_lowercase();
+        let narrowed = !needle.is_empty() || self.log_source.is_some();
+        host.logs
+            .rows()
+            .iter()
+            .filter(|r| match &r.kind {
+                LogKind::Line(e) => {
+                    let source = e.unit.as_deref().unwrap_or(&e.ident);
+                    e.priority <= self.log_min_priority
+                        && self.log_source.as_deref().is_none_or(|s| s == source)
+                        && (needle.is_empty()
+                            || e.message.to_lowercase().contains(&needle)
+                            || source.to_lowercase().contains(&needle)
+                            || e.ident.to_lowercase().contains(&needle))
+                }
+                LogKind::Lost(_) | LogKind::Dropped(_) => !narrowed && self.log_min_priority == 7,
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Move the process table's cursor to `pid`, if it's in the table.
+    fn show_process(&mut self, pid: u32, cx: &mut Context<Self>) {
+        let Some(host) = self.selected.and_then(|id| self.hosts().get(&id)) else {
+            return;
+        };
+        let Some(key) = host
+            .snapshot
+            .procs
+            .iter()
+            .find(|p| p.key.pid == pid)
+            .map(|p| p.key)
+        else {
+            self.error = Some(format!("PID {pid} isn't running at this point"));
+            cx.notify();
+            return;
+        };
+        let lines = self.table_lines(host, cx);
+        match lines.iter().position(|l| l.key() == key) {
+            Some(i) => {
+                self.cursor = Some(key);
+                self.scroll.scroll_to_item(i, ScrollStrategy::Center);
+            }
+            None => {
+                self.error = Some(format!(
+                    "PID {pid} is hidden by the process filter or settings"
+                ))
+            }
+        }
+        cx.notify();
+    }
+
     /// A click on the log line `key` (receive time, log time): highlight it,
     /// stop following, and in a recording seek to when it was received, so
     /// the graphs and process table show that moment.
@@ -1821,7 +1904,8 @@ impl AppState {
         let theme = cx.theme().clone();
         let mono = theme.mono_font_family.clone();
         let border = theme.border;
-        let rows: Rc<Vec<LogRow>> = Rc::new(host.logs.rows().iter().cloned().collect());
+        let total = host.logs.rows().len();
+        let rows: Rc<Vec<LogRow>> = Rc::new(self.log_rows(host, cx));
         let count = rows.len();
         if self.log_follow && count > 0 {
             self.log_scroll
@@ -1834,10 +1918,12 @@ impl AppState {
             self.log_reveal.set(false);
             self.log_scroll.scroll_to_item(i, ScrollStrategy::Center);
         }
-        let status = if host.logs.enabled() {
-            format!("{count} lines")
-        } else {
+        let status = if !host.logs.enabled() {
             "No logs from this host: start its agent with --logs".into()
+        } else if count < total {
+            format!("{count} of {total} lines")
+        } else {
+            format!("{count} lines")
         };
         let toolbar = div()
             .flex()
@@ -1846,6 +1932,37 @@ impl AppState {
             .px_2()
             .py_1()
             .child(self.render_panel_tabs(cx))
+            .child(
+                div()
+                    .w(px(200.))
+                    .child(Input::new(&self.log_filter).small().cleanable(true)),
+            )
+            .children(
+                [(7u8, "All"), (4, "Warnings"), (3, "Errors")].map(|(p, label)| {
+                    Button::new(("logs-priority", p as usize))
+                        .label(label)
+                        .small()
+                        .when(self.log_min_priority == p, |b| b.primary())
+                        .when(self.log_min_priority != p, |b| b.ghost())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.log_min_priority = p;
+                            cx.notify();
+                        }))
+                }),
+            )
+            .when_some(self.log_source.clone(), |d, source| {
+                d.child(
+                    Button::new("logs-source")
+                        .label(format!("{source} ×"))
+                        .small()
+                        .ghost()
+                        .tooltip("Show every unit again")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.log_source = None;
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 div()
                     .id("logs-status")
@@ -1953,19 +2070,44 @@ impl AppState {
                                     .text_color(color)
                                     .child(label),
                             )
-                            .child(
+                            .child({
+                                // Click: show only this unit's lines.
+                                let (this, picked) = (this.clone(), source.clone());
                                 div()
+                                    .id(("log-source-cell", i))
+                                    .test_support()
                                     .flex_none()
                                     .w(px(LOG_SOURCE_COL))
                                     .flex()
-                                    .child(clipped(("log-source", i), source, source_tip)),
-                            )
-                            .child(
+                                    .cursor_pointer()
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        let _ = this.update(cx, |app, cx| {
+                                            app.log_source = Some(picked.clone());
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(clipped(("log-source", i), source, source_tip))
+                            })
+                            .child({
+                                // Click: find the process in the table.
+                                let (this, pid) = (this.clone(), e.pid);
                                 div()
+                                    .id(("log-pid", i))
+                                    .test_support()
                                     .flex_none()
                                     .w(px(LOG_PID_COL))
-                                    .child(e.pid.map_or_else(|| "–".into(), |p| p.to_string())),
-                            )
+                                    .when(pid.is_some(), |d| d.cursor_pointer())
+                                    .on_click(move |_, _, cx| {
+                                        let Some(pid) = pid else {
+                                            return;
+                                        };
+                                        cx.stop_propagation();
+                                        let _ =
+                                            this.update(cx, |app, cx| app.show_process(pid, cx));
+                                    })
+                                    .child(pid.map_or_else(|| "–".into(), |p| p.to_string()))
+                            })
                             .child(clipped(
                                 ("log-message", i),
                                 text,
@@ -4240,5 +4382,201 @@ mod tests {
             .unwrap();
         app.read_with(cx, |a, _| assert!(!a.log_reveal.get(), "revealed"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One host running PID 42 ("web") at 1 s and 2 s, which logged a
+    /// warning from web.service, an error from db.service, and later lost
+    /// a line.
+    fn host_with_mixed_logs(app: &Entity<AppState>, cx: &mut TestAppContext) {
+        let s = 1_000_000_000u64;
+        app.update(cx, |app, cx| {
+            for seq in 0..2u32 {
+                let at = (1 + seq as u64) * s;
+                let frame = sysmon_proto::Frame {
+                    host_id: 1,
+                    boot_id: 1,
+                    seq,
+                    system: Some(sysmon_proto::SystemSample {
+                        ts_unix_ns: at,
+                        mem: sysmon_proto::MemInfo {
+                            total: 1 << 20,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                    procs: vec![sysmon_proto::ProcSample {
+                        pid: 42,
+                        ppid: 1,
+                        starttime: 7,
+                        state: b'S',
+                        utime: seq as u64,
+                        stime: 0,
+                        rss_pages: 1,
+                        threads: 1,
+                        comm: "web".into(),
+                        vsize_bytes: None,
+                        shared_pages: None,
+                        kernel_thread: Some(false),
+                    }],
+                    threads: vec![],
+                    complete: true,
+                    received_ns: at,
+                };
+                apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+            }
+            let entry = |priority, unit: &str, pid, msg: &str| sysmon_proto::LogEntry {
+                ts_unix_ns: 1_500_000_000,
+                priority,
+                unit: Some(unit.into()),
+                ident: unit.trim_end_matches(".service").into(),
+                pid: Some(pid),
+                message: msg.into(),
+                truncated: false,
+            };
+            let logs = |first_seq, entries, received_ns| sysmon_ingest::Event::Logs {
+                host_id: 1,
+                boot_id: 1,
+                batch: sysmon_proto::LogBatch {
+                    run: 1,
+                    first_seq,
+                    dropped: 0,
+                    entries,
+                },
+                received_ns,
+            };
+            apply(
+                &mut app.live_hosts,
+                logs(
+                    0,
+                    vec![
+                        entry(4, "web.service", 42, "slow request"),
+                        entry(3, "db.service", 99, "connection refused"),
+                    ],
+                    2 * s,
+                ),
+            );
+            apply(&mut app.live_hosts, logs(3, vec![], 2 * s));
+            apply(&mut app.live_hosts, logs(3, vec![], 5 * s));
+            app.ensure_selection();
+            app.show_logs = true;
+            cx.notify();
+        });
+    }
+
+    fn shown_messages(app: &Entity<AppState>, cx: &mut TestAppContext) -> Vec<String> {
+        app.read_with(cx, |a, cx| {
+            a.log_rows(&a.live_hosts[&1], cx)
+                .iter()
+                .map(|r| match &r.kind {
+                    sysmon_model::LogKind::Line(e) => e.message.clone(),
+                    sysmon_model::LogKind::Lost(n) => format!("lost {n}"),
+                    sysmon_model::LogKind::Dropped(n) => format!("dropped {n}"),
+                })
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn logs_filter_by_text_priority_and_unit(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        host_with_mixed_logs(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                f(window, cx)
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        assert_eq!(
+            shown_messages(&app, cx),
+            ["slow request", "connection refused", "lost 1"]
+        );
+        // Errors only; lost lines aren't shown once narrowed.
+        step(cx, &|w, cx| w.click(("logs-priority", 3usize), cx));
+        assert_eq!(shown_messages(&app, cx), ["connection refused"]);
+        step(cx, &|w, cx| w.click(("logs-priority", 7usize), cx));
+
+        // Clicking a unit shows only its lines, until its chip is removed.
+        step(cx, &|w, cx| w.click(("log-source-cell", 0usize), cx));
+        assert_eq!(shown_messages(&app, cx), ["slow request"]);
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert_eq!(
+                w.find("logs-status")
+                    .description()
+                    .map(|d| d.to_string())
+                    .as_deref(),
+                Some("1 of 3 lines")
+            );
+        })
+        .unwrap();
+        assert_eq!(
+            app.read_with(cx, |a, _| a.log_cursor),
+            None,
+            "not a row click"
+        );
+        step(cx, &|w, cx| w.click("logs-source", cx));
+        assert_eq!(shown_messages(&app, cx).len(), 3);
+
+        // Text matches the message or the unit, case-insensitively.
+        let filter = app.read_with(cx, |a, _| a.log_filter.clone());
+        cx.update_window(window, |_, w, cx| {
+            filter.update(cx, |f, cx| f.set_value("REFUSED", w, cx))
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(shown_messages(&app, cx), ["connection refused"]);
+        let filter = app.read_with(cx, |a, _| a.log_filter.clone());
+        cx.update_window(window, |_, w, cx| {
+            filter.update(cx, |f, cx| f.set_value("web", w, cx))
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(shown_messages(&app, cx), ["slow request"]);
+    }
+
+    #[gpui_kit::test]
+    fn a_log_lines_pid_finds_the_process_and_its_time_marks_the_graph(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        host_with_mixed_logs(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                f(window, cx)
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        // PID 42 is running: the table's cursor moves to it.
+        step(cx, &|w, cx| w.click(("log-pid", 0usize), cx));
+        app.read_with(cx, |a, _| {
+            assert_eq!(a.cursor.map(|k| k.pid), Some(42));
+            assert_eq!(a.error, None);
+            assert_eq!(a.log_cursor, None, "not a row click");
+        });
+        // PID 99 isn't.
+        step(cx, &|w, cx| w.click(("log-pid", 1usize), cx));
+        assert_eq!(
+            app.read_with(cx, |a, _| a.error.clone()).as_deref(),
+            Some("PID 99 isn't running at this point")
+        );
+
+        // Select the warning, graph PID 42, and the graph marks the line's time.
+        step(cx, &|w, cx| w.click(("log-row", 0usize), cx));
+        step(cx, &|w, cx| w.press("g", cx));
+        step(cx, &|w, cx| w.click("tab-graph", cx));
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let mark = w
+                .find("graph-log-mark")
+                .description()
+                .map(|d| d.to_string());
+            let expected = format!("log line {}", crate::format::time(1_500_000_000));
+            assert_eq!(mark.as_deref(), Some(expected.as_str()));
+        })
+        .unwrap();
     }
 }
