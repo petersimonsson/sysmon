@@ -52,6 +52,8 @@ actions!(
         GraphThreads,
         CycleGraphWindow,
         About,
+        ToggleKernelThreads,
+        ToggleThreads,
     ]
 );
 
@@ -121,6 +123,20 @@ pub const SHORTCUTS: &[Shortcut] = &[
         "Filter processes (Enter returns)"
     ),
     shortcut!("Processes", ["t"], ToggleTree, false, "Toggle tree view"),
+    shortcut!(
+        "Processes",
+        ["ctrl-k"],
+        ToggleKernelThreads,
+        false,
+        "Hide / show kernel threads"
+    ),
+    shortcut!(
+        "Processes",
+        ["ctrl-h"],
+        ToggleThreads,
+        false,
+        "Show / hide threads"
+    ),
     shortcut!("Processes", ["e"], ExpandAll, false, "Expand all (tree)"),
     shortcut!(
         "Processes",
@@ -236,6 +252,8 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Filter…", FocusFilter),
             MenuItem::separator(),
             MenuItem::action("Tree View", ToggleTree),
+            MenuItem::action("Hide Kernel Threads", ToggleKernelThreads),
+            MenuItem::action("Show Threads", ToggleThreads),
             MenuItem::action("Expand All", ExpandAll),
             MenuItem::action("Collapse All", CollapseAll),
             MenuItem::separator(),

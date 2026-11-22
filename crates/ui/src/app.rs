@@ -18,7 +18,7 @@ use gpui_kit::*;
 use sysmon_ingest::Event;
 use sysmon_model::{
     Control, Feed, HISTORY_LEN, HostModel, Metric, ProcRow, ReplayHandle, ReplayStatus,
-    SeriesTarget, TreeLine,
+    SeriesTarget, ThreadRow, TreeLine,
 };
 use sysmon_proto::ProcKey;
 
@@ -87,6 +87,10 @@ pub struct AppState {
     sort: (SortKey, bool),
     /// Show processes as a tree grouped by parent.
     tree: bool,
+    /// Leave kernel threads out of the table (on by default).
+    hide_kernel: bool,
+    /// List each process's threads (off by default; needs `agent --threads`).
+    show_threads: bool,
     collapsed: HashSet<ProcKey>,
     /// Processes picked for the graph, per view and host.
     selections: HashMap<(View, u64), Selection>,
@@ -222,6 +226,8 @@ impl AppState {
             selected: None,
             sort: (SortKey::Cpu, true),
             tree: false,
+            hide_kernel: true,
+            show_threads: false,
             collapsed: HashSet::new(),
             selections: HashMap::new(),
             cursor: None,
@@ -637,8 +643,9 @@ impl AppState {
                                 )
                             }))
                             .child(format!(
-                                "{} processes · sample {} ({})",
+                                "{} processes ({} kernel threads) · sample {} ({})",
                                 s.procs.len(),
+                                s.procs.iter().filter(|p| p.kernel_thread).count(),
                                 format::datetime(s.ts_unix_ns),
                                 format::utc_offset(s.ts_unix_ns)
                             )),
@@ -647,13 +654,18 @@ impl AppState {
             .child(cores)
     }
 
-    /// The rows to show, in order. In tree mode every row is kept (so
-    /// ancestors of filter matches can be shown) and each line carries its
-    /// tree position; otherwise only filter matches are kept.
+    /// The rows to show, in order.
+    ///
+    /// Kernel threads are left out when hidden. With threads shown, each
+    /// process is followed by its threads (in the flat view) or has them as
+    /// its first children (in the tree). In tree mode every process is kept
+    /// so ancestors of filter matches can be shown; otherwise only matches
+    /// are kept. A thread matching the filter keeps its process.
     fn table_lines(&self, host: &HostModel, cx: &App) -> Vec<Line> {
         let needle = self.filter.read(cx).value().to_lowercase();
-        let matches = |p: &ProcRow| {
-            needle.is_empty()
+        let filtering = !needle.is_empty();
+        let proc_matches = |p: &ProcRow| {
+            !filtering
                 || p.comm.to_lowercase().contains(&needle)
                 || p.cmdline
                     .as_ref()
@@ -663,14 +675,66 @@ impl AppState {
                     .is_some_and(|u| u.to_lowercase().contains(&needle))
                 || p.key.pid.to_string() == needle
         };
+        let thread_matches = |t: &ThreadRow| {
+            !filtering || t.comm.to_lowercase().contains(&needle) || t.key.pid.to_string() == needle
+        };
+        let (key, desc) = self.sort;
+
+        // Threads by owner, in the current sort order where it applies.
+        let mut threads_of: HashMap<u32, Vec<ThreadRow>> = HashMap::new();
+        if self.show_threads {
+            for t in &host.snapshot.threads {
+                threads_of.entry(t.tgid).or_default().push(t.clone());
+            }
+            for list in threads_of.values_mut() {
+                list.sort_by(|a, b| {
+                    let ord = match key {
+                        SortKey::Cpu => a.cpu_pct.total_cmp(&b.cpu_pct),
+                        SortKey::Command => a.comm.cmp(&b.comm),
+                        _ => a.key.pid.cmp(&b.key.pid),
+                    };
+                    let ord = if desc && matches!(key, SortKey::Cpu | SortKey::Command) {
+                        ord.reverse()
+                    } else {
+                        ord
+                    };
+                    ord.then(a.key.pid.cmp(&b.key.pid))
+                });
+            }
+        }
+        let has_matching_thread: HashSet<u32> = if filtering {
+            threads_of
+                .iter()
+                .filter(|(_, ts)| ts.iter().any(&thread_matches))
+                .map(|(&tgid, _)| tgid)
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let matches = |p: &ProcRow| proc_matches(p) || has_matching_thread.contains(&p.key.pid);
+        // The threads to show under a process: all of them unless filtering,
+        // in which case those that match, or all if the process itself does.
+        let shown_threads = |p: &ProcRow| -> Vec<ThreadRow> {
+            let own = proc_matches(p);
+            threads_of
+                .get(&p.key.pid)
+                .map(|ts| {
+                    ts.iter()
+                        .filter(|t| own || thread_matches(t))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
         let mut rows: Vec<ProcRow> = host
             .snapshot
             .procs
             .iter()
+            .filter(|p| !(self.hide_kernel && p.kernel_thread))
             .filter(|p| self.tree || matches(p))
             .cloned()
             .collect();
-        let (key, desc) = self.sort;
         rows.sort_by(|a, b| {
             let ord = match key {
                 SortKey::Pid => a.key.pid.cmp(&b.key.pid),
@@ -686,21 +750,86 @@ impl AppState {
             ord.then(a.key.pid.cmp(&b.key.pid))
         });
 
+        let mut out = Vec::new();
         if !self.tree {
-            return rows
-                .into_iter()
-                .map(|row| Line { row, tree: None })
-                .collect();
+            for row in rows {
+                let threads = shown_threads(&row);
+                out.push(Line::process(
+                    row.clone(),
+                    None,
+                    filtering && !proc_matches(&row),
+                ));
+                out.extend(
+                    threads
+                        .into_iter()
+                        .map(|t| Line::thread(row.clone(), t, None)),
+                );
+            }
+            return out;
         }
         let filter: Option<&dyn Fn(&ProcRow) -> bool> =
-            (!needle.is_empty()).then_some(&matches as &dyn Fn(&ProcRow) -> bool);
-        sysmon_model::tree::build(&rows, filter, &self.collapsed)
-            .into_iter()
-            .map(|t| Line {
-                row: rows[t.row].clone(),
-                tree: Some(t),
-            })
-            .collect()
+            filtering.then_some(&matches as &dyn Fn(&ProcRow) -> bool);
+        for t in sysmon_model::tree::build(&rows, filter, &self.collapsed) {
+            let row = rows[t.row].clone();
+            let threads = if t.collapsed {
+                Vec::new()
+            } else {
+                shown_threads(&row)
+            };
+            // Threads go first among the children, so the guides drawn for
+            // the real children below stay right.
+            let prefix = child_prefix(&t.guides);
+            let n = threads.len();
+            let thread_lines: Vec<Line> = threads
+                .into_iter()
+                .enumerate()
+                .map(|(k, th)| {
+                    let last = k + 1 == n && !t.has_children;
+                    let tree = TreeLine {
+                        row: t.row,
+                        depth: t.depth + 1,
+                        guides: format!("{prefix}{}", if last { "└─ " } else { "├─ " }),
+                        has_children: false,
+                        collapsed: false,
+                        matched: true,
+                        hidden: 0,
+                        hidden_cpu_pct: 0.0,
+                        hidden_rss_kib: 0,
+                        hidden_virt_kib: 0,
+                    };
+                    Line::thread(row.clone(), th, Some(tree))
+                })
+                .collect();
+            let context = filtering && !proc_matches(&row);
+            out.push(Line::process(row, Some(t), context));
+            out.extend(thread_lines);
+        }
+        out
+    }
+
+    /// e.g. "113 shown · 359 kernel threads hidden · 1218 threads · 2 graphed".
+    fn status_line(&self, host: &HostModel, shown: usize) -> String {
+        let mut parts = vec![format!("{shown} shown")];
+        let kernel = host
+            .snapshot
+            .procs
+            .iter()
+            .filter(|p| p.kernel_thread)
+            .count();
+        if self.hide_kernel && kernel > 0 {
+            parts.push(format!("{kernel} kernel threads hidden"));
+        }
+        if self.show_threads {
+            if host.sends_threads() {
+                parts.push(format!("{} threads", host.snapshot.threads.len()));
+            } else {
+                parts.push("threads not reported: start this host's agent with --threads".into());
+            }
+        }
+        if let Some(sel) = self.selection().filter(|s| !s.is_empty()) {
+            parts.push(format!("{} graphed", sel.len()));
+        }
+        parts.join(" · ")
     }
 
     fn render_procs(&self, host: &HostModel, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -766,8 +895,13 @@ impl AppState {
                 .map(|i| {
                     let line = &rows[i];
                     let p = &line.row;
-                    let dim = p.stale || line.tree.as_ref().is_some_and(|t| !t.matched);
-                    let slot = picked.get(&p.key).copied();
+                    let th = line.thread.as_ref();
+                    let dim = th.is_some()
+                        || line.context
+                        || th.map_or(p.stale, |t| t.stale)
+                        || line.tree.as_ref().is_some_and(|t| !t.matched);
+                    let slot = picked.get(&line.key()).copied();
+                    let dash = || "–".to_string();
                     let on_row = {
                         let (this, rows) = (this.clone(), rows.clone());
                         move |ev: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -796,7 +930,7 @@ impl AppState {
                         .text_xs()
                         .font_family(mono.clone())
                         .when(i % 2 == 1, |d| d.bg(theme.muted.opacity(0.3)))
-                        .when(cursor == Some(p.key), |d| d.bg(theme.accent))
+                        .when(cursor == Some(line.key()), |d| d.bg(theme.accent))
                         .when(dim, |d| d.text_color(theme.muted_foreground))
                         .child(
                             // Graph checkbox; filled with the line's colour when picked.
@@ -817,7 +951,7 @@ impl AppState {
                                 })
                                 .on_click(on_pick),
                         )
-                        .child(div().w(px(64.)).child(p.key.pid.to_string()))
+                        .child(div().w(px(64.)).child(line.key().pid.to_string()))
                         .child(
                             div().w(px(80.)).overflow_hidden().child(
                                 p.user
@@ -826,17 +960,37 @@ impl AppState {
                                     .unwrap_or_else(|| "-".into()),
                             ),
                         )
-                        .child(div().w(px(16.)).child(p.state.to_string()))
-                        .child(div().w(px(60.)).child(format!("{:.1}", p.cpu_pct)))
-                        .child(div().w(px(SIZE_COL)).child(size_cell(p.virt_kib)))
-                        .child(div().w(px(SIZE_COL)).child(size_cell(Some(p.rss_kib))))
-                        .child(div().w(px(SIZE_COL)).child(size_cell(p.shr_kib)))
                         .child(
                             div()
-                                .w(px(44.))
-                                .child(format!("{:.1}", p.rss_kib as f32 / mem_total * 100.0)),
+                                .w(px(16.))
+                                .child(th.map_or(p.state, |t| t.state).to_string()),
                         )
-                        .child(div().w(px(48.)).child(p.threads.to_string()))
+                        .child(
+                            div()
+                                .w(px(60.))
+                                .child(format!("{:.1}", th.map_or(p.cpu_pct, |t| t.cpu_pct))),
+                        )
+                        // A thread's memory is its process's, shown on that row.
+                        .child(div().w(px(SIZE_COL)).child(match th {
+                            Some(_) => dash(),
+                            None => size_cell(p.virt_kib),
+                        }))
+                        .child(div().w(px(SIZE_COL)).child(match th {
+                            Some(_) => dash(),
+                            None => size_cell(Some(p.rss_kib)),
+                        }))
+                        .child(div().w(px(SIZE_COL)).child(match th {
+                            Some(_) => dash(),
+                            None => size_cell(p.shr_kib),
+                        }))
+                        .child(div().w(px(44.)).child(match th {
+                            Some(_) => dash(),
+                            None => format!("{:.1}", p.rss_kib as f32 / mem_total * 100.0),
+                        }))
+                        .child(div().w(px(48.)).child(match th {
+                            Some(_) => dash(),
+                            None => p.threads.to_string(),
+                        }))
                         .child(command_cell(line, i, &this, &theme))
                 })
                 .collect()
@@ -871,6 +1025,28 @@ impl AppState {
                                 cx.notify();
                             })),
                     )
+                    .child(
+                        Button::new("kernel-toggle")
+                            .label("Hide kernel threads")
+                            .small()
+                            .when(self.hide_kernel, |b| b.primary())
+                            .when(!self.hide_kernel, |b| b.ghost())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.hide_kernel = !this.hide_kernel;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("threads-toggle")
+                            .label("Show threads")
+                            .small()
+                            .when(self.show_threads, |b| b.primary())
+                            .when(!self.show_threads, |b| b.ghost())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_threads = !this.show_threads;
+                                cx.notify();
+                            })),
+                    )
                     .when(self.tree, |d| {
                         d.child(
                             Button::new("expand-all")
@@ -897,10 +1073,7 @@ impl AppState {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(match self.selection().filter(|s| !s.is_empty()) {
-                                Some(sel) => format!("{count} shown · {} graphed", sel.len()),
-                                None => format!("{count} shown"),
-                            }),
+                            .child(self.status_line(host, count)),
                     ),
             )
             .child(header)
@@ -939,12 +1112,12 @@ impl AppState {
         let Some(line) = lines.get(i) else {
             return;
         };
-        self.cursor = Some(line.row.key);
+        self.cursor = Some(line.key());
         let result = if shift {
             let anchor = self
                 .selection()
                 .and_then(|s| s.anchor)
-                .and_then(|a| lines.iter().position(|l| l.row.key == a))
+                .and_then(|a| lines.iter().position(|l| l.key() == a))
                 .unwrap_or(i);
             let (lo, hi) = (anchor.min(i), anchor.max(i));
             let targets: Vec<_> = lines[lo..=hi].iter().map(Line::target).collect();
@@ -978,12 +1151,12 @@ impl AppState {
         }
         let pos = self
             .cursor
-            .and_then(|c| lines.iter().position(|l| l.row.key == c));
+            .and_then(|c| lines.iter().position(|l| l.key() == c));
         let next = match pos {
             None => 0,
             Some(p) => (p as isize + delta).clamp(0, lines.len() as isize - 1) as usize,
         };
-        self.cursor = Some(lines[next].row.key);
+        self.cursor = Some(lines[next].key());
         self.scroll.scroll_to_item(next, ScrollStrategy::Nearest);
         cx.notify();
     }
@@ -996,7 +1169,7 @@ impl AppState {
         let lines = self.table_lines(host, cx);
         if let Some(line) = self
             .cursor
-            .and_then(|c| lines.iter().find(|l| l.row.key == c))
+            .and_then(|c| lines.iter().find(|l| l.key() == c))
         {
             let target = line.target();
             self.toggle_pick(target, cx);
@@ -1048,6 +1221,10 @@ impl AppState {
             .iter()
             .filter_map(|p| {
                 let key = p.target.key();
+                if let SeriesTarget::Thread(_) = p.target {
+                    let t = host.snapshot.threads.iter().find(|t| t.key == key)?;
+                    return Some((key, format!("{} (thread of {})", t.comm, t.tgid)));
+                }
                 let row = host.snapshot.procs.iter().find(|r| r.key == key)?;
                 Some((key, row.comm.clone()))
             })
@@ -1234,7 +1411,7 @@ impl AppState {
                     let n = latest.map_or(0, |(_, n)| n);
                     format!("{} {name} + subtree ({n})", key.pid)
                 }
-                SeriesTarget::Thread(_) => format!("{} {name} (thread)", key.pid),
+                SeriesTarget::Thread(_) => format!("{} {name}", key.pid),
             };
             let value = match hover_ns {
                 Some(t) => graph::value_at(&line.points, t),
@@ -1402,6 +1579,14 @@ impl AppState {
             }))
             .on_action(cx.listener(|this, _: &ToggleShortcuts, _, cx| {
                 this.show_shortcuts = !this.show_shortcuts;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleKernelThreads, _, cx| {
+                this.hide_kernel = !this.hide_kernel;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleThreads, _, cx| {
+                this.show_threads = !this.show_threads;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleTree, _, cx| {
@@ -1656,20 +1841,61 @@ fn apply(hosts: &mut BTreeMap<u64, HostModel>, event: Event) {
         .apply(event);
 }
 
-/// One row of the process table.
+/// One row of the process table: a process, or one of its threads.
 struct Line {
+    /// The process (for a thread line, the thread's process).
     row: ProcRow,
     tree: Option<TreeLine>,
+    thread: Option<ThreadRow>,
+    /// Shown only because something under it matched the filter.
+    context: bool,
 }
 
 impl Line {
-    /// What picking this row graphs: its whole subtree when it's a collapsed
-    /// tree node, otherwise just the process.
+    fn process(row: ProcRow, tree: Option<TreeLine>, context: bool) -> Self {
+        Self {
+            row,
+            tree,
+            thread: None,
+            context,
+        }
+    }
+
+    fn thread(row: ProcRow, thread: ThreadRow, tree: Option<TreeLine>) -> Self {
+        Self {
+            row,
+            tree,
+            thread: Some(thread),
+            context: false,
+        }
+    }
+
+    /// The process's key, or for a thread line the thread's.
+    fn key(&self) -> ProcKey {
+        self.thread.as_ref().map_or(self.row.key, |t| t.key)
+    }
+
+    /// What picking this row graphs: the thread, a collapsed tree node's
+    /// whole subtree, or the process.
     fn target(&self) -> SeriesTarget {
+        if let Some(t) = &self.thread {
+            return SeriesTarget::Thread(t.key);
+        }
         match &self.tree {
             Some(t) if t.collapsed && t.has_children => SeriesTarget::Subtree(self.row.key),
             _ => SeriesTarget::Process(self.row.key),
         }
+    }
+}
+
+/// The guide prefix for a tree line's children, from the line's own guides.
+fn child_prefix(guides: &str) -> String {
+    if let Some(p) = guides.strip_suffix("├─ ") {
+        format!("{p}│  ")
+    } else if let Some(p) = guides.strip_suffix("└─ ") {
+        format!("{p}   ")
+    } else {
+        String::new()
     }
 }
 
@@ -1688,8 +1914,12 @@ fn command_cell(
         .items_center()
         .overflow_hidden()
         .whitespace_nowrap();
+    let label = match &line.thread {
+        Some(t) => format!("↳ {}", t.comm),
+        None => command(&line.row),
+    };
     let Some(t) = &line.tree else {
-        return cell.child(command(&line.row));
+        return cell.child(label);
     };
     let twisty = if t.has_children {
         let key = line.row.key;
@@ -1724,7 +1954,7 @@ fn command_cell(
             .child(t.guides.clone()),
     )
     .child(twisty)
-    .child(div().flex_none().child(command(&line.row)))
+    .child(div().flex_none().child(label))
     .when(t.collapsed, |d| {
         d.child(
             div()
@@ -1974,8 +2204,9 @@ mod tests {
     /// Sample `seq` of the test host, `seq` seconds in, with CPU ticks growing.
     fn add_frame(app: &Entity<AppState>, cx: &mut TestAppContext, seq: u32) {
         app.update(cx, |app, cx| {
-            // 1 ─┬─ 10 ── 11
+            // 1 ─┬─ 10 ── 11      10 also has threads 101 "worker-a" and 102 "io".
             //    └─ 20
+            // 2 ─── 3            kthreadd and a kworker: kernel threads.
             let proc = |pid: u32, ppid: u32, comm: &str| sysmon_proto::ProcSample {
                 pid,
                 ppid,
@@ -2003,8 +2234,27 @@ mod tests {
                     proc(10, 1, "bash"),
                     proc(11, 10, "vim"),
                     proc(20, 1, "sshd"),
+                    sysmon_proto::ProcSample {
+                        kernel_thread: Some(true),
+                        ..proc(2, 0, "kthreadd")
+                    },
+                    sysmon_proto::ProcSample {
+                        kernel_thread: Some(true),
+                        ..proc(3, 2, "kworker/0:0")
+                    },
                 ],
-                threads: Vec::new(),
+                threads: [(101, "worker-a"), (102, "io")]
+                    .into_iter()
+                    .map(|(tid, comm)| sysmon_proto::ThreadSample {
+                        tgid: 10,
+                        tid,
+                        starttime: 0,
+                        state: b'S',
+                        utime: seq as u64 * tid as u64,
+                        stime: 0,
+                        comm: comm.into(),
+                    })
+                    .collect(),
                 complete: true,
             };
             apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
@@ -2329,5 +2579,176 @@ mod tests {
         });
         assert_eq!(super::size_cell(None), "–");
         assert_eq!(super::size_cell(Some(1 << 20)), "1.0 GiB");
+    }
+
+    /// The table as (key, is-thread, guides) for assertions.
+    fn table(app: &Entity<AppState>, cx: &mut TestAppContext) -> Vec<(u32, bool, String)> {
+        app.read_with(cx, |app, cx| {
+            let host = &app.hosts()[&1];
+            app.table_lines(host, cx)
+                .iter()
+                .map(|l| {
+                    (
+                        l.key().pid,
+                        l.thread.is_some(),
+                        l.tree
+                            .as_ref()
+                            .map(|t| t.guides.clone())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    fn pids(t: &[(u32, bool, String)]) -> Vec<u32> {
+        t.iter().map(|(p, _, _)| *p).collect()
+    }
+
+    /// Mark the test host as sending threads, as `sysmon-agent --threads` does.
+    fn send_threads(app: &Entity<AppState>, cx: &mut TestAppContext) {
+        app.update(cx, |app, cx| {
+            let info = sysmon_proto::HostInfo {
+                hostname: "test".into(),
+                kernel: "6".into(),
+                cpu_count: 1,
+                mem_total_kib: 1 << 20,
+                clk_tck: 100,
+                page_size: 4096,
+                interval_ms: 1000,
+                sends_threads: true,
+            };
+            apply(
+                &mut app.live_hosts,
+                sysmon_ingest::Event::HostInfo { host_id: 1, info },
+            );
+            cx.notify();
+        });
+    }
+
+    #[gpui_kit::test]
+    fn kernel_threads_are_hidden_by_default_and_ctrl_k_shows_them(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        assert_eq!(pids(&table(&app, cx)), [1, 10, 11, 20]);
+        app.read_with(cx, |app, _| {
+            let s = app.status_line(&app.hosts()[&1], 4);
+            assert!(s.contains("2 kernel threads hidden"), "{s}");
+        });
+
+        step(cx, &|window, cx| window.press("ctrl-k", cx));
+        assert_eq!(pids(&table(&app, cx)), [1, 2, 3, 10, 11, 20]);
+
+        // In the tree, they're kthreadd's subtree, and hiding removes it whole.
+        step(cx, &|window, cx| window.press("t", cx));
+        let t = table(&app, cx);
+        assert_eq!(pids(&t), [1, 10, 11, 20, 2, 3]);
+        assert_eq!(t[5].2, "└─ ");
+        step(cx, &|window, cx| window.press("ctrl-k", cx));
+        assert_eq!(pids(&table(&app, cx)), [1, 10, 11, 20]);
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_h_lists_threads_under_their_process(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        // Off by default; with an agent that doesn't send threads, say so.
+        assert!(table(&app, cx).iter().all(|(_, th, _)| !th));
+        step(cx, &|window, cx| window.press("ctrl-h", cx));
+        app.read_with(cx, |app, _| {
+            let s = app.status_line(&app.hosts()[&1], 4);
+            assert!(s.contains("start this host's agent with --threads"), "{s}");
+        });
+
+        send_threads(&app, cx);
+        let t = table(&app, cx);
+        assert_eq!(pids(&t), [1, 10, 101, 102, 11, 20]);
+        assert_eq!(
+            t.iter().map(|(_, th, _)| *th).collect::<Vec<_>>(),
+            [false, false, true, true, false, false]
+        );
+        app.read_with(cx, |app, _| {
+            assert!(app.status_line(&app.hosts()[&1], 6).contains("2 threads"));
+        });
+
+        // In the tree, threads are the first children of their process.
+        step(cx, &|window, cx| window.press("t", cx));
+        let guides: Vec<(u32, String)> = table(&app, cx)
+            .into_iter()
+            .map(|(p, _, g)| (p, g))
+            .collect();
+        assert_eq!(
+            guides,
+            [
+                (1, "".into()),
+                (10, "├─ ".into()),
+                (101, "│  ├─ ".into()),
+                (102, "│  ├─ ".into()),
+                (11, "│  └─ ".into()),
+                (20, "└─ ".into()),
+            ]
+        );
+
+        // Collapsing the process hides its threads too.
+        step(cx, &|window, cx| window.click(("twisty", 1usize), cx));
+        assert_eq!(pids(&table(&app, cx)), [1, 10, 20]);
+    }
+
+    #[gpui_kit::test]
+    fn threads_can_be_filtered_and_graphed(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        send_threads(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        step(cx, &|window, cx| window.press("ctrl-h", cx));
+
+        // A thread's name keeps its process (shown as context) in the list.
+        step(cx, &|window, cx| {
+            window.press("ctrl-f", cx);
+            window.input("worker", cx);
+        });
+        assert_eq!(pids(&table(&app, cx)), [10, 101]);
+        app.read_with(cx, |app, cx| {
+            let lines = app.table_lines(&app.hosts()[&1], cx);
+            assert!(lines[0].context, "process shown because of its thread");
+            assert!(!lines[1].context);
+        });
+
+        // Pick the thread row for the graph.
+        step(cx, &|window, cx| window.click(("pick", 1usize), cx));
+        app.read_with(cx, |app, _| {
+            assert_eq!(picked(app), [SeriesTarget::Thread(key(101))]);
+            assert_eq!(
+                app.hosts()[&1].latest(SeriesTarget::Thread(key(101)), sysmon_model::Metric::Cpu),
+                Some((0.0, 1))
+            );
+        });
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find(("legend", 0usize)).is_some(),
+                "thread line in the legend"
+            );
+        });
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.graph_names[&key(101)], "worker-a (thread of 10)");
+        });
     }
 }
