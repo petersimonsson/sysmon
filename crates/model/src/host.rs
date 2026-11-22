@@ -31,6 +31,8 @@ pub struct HostModel {
     /// When the monitor last received a sample from this host (the
     /// monitor's clock); what "silent" is judged by.
     pub last_received_ns: u64,
+    /// Journal lines, if the agent sends them (`--logs`).
+    pub logs: crate::logs::Logs,
 
     meta: HashMap<ProcKey, ProcMeta>,
     users: HashMap<u32, String>,
@@ -166,9 +168,18 @@ impl HostModel {
                     self.users.insert(u.uid, u.name);
                 }
             }
-            Event::Frame(frame) => self.apply_frame(frame),
-            // Kept by the model from the next change on.
-            Event::Logs { .. } => {}
+            Event::Frame(frame) => {
+                // Gaps in the logs are given up on with time, even if no
+                // more logs come.
+                self.logs.tick(frame.received_ns);
+                self.apply_frame(frame)
+            }
+            Event::Logs {
+                boot_id,
+                batch,
+                received_ns,
+                ..
+            } => self.logs.apply(boot_id, batch, received_ns),
         }
     }
 
@@ -793,6 +804,49 @@ mod tests {
         // Newer samples still apply, with rates against the last good one.
         m.apply(frame(2, 102, 200, 0, vec![proc(10, 150)], true));
         assert_eq!(m.snapshot.procs[0].cpu_pct, 50.0);
+    }
+
+    #[test]
+    fn logs_are_kept_and_frames_time_out_their_gaps() {
+        let mut m = HostModel::new(1);
+        let entry = |msg: &str| sysmon_proto::LogEntry {
+            ts_unix_ns: 1,
+            priority: 3,
+            unit: None,
+            ident: "t".into(),
+            pid: None,
+            message: msg.into(),
+            truncated: false,
+        };
+        let logs = |first_seq, msg: &str, received_ns| Event::Logs {
+            host_id: 1,
+            boot_id: 0,
+            batch: sysmon_proto::LogBatch {
+                run: 1,
+                first_seq,
+                dropped: 0,
+                entries: vec![entry(msg)],
+            },
+            received_ns,
+        };
+        m.apply(logs(0, "a", 1_000));
+        m.apply(logs(2, "c", 2_000));
+        assert_eq!(m.logs.rows().len(), 1);
+        // No more logs, but samples keep coming: the gap is given up on.
+        let Event::Frame(mut f) = frame(0, 100, 0, 0, vec![], true) else {
+            unreachable!()
+        };
+        f.received_ns = 2_000 + crate::logs::REORDER_WAIT_NS;
+        m.apply(Event::Frame(f));
+        let kinds: Vec<_> = m.logs.rows().iter().map(|r| r.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            [
+                crate::LogKind::Line(entry("a")),
+                crate::LogKind::Lost(1),
+                crate::LogKind::Line(entry("c"))
+            ]
+        );
     }
 
     #[test]
