@@ -141,8 +141,11 @@ pub enum Msg {
   agent's two reads. Version 3 added `ProcSample::kernel_thread` (the kernel's
   `PF_KTHREAD` flag), `HostInfo::sends_threads`, and `Msg::Threads`
   (`ThreadSample { tgid, tid, starttime, state, utime, stime, comm }`, keyed
-  by `(tid, starttime)`, which never collides with a process key). v1 and v2
-  are frozen in `proto::v1` and `proto::v2`. Monitors must be upgraded before
+  by `(tid, starttime)`, which never collides with a process key). Version 4
+  added `SystemSample::boottime_ns`, the agent's `CLOCK_BOOTTIME` (time since
+  boot, counting suspend, never stepped like the wall clock), which monitors
+  use to order samples and compute rates (section 5). v1–v3 are frozen in
+  `proto::v1`, `proto::v2` and `proto::v3`. Monitors must be upgraded before
   agents, since an older monitor rejects newer versions.
 - **Process identity** is `(pid, starttime)`, so a reused PID never merges two
   processes' histories.
@@ -166,12 +169,20 @@ pub struct Frame {
 ## 2. `sysmon-agent`: collector
 
 - No async runtime. The main thread runs the sampling loop,
-  `loop { collect(); encode(); send(); sleep_until(next_tick) }`, with a
-  blocking `std::net::UdpSocket`. A second thread does user-name lookups
-  (below).
+  `loop { collect(); encode(); send(); sleep_until(next_tick) }`, with
+  blocking `std::net::UdpSocket`s: one per address family the targets use,
+  since a socket bound to `0.0.0.0` can't reach IPv6 addresses (`send::Sender`).
+  A second thread does user-name lookups (below).
+- Logging defaults to `info` (`RUST_LOG` overrides it), so the start-up
+  line and send failures reach the terminal or the journal.
 - It reads `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`, `/proc/[pid]/stat`,
   `/proc/[pid]/statm`, `/proc/net/dev` and `/proc/diskstats` into one reused
-  buffer. `statm` is read only for SHR (its third field). That second read
+  buffer. Files are read as bytes and decoded leniently (invalid UTF-8
+  becomes U+FFFD): names in `/proc` are arbitrary bytes, and any process can
+  rename itself to bytes that aren't UTF-8, which a strict read would skip,
+  hiding that process. Only physical disks are sent (`/sys/block/<name>/device`
+  exists): partitions, device-mapper, RAID, loop and RAM devices would count
+  the same I/O again. `statm` is read only for SHR (its third field). That second read
   per process costs about 57 % more agent CPU: 4.1 → 6.5 ms per sample of
   about 495 processes, or 0.4 % → 0.65 % of a core at 1 Hz.
 - User names come from `getpwuid_r`, so they follow `/etc/nsswitch.conf`:
@@ -194,7 +205,9 @@ pub struct Frame {
   threads: 6.8 → 17 ms per sample, and 10.1 → 26.5 KB per sample
   compressed.
 - Deployment: the sandboxed systemd unit in
-  `crates/agent/dist/sysmon-agent.service`, and a static musl build
+  `crates/agent/dist/sysmon-agent.service` (which allows `AF_UNIX` besides IP,
+  because user lookups reach systemd's user database, SSSD and nscd over Unix
+  sockets), and a static musl build
   (`rustup target add x86_64-unknown-linux-musl`, then
   `cargo build --release -p sysmon-agent --target x86_64-unknown-linux-musl`).
   The musl build hasn't been tried yet.
@@ -218,8 +231,9 @@ pub struct Frame {
   `Users` and every `ProcMeta` in its first sample, so changed settings (e.g.
   `--threads`) take effect at once. As a guard against a late duplicate
   being taken for a restart, `HostModel` ignores samples that aren't newer
-  than the last one from that boot. The first rates after a restart average
-  over the downtime, as after lost samples.
+  than the last one from that boot (by the boot-time clock; section 5). The
+  first rates after a restart average over the downtime, as after lost
+  samples.
 - Channels are bounded (`flume`). When a consumer falls behind, frames are
   dropped and counted. The socket thread never blocks.
 
@@ -305,6 +319,15 @@ agent or the monitor was offline) are skipped rather than waited out.
 
 - the previous and current samples, used for CPU %, memory, and per-interface
   and per-disk rates (bytes/s and disk busy %);
+- **time:** samples are ordered and rates computed by the agent's boot-time
+  clock (`boottime_ns`), so a step of the agent's wall clock (NTP, a date
+  change, a VM resume) neither freezes the host nor distorts rates. A
+  sample that isn't newer than the last on that clock is a duplicate and is
+  ignored. Agents older than v4 fall back to the wall clock; a sample is
+  only compared with one from the same boot on the same kind of clock, so
+  an agent upgraded mid-boot just starts rates afresh. When the wall clock
+  jumps by more than 2 s relative to boot time, `history` and `proc_history`
+  are cleared, since the graphs' time axis is wall time;
 - per-process `%CPU = Δ(utime + stime) / clk_tck / Δt`, where each process
   remembers when its ticks were read;
 - after an incomplete frame, the rows that didn't arrive, carried over and
@@ -512,15 +535,17 @@ cargo run -p sysmon-model --example replay -- <path> [--tree]  # print a recordi
 
 Implemented, and covered by tests where noted:
 
-- `proto`: protocol v3 with v1 and v2 still decodable; types, framing,
+- `proto`: protocol v4 with v1–v3 still decodable; types, framing,
   chunking of samples, threads, `ProcMeta` and `Users`; zstd compression;
   XChaCha20-Poly1305 sealing, including tamper, wrong-key and plaintext
   rejection (tested).
-- `agent`: collection from `/proc` with a reused buffer, including VIRT,
-  SHR, kernel threads and (with `--threads`) threads; user names through
-  NSS on a background thread; HostInfo, ProcMeta and Users scheduling;
-  compression, encryption, key generation; `--licenses`; systemd unit
-  (parsers and lookups tested).
+- `agent`: collection from `/proc` with a reused buffer and lenient
+  decoding, including VIRT, SHR, kernel threads, physical disks only and
+  (with `--threads`) threads; a boot-time clock in every sample; IPv4 and
+  IPv6 targets; user names through NSS on a background thread; HostInfo,
+  ProcMeta and Users scheduling; compression, encryption, key generation;
+  `--licenses`; systemd unit (parsers, lookups, non-UTF-8 names, disks,
+  IPv6 and the clock tested).
 - `ingest`: authenticated receive thread and assembler: completion, loss,
   timeout, reboot and agent-restart handling (tested); `dump` example.
 - `store`: segment writer and reader, torn-tail recovery, sparse index with

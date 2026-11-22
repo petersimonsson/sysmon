@@ -101,7 +101,8 @@ The host shows up in the sidebar within a second.
 
    `--compress` roughly halves the bandwidth (about 9 KB per second for a host
    with 500 processes). `--target` can be given several times to send to more
-   than one monitor. Add `--threads` to send every thread as well, so the UI
+   than one monitor, by name or by IPv4 or IPv6 address (e.g.
+   `[2001:db8::7]:9876`). Add `--threads` to send every thread as well, so the UI
    can list them. That costs about 2.5× the agent's CPU and bandwidth
    (measured with ~1700 threads: 17 ms and 26 KB per sample), so it's off by
    default.
