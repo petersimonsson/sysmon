@@ -47,6 +47,8 @@ const TIMELINE_STEPS: f32 = 10_000.;
 const SPEEDS: [f64; 5] = [1., 4., 16., 64., 256.];
 /// Longest stretch of replay catch-up applied between two frames.
 const REPLAY_SLICE: Duration = Duration::from_millis(8);
+/// How often the sidebar is brought up to date for hosts not shown.
+const SIDEBAR_EVERY: Duration = Duration::from_secs(1);
 /// A live host not heard from for this long is dropped, history and all.
 const FORGET_AFTER_NS: u64 = 3600 * 1_000_000_000;
 /// At most this many live hosts are kept; past it, the one silent longest
@@ -159,6 +161,9 @@ pub struct AppState {
     open_replay: fn(&std::path::Path, f64) -> anyhow::Result<ReplayHandle>,
     /// Longest stretch of replay catch-up applied between two frames.
     replay_slice: Duration,
+    /// Other hosts' samples arrived since the sidebar was last drawn.
+    sidebar_stale: bool,
+    sidebar_drawn: std::time::Instant,
     /// Slices applied so far, for tests.
     #[cfg(test)]
     replay_slices: usize,
@@ -195,13 +200,7 @@ impl AppState {
                     let batch: Vec<Event> =
                         std::iter::once(first).chain(events.try_iter()).collect();
                     let alive = this.update(cx, |this, cx| {
-                        let now = sysmon_ingest::unix_now_ns();
-                        for event in batch {
-                            this.apply_live(event, now);
-                        }
-                        this.forget_hosts(now);
-                        if this.view == View::Live {
-                            this.ensure_selection();
+                        if this.apply_live_batch(batch, sysmon_ingest::unix_now_ns()) {
                             cx.notify();
                         }
                     });
@@ -222,6 +221,9 @@ impl AppState {
                 let alive = this.update_in(cx, |this, window, cx| {
                     if this.view == View::Replay && this.replay_status_changed() {
                         this.sync_timeline(window, cx);
+                        cx.notify();
+                    }
+                    if this.live_tick(std::time::Instant::now(), sysmon_ingest::unix_now_ns()) {
                         cx.notify();
                     }
                 });
@@ -318,6 +320,8 @@ impl AppState {
             opening: None,
             open_replay: crate::pipeline::open_replay,
             replay_slice: REPLAY_SLICE,
+            sidebar_stale: false,
+            sidebar_drawn: std::time::Instant::now(),
             #[cfg(test)]
             replay_slices: 0,
             shown_status: None,
@@ -337,6 +341,53 @@ impl AppState {
             (View::Replay, Some(s)) => &s.hosts,
             _ => &self.live_hosts,
         }
+    }
+
+    /// Apply a batch of live events; whether to redraw now. Only the
+    /// selected host's data, or the host list changing, redraws at once:
+    /// redrawing for every host's sample cost a full redraw (about 2.4 ms)
+    /// per host per second. Other hosts' samples only change the sidebar,
+    /// which [`Self::live_tick`] redraws once a second.
+    fn apply_live_batch(&mut self, batch: Vec<Event>, now: u64) -> bool {
+        let hosts_before: Vec<u64> = self.live_hosts.keys().copied().collect();
+        let selected_before = self.selected;
+        let mut touches_selected = false;
+        for event in batch {
+            touches_selected |= Some(event.host_id()) == self.selected;
+            self.apply_live(event, now);
+        }
+        self.forget_hosts(now);
+        if self.view != View::Live {
+            return false;
+        }
+        self.ensure_selection();
+        let hosts_changed = !self.live_hosts.keys().copied().eq(hosts_before);
+        if touches_selected || hosts_changed || self.selected != selected_before {
+            true
+        } else {
+            self.sidebar_stale = true;
+            false
+        }
+    }
+
+    /// Once a second in the Live view: whether the sidebar needs redrawing,
+    /// for other hosts' samples or because a host is silent (so its dot
+    /// turns red and "silent N s" counts on even when nothing arrives at all).
+    fn live_tick(&mut self, now: std::time::Instant, now_ns: u64) -> bool {
+        if self.view != View::Live
+            || now.saturating_duration_since(self.sidebar_drawn) < SIDEBAR_EVERY
+        {
+            return false;
+        }
+        let silent = self
+            .live_hosts
+            .values()
+            .any(|h| Self::silence_at(h, now_ns).is_some());
+        if std::mem::take(&mut self.sidebar_stale) || silent {
+            self.sidebar_drawn = now;
+            return true;
+        }
+        false
     }
 
     fn apply_live(&mut self, event: Event, now: u64) {
@@ -754,6 +805,11 @@ impl AppState {
             View::Live => sysmon_ingest::unix_now_ns(),
             View::Replay => self.status().map_or(0, |s| s.position_ns),
         };
+        Self::silence_at(host, now)
+    }
+
+    /// [`Self::silence`] at monitor time `now`.
+    fn silence_at(host: &HostModel, now: u64) -> Option<u64> {
         let interval_ns = host.info.as_ref().map_or(1000, |i| i.interval_ms) as u64 * 1_000_000;
         let since = now.saturating_sub(host.last_received_ns);
         (host.last_received_ns == 0 || since > 3 * interval_ns).then_some(since)
@@ -4719,6 +4775,56 @@ mod tests {
                 "just the reset and the frame after it"
             );
             assert_eq!(a.hosts()[&1].frames_received, 1);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn the_live_view_redraws_for_the_selected_host_and_ticks_for_the_rest(cx: &mut TestAppContext) {
+        let (_window, app) = open(cx);
+        let s = 1_000_000_000u64;
+        let sample = |host_id: u64, seq: u32, received_ns: u64| {
+            sysmon_ingest::Event::Frame(sysmon_proto::Frame {
+                host_id,
+                boot_id: 1,
+                seq,
+                system: Some(sysmon_proto::SystemSample {
+                    ts_unix_ns: (1 + seq as u64) * s,
+                    ..Default::default()
+                }),
+                procs: vec![],
+                threads: vec![],
+                complete: true,
+                received_ns,
+            })
+        };
+        let t0 = std::time::Instant::now();
+        let now = 100 * s;
+        app.update(cx, |a, _| {
+            // New hosts change the list: redraw.
+            assert!(a.apply_live_batch(vec![sample(1, 0, now), sample(2, 0, now)], now));
+            assert_eq!(a.selected, Some(1));
+            // The selected host's sample: redraw at once.
+            assert!(a.apply_live_batch(vec![sample(1, 1, now)], now));
+            // Another host's: not at once, but the sidebar is out of date...
+            assert!(!a.apply_live_batch(vec![sample(2, 1, now)], now));
+            // ... and the next tick, a second on, redraws it, once.
+            assert!(!a.live_tick(t0, now), "not yet a second since the last");
+            let t1 = a.sidebar_drawn + std::time::Duration::from_secs(1);
+            assert!(a.live_tick(t1, now));
+            assert!(
+                !a.live_tick(t1 + std::time::Duration::from_secs(1), now),
+                "nothing new"
+            );
+            // Once a host is silent (nothing at all arrives), each tick
+            // redraws so its dot turns red and the silence counts on.
+            let later = now + 10 * s;
+            let t2 = t1 + std::time::Duration::from_secs(2);
+            assert!(a.live_tick(t2, later));
+            assert!(a.live_tick(t2 + std::time::Duration::from_secs(1), later + s));
+            // Not in the Recording view.
+            a.view = View::Replay;
+            assert!(!a.apply_live_batch(vec![sample(1, 2, now)], now));
+            assert!(!a.live_tick(t2 + std::time::Duration::from_secs(5), later));
         });
     }
 }
