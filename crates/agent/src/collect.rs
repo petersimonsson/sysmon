@@ -65,7 +65,10 @@ pub fn host_info(interval_ms: u32, sends_threads: bool) -> HostInfo {
     HostInfo {
         hostname: hostname(),
         kernel: read_trimmed("/proc/sys/kernel/osrelease"),
-        cpu_count: std::thread::available_parallelism().map_or(1, |n| n.get() as u16),
+        // The CPUs in /proc/stat, as the per-core bars show them. Not
+        // available_parallelism(), which counts only the CPUs this process
+        // may run on (taskset, cgroup cpusets, a unit's CPUAffinity=).
+        cpu_count: read_cpus().len().saturating_sub(1).max(1) as u16,
         mem_total_kib,
         clk_tck: clk_tck.max(1) as u32,
         page_size: page_size.max(1) as u32,
@@ -389,6 +392,27 @@ mod tests {
         child.kill().ok();
         child.wait().ok();
         assert_eq!(found.as_deref(), Some("\u{FFFD}hidden"));
+    }
+
+    #[test]
+    fn cpu_count_is_the_hosts_not_the_agents_affinity() {
+        let cores = read_cpus().len() - 1; // minus the aggregate line
+        // Pin this thread to CPU 0, as taskset or a cpuset would.
+        // SAFETY: plain libc calls on a zeroed cpu_set_t for this thread.
+        let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        let mut old: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::cpu_set_t>();
+        unsafe {
+            libc::sched_getaffinity(0, size, &mut old);
+            libc::CPU_SET(0, &mut set);
+            assert_eq!(libc::sched_setaffinity(0, size, &set), 0);
+        }
+        assert_eq!(std::thread::available_parallelism().unwrap().get(), 1);
+        let info = host_info(1000, false);
+        unsafe {
+            libc::sched_setaffinity(0, size, &old);
+        }
+        assert_eq!(info.cpu_count as usize, cores);
     }
 
     #[test]
