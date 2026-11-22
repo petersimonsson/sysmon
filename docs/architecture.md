@@ -114,6 +114,14 @@ pub enum Msg {
     ProcMeta(Vec<ProcMeta>),    // cmdline/uid for (pid, starttime)
     Users(Vec<UserName>),       // uid → name for the uids of running processes
     Threads(Vec<ThreadSample>), // chunks after a sample's Procs, with `--threads`
+    Logs(LogBatch),             // journal lines, with `--logs` (v5)
+}
+
+pub struct LogBatch {
+    pub run: u64,          // random per agent start; numbering restarts with it
+    pub first_seq: u64,    // number of entries[0]; +1 per line, so a jump means loss
+    pub dropped: u32,      // lines the agent dropped (rate limit) before these
+    pub entries: Vec<LogEntry>, // time, priority, unit, identifier, PID, message
 }
 ```
 
@@ -131,6 +139,11 @@ pub enum Msg {
   refresh every ~30 s. `ProcSample` carries only `comm` (≤ 16 bytes).
 - `Users` lists only uids that running processes use. It's sent with
   `HostInfo`, and also as soon as a newly resolved name is available.
+- `Logs` batches are standalone (`chunk 0 of 1`), sent each tick that has
+  lines, and empty at least every 10 s as a heartbeat, so the monitor knows
+  a host sends logs even when it's quiet. `encode_logs` splits a batch over
+  datagrams, adjusting `first_seq`. Messages are cut to 800 bytes and unit
+  and identifier to 64 (`truncated` says so), so any entry fits.
 - New `Msg` variants are only ever appended, so old recordings keep decoding.
 - **Versions:** changing a type's fields changes the encoding (postcard isn't
   self-describing), so it bumps `VERSION`. The old types are frozen in a
@@ -145,8 +158,13 @@ pub enum Msg {
   added `SystemSample::boottime_ns`, the agent's `CLOCK_BOOTTIME` (time since
   boot, counting suspend, never stepped like the wall clock), which monitors
   use to order samples and compute rates (section 5). v1–v3 are frozen in
-  `proto::v1`, `proto::v2` and `proto::v3`. Monitors must be upgraded before
-  agents, since an older monitor rejects newer versions.
+  `proto::v1`, `proto::v2` and `proto::v3`. Version 5 added `Msg::Logs`, and
+  only log datagrams are sent as v5 (`version_of`): v4 and v5 payloads
+  decode the same way, so everything else stays v4 and a v4 monitor keeps
+  reading an agent that sends logs, rejecting just the log datagrams. That
+  also lets a recording be scanned for logs by the version byte alone.
+  Otherwise monitors must be upgraded before agents, since an older monitor
+  rejects newer versions.
 - **Process identity** is `(pid, starttime)`, so a reused PID never merges two
   processes' histories.
 
@@ -210,8 +228,36 @@ pub struct Frame {
 - It tracks the set of known `(pid, starttime)` pairs to decide when to emit
   `ProcMeta`.
 - CLI (`clap`): `--target host:port` (repeatable), `--interval-ms`,
-  `--compress`, `--key-file`, `--generate-key <path>`, `--threads`, and
-  `--licenses` (third-party license notices; see section 6).
+  `--compress`, `--key-file`, `--generate-key <path>`, `--threads`, `--logs`
+  (with `--log-priority`, `--log-unit`, `--log-cursor-file` and
+  `--logs-unencrypted`), and `--licenses` (third-party license notices; see
+  section 6).
+- `--logs` (`journal.rs`, off by default) follows `journalctl --follow
+  --output=export`, filtered there by priority (default warning and above)
+  and unit, on its own thread. Running journalctl rather than linking
+  libsystemd keeps the agent's dependencies (and a static build), and
+  leaves access to systemd: system logs need the `systemd-journal` group.
+  - The export format is parsed directly: `KEY=value` lines, or for binary
+    values (and ones with newlines) the key, a little-endian length and the
+    bytes. Fields used: time, priority, `_SYSTEMD_UNIT`,
+    `SYSLOG_IDENTIFIER` (else `_COMM`), `_PID`, `MESSAGE`, `__CURSOR`.
+  - Each tick the sampling loop takes what was read as one batch, numbered
+    on from the last under the run's random ID.
+  - Over 200 lines/s or 256 KiB/s of text, or 10,000 lines queued, lines are
+    dropped and counted in the next batch.
+  - After each send the journal cursor of the last line read is saved
+    (write and rename) to `--log-cursor-file`, by default
+    `$STATE_DIRECTORY/journal-cursor`. A restart passes it to
+    `--after-cursor`, so lines logged while the agent was down are sent and
+    none are repeated. Without one, it starts with new lines (`--lines=0`).
+    If journalctl fails at once with a saved cursor (the journal was
+    vacuumed), the cursor is dropped.
+  - journalctl is started again 10 s after it exits.
+  - `--logs` refuses to start without `--key-file` unless
+    `--logs-unencrypted` is given (see [Security](#security)).
+  - Tested against the real journal with `logger`: warning and err arrive,
+    info is filtered, and a line logged while the agent was stopped arrives
+    after the restart without repeats.
 - `kernel_thread` comes from the `flags` field of `stat`, which is already
   read, so it costs nothing.
 - `--threads` (off by default) also reads `/proc/[pid]/task/*/stat` for every
@@ -222,7 +268,8 @@ pub struct Frame {
 - Deployment: the sandboxed systemd unit in
   `crates/agent/dist/sysmon-agent.service` (which allows `AF_UNIX` besides IP,
   because user lookups reach systemd's user database, SSSD and nscd over Unix
-  sockets), and a static musl build
+  sockets, and has `SupplementaryGroups=systemd-journal` and
+  `StateDirectory=sysmon-agent` for `--logs`), and a static musl build
   (`rustup target add x86_64-unknown-linux-musl`, then
   `cargo build --release -p sysmon-agent --target x86_64-unknown-linux-musl`).
   CI builds the musl agent and checks that it's static and runs.
@@ -249,6 +296,9 @@ pub struct Frame {
   than the last one from that boot (by the boot-time clock; section 5). The
   first rates after a restart average over the downtime, as after lost
   samples.
+- Standalone messages (`HostInfo`, `ProcMeta`, `Users`, `Logs`) pass straight
+  through; `Event::Logs` also carries the boot and the monitor-side receive
+  time, which playback seeks by.
 - Channels are bounded (`flume`). When a consumer falls behind, frames are
   dropped and counted. The socket thread never blocks.
 
@@ -323,6 +373,10 @@ and seek) reaches them. It returns a `ReplayHandle`:
 - `send(Control)`: `SetPaused`, `TogglePause`, `SetSpeed`, `Seek(ts)`;
 - `status()`: start, end, position, speed, paused, finished.
 
+`ReplayHandle::manual` makes a handle with no engine behind it: the caller
+feeds events and reads the controls sent. UI tests use it, since an engine
+thread waking the UI is outside gpui's deterministic test scheduler.
+
 A seek starts reading the full history window (10 min) before the target and
 delivers it at once, so the models have rates and the process graphs are
 full as soon as the target is shown. Gaps in the recording longer than 5 s (an
@@ -360,6 +414,15 @@ agent or the monitor was offline) are skipped rather than waited out.
   parent links, so children count only while they exist. Memory: a point
   is 56 bytes (unknown sizes use a sentinel rather than `Option`), so
   56 × processes × 600 per host, about 17 MB for 500 processes;
+- `logs` (`logs::Logs`): up to 20,000 journal rows per host in the agent's
+  order, with `Lost(n)` rows for numbering gaps and `Dropped(n)` for lines
+  the agent dropped. A batch ahead of a missing one waits up to 2 s for it
+  (UDP reorders; a repeat keeps its first arrival time), then the gap is
+  called lost; frames advance that clock too. Duplicates and too-late
+  batches are dropped. A new run or boot restarts the numbering, and a
+  monitor starting mid-run doesn't call what came before lost. Any batch,
+  heartbeats included, marks logs as enabled. Each row keeps its receive
+  time, which playback seeks to;
 - liveness: when the monitor last received a sample (`last_received_ns`,
   from `Frame::received_ns`, the monitor-side receive time of the frame's
   newest chunk; the recorded receive time when replaying), so a skewed
@@ -450,9 +513,27 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
     to the values at that moment. The legend names each line (with a
     subtree's member count, or "exited") and removes it with ×. Drag the
     divider above the panel to resize it;
+  - a **Logs** tab in the same panel (`L`), for hosts whose agents run with
+    `--logs`: a virtualized list of `HostModel::logs` with time, priority
+    (err and worse red, warning orange), unit (or identifier), PID and the
+    message's first line (full text on hover). Lost and dropped lines have
+    rows of their own. It keeps the newest line in view until you scroll
+    up; **Jump to latest** resumes. Filters: text (message, unit,
+    identifier), All / Warnings / Errors, and a unit picked by clicking it
+    (a chip removes it); lost and dropped rows only show unfiltered.
+    Clicking a PID moves the process table's cursor to that process (or
+    says it isn't running or is hidden). Clicking a line selects it, kept by
+    its receive and log times since a seek rebuilds the rows, and the graph
+    draws a line at its time. In a recording the click also seeks to when
+    the line was received, and the line is brought back into view once the
+    seek's reset has rebuilt the list. The Graph tab is disabled until
+    something is picked;
   - in the Recording view, a replay bar: play/pause, 1× to 256× speed, a
     timeline `Slider` that seeks on release, and start, position and end
-    times.
+    times. Red ticks under it mark where the selected host logged errors
+    (err or worse), at most one per 1/500 of the timeline. They come from
+    `logs::error_marks`, a background scan of the whole recording that skips
+    every datagram older than v5 by its version byte.
 - **About and license notices:** Help → About opens a dialog with the
   version, sysmon's licenses, and every third-party crate in the binary with
   its license files (filterable, and savable as one document).
@@ -492,6 +573,7 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   | Ctrl+O, Ctrl+Q | Open recording, quit |
   | Ctrl+1, Ctrl+2 | Live view, Recording view |
   | Ctrl+↓, Ctrl+↑ | Next / previous host |
+  | `l` | Logs tab, or back to the graph |
   | Ctrl+F or `/` | Filter processes (Enter returns, Esc clears) |
   | ↑/↓ or `j`/`k`, PgUp/PgDn | Move the row cursor |
   | `t`, `e`, `c` | Tree view, expand all, collapse all |
@@ -507,7 +589,9 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   keys and click in a real window and check the resulting state and layout:
   shortcuts (and that single-key ones don't fire while typing in the
   filter), the menu bar's position, picking rows, and the graph panel's
-  placement, divider drag, legend and subtree values.
+  placement, divider drag, legend and subtree values; and the Logs tab's
+  list, following, filters, PID links, graph mark, and seeking from a line
+  in a recording (driven by `ReplayHandle::manual`).
 - **Opening recordings:** Open recording…, or
   `sysmon-ui --replay <data_dir>/<host>/…` (which doesn't listen).
 
@@ -539,7 +623,9 @@ or read them. There are two options, which can be combined:
    - With a key, the monitor accepts **only** datagrams that authenticate
      with it. Without a key, it rejects encrypted datagrams.
    - Datagrams are decrypted before recording, so recordings don't need the
-     key. Keep the data directory as private as the network.
+     key. Keep the data directory as private as the network, all the more
+     with `--logs`, since journal lines often hold sensitive details. For
+     that reason `--logs` needs a key unless `--logs-unencrypted` is given.
    - Replayed datagrams that are still authentic are mostly harmless. The
      assembler drops sequence numbers slightly behind the newest. A replayed
      sample 0, or one far behind, looks like an agent restart and resets
@@ -576,8 +662,9 @@ cargo run -p sysmon-model --example replay -- <path> [--tree]  # print a recordi
 
 Implemented, and covered by tests where noted:
 
-- `proto`: protocol v4 with v1–v3 still decodable; types, framing,
-  chunking of samples, threads, `ProcMeta` and `Users`; zstd compression;
+- `proto`: protocol v5 (logs only; everything else v4) with v1–v3 still
+  decodable; types, framing, chunking of samples, threads, `ProcMeta`,
+  `Users` and log batches; zstd compression;
   XChaCha20-Poly1305 sealing, including tamper, wrong-key and plaintext
   rejection (tested).
 - `agent`: collection from `/proc` with a reused buffer and lenient
@@ -585,20 +672,25 @@ Implemented, and covered by tests where noted:
   (with `--threads`) threads; a boot-time clock in every sample; IPv4 and
   IPv6 targets; user names through NSS on a background thread; HostInfo,
   ProcMeta and Users scheduling; compression, encryption, key generation;
-  `--licenses`; systemd unit (parsers, lookups, non-UTF-8 names, disks,
-  IPv6 and the clock tested).
+  `--licenses`; journal lines with `--logs` (export parsing, rate limit,
+  saved position and resume tested, and run against the real journal);
+  systemd unit (parsers, lookups, non-UTF-8 names, disks, IPv6 and the clock
+  tested).
 - `ingest`: authenticated receive thread and assembler: completion, loss,
   timeout, reboot and agent-restart handling (tested); `dump` example.
 - `store`: segment writer and reader, torn-tail recovery, sparse index with
   seek and rebuild, catalog, retention (tested).
 - `model`: CPU, per-process, net and disk rates, rows carried over lost
   chunks, process tree building, per-process history and graph series
-  including subtree totals (tested); playback clock (tested); multi-host merged replay with
-  seek, and the paced replay engine (tested); `replay` example.
+  including subtree totals (tested); journal lines with reordering, loss
+  and restarts, and error marks from a recording (tested); playback clock
+  (tested); multi-host merged replay with seek, and the paced replay engine
+  (tested); `replay` example (with `--logs`).
 - `ui`: everything in section 6, plus writing out the recording on stop
   (tested). Keyboard, selection, the menu bar, the graph panel, kernel
-  threads and threads, the USER column and shortened text, and the About
-  dialog have headless UI tests; drawing itself is checked by running it.
+  threads and threads, the USER column and shortened text, the Logs tab and
+  the About dialog have headless UI tests; drawing itself is checked by
+  running it.
 - `notices`, `notices-build`: license notices for both binaries (tested).
 - CI (GitHub Actions): formatting, clippy with warnings as errors, all
   tests, the minimum Rust versions (agent 1.93, workspace 1.98) and the
