@@ -148,6 +148,10 @@ pub struct AppState {
     scrubbing: bool,
     /// The recording being opened, if any.
     opening: Option<String>,
+    /// How recordings are opened: [`crate::pipeline::open_replay`], or in
+    /// tests one without an engine thread (which would wake the UI from
+    /// outside gpui's deterministic test scheduler).
+    open_replay: fn(&std::path::Path, f64) -> anyhow::Result<ReplayHandle>,
     /// The replay status last shown; the ticker redraws only when it changes.
     shown_status: Option<ReplayStatus>,
     scroll: UniformListScrollHandle,
@@ -301,6 +305,7 @@ impl AppState {
             timeline,
             scrubbing: false,
             opening: None,
+            open_replay: crate::pipeline::open_replay,
             shown_status: None,
             scroll: UniformListScrollHandle::new(),
             error: None,
@@ -461,13 +466,13 @@ impl AppState {
     /// while for a big data directory.
     fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let speed = self.status().map_or(1.0, |s| s.speed);
+        let open_replay = self.open_replay;
         let label = path.display().to_string();
         self.opening = Some(label.clone());
         self.error = None;
         cx.notify();
-        let opened = cx.background_spawn(async move {
-            crate::pipeline::open_replay(&path, speed).map(|h| (h, path))
-        });
+        let opened =
+            cx.background_spawn(async move { open_replay(&path, speed).map(|h| (h, path)) });
         cx.spawn(async move |this, cx| {
             let result = opened.await;
             let _ = this.update(cx, |this, cx| {
@@ -3990,6 +3995,27 @@ mod tests {
         drop(rec);
 
         let (_window, app) = open(cx);
+        // Opens the recording for real (in the background), but plays it
+        // with a handle driven by hand rather than an engine thread.
+        fn open_without_engine(
+            path: &std::path::Path,
+            _speed: f64,
+        ) -> anyhow::Result<ReplayHandle> {
+            let source = sysmon_model::ReplaySource::open(path)?;
+            let (start, end) = source
+                .time_range()
+                .ok_or_else(|| anyhow::anyhow!("no recorded data under {}", path.display()))?;
+            let (handle, driver) = ReplayHandle::manual(ReplayStatus {
+                start_ns: start,
+                end_ns: end,
+                position_ns: start,
+                ..Default::default()
+            });
+            // Nothing is fed: the session's feed just ends.
+            drop(driver);
+            Ok(handle)
+        }
+        app.update(cx, |app, _| app.open_replay = open_without_engine);
         app.update(cx, |app, cx| app.open_path(dir.clone(), cx));
         // Returned at once, with the work still to do.
         app.read_with(cx, |app, _| {
