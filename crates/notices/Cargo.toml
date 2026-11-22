@@ -1,0 +1,10 @@
+[package]
+name = "sysmon-notices"
+description = "License notices of third-party crates, collected at build time and embedded in sysmon's binaries"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+zstd.workspace = true

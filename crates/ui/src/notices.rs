@@ -1,109 +1,23 @@
 //! License notices: sysmon's own licenses and those of every third-party
-//! crate linked into this binary (collected by `build.rs`).
+//! crate linked into this binary (collected by `build.rs` through
+//! `sysmon-notices`).
 
-use std::sync::OnceLock;
+pub use sysmon_notices::{CrateNotice, LICENSE, LICENSE_APACHE, LICENSE_MIT};
 
 pub const NAME: &str = "sysmon";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const LICENSE: &str = "MIT OR Apache-2.0";
-pub const LICENSE_MIT: &str = include_str!("../../../LICENSE-MIT");
-pub const LICENSE_APACHE: &str = include_str!("../../../LICENSE-APACHE");
 
-/// A third-party crate in this binary.
-#[derive(Debug)]
-pub struct CrateNotice {
-    pub name: &'static str,
-    pub version: &'static str,
-    /// SPDX expression from its manifest.
-    pub license: &'static str,
-    pub repository: &'static str,
-    /// (file name within the package, index into [`text`])
-    pub files: &'static [(&'static str, usize)],
-}
-
-mod generated {
-    use super::CrateNotice;
-    include!(concat!(env!("OUT_DIR"), "/notices.rs"));
-}
-
-pub use generated::CRATES;
-
-static BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/notices.zst"));
-
-fn texts() -> &'static str {
-    static TEXTS: OnceLock<String> = OnceLock::new();
-    TEXTS.get_or_init(|| {
-        let raw = zstd::bulk::decompress(BLOB, generated::UNCOMPRESSED_LEN)
-            .expect("embedded license notices are corrupt");
-        String::from_utf8(raw).expect("embedded license notices are not UTF-8")
-    })
-}
+pub static NOTICES: sysmon_notices::Notices = sysmon_notices::embed!();
+pub static CRATES: &[CrateNotice] = NOTICES.crates;
 
 /// One license or notice file's text.
 pub fn text(index: usize) -> &'static str {
-    let (start, len) = generated::TEXT_RANGES[index];
-    &texts()[start..start + len]
+    NOTICES.text(index)
 }
 
-/// Everything, as one plain-text document suitable for shipping next to the
-/// binary (`THIRD_PARTY_LICENSES.txt`): sysmon's licenses, a list of the
-/// third-party crates, then each distinct license text once with the crates
-/// it applies to.
+/// Everything, as one plain-text document (`--licenses`, Save all notices…).
 pub fn full_text() -> String {
-    let mut out = String::new();
-    out.push_str(&format!(
-        "{NAME} {VERSION}\n\nLicensed under {LICENSE}.\n\n{}\n\n{}\n",
-        rule("MIT License (LICENSE-MIT)"),
-        LICENSE_MIT.trim_end()
-    ));
-    out.push_str(&format!(
-        "\n{}\n\n{}\n",
-        rule("Apache License 2.0 (LICENSE-APACHE)"),
-        LICENSE_APACHE.trim_end()
-    ));
-
-    out.push_str(&format!(
-        "\n\nTHIRD-PARTY SOFTWARE\n\n{NAME} includes the following {} crates. Their license \
-         texts follow the list.\n\n",
-        CRATES.len()
-    ));
-    for c in CRATES {
-        out.push_str(&format!("- {} {} ({})", c.name, c.version, c.license));
-        if !c.repository.is_empty() {
-            out.push_str(&format!(" {}", c.repository));
-        }
-        out.push('\n');
-    }
-
-    // Each text once, in order of first use, with who uses it.
-    let mut order: Vec<usize> = Vec::new();
-    let mut users: std::collections::HashMap<usize, Vec<String>> = Default::default();
-    for c in CRATES {
-        for (file, idx) in c.files {
-            if !users.contains_key(idx) {
-                order.push(*idx);
-            }
-            users
-                .entry(*idx)
-                .or_default()
-                .push(format!("{} {} ({file})", c.name, c.version));
-        }
-    }
-    for (n, idx) in order.iter().enumerate() {
-        out.push_str(&format!(
-            "\n{}\n\nUsed by:\n",
-            rule(&format!("License text {} of {}", n + 1, order.len()))
-        ));
-        for u in &users[idx] {
-            out.push_str(&format!("  {u}\n"));
-        }
-        out.push_str(&format!("\n{}\n", text(*idx).trim_end()));
-    }
-    out
-}
-
-fn rule(title: &str) -> String {
-    format!("==== {title} ====")
+    NOTICES.full_text()
 }
 
 #[cfg(test)]

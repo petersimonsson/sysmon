@@ -3,6 +3,9 @@
 
 mod collect;
 
+/// License notices of everything linked into this binary (see build.rs).
+static NOTICES: sysmon_notices::Notices = sysmon_notices::embed!();
+
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
@@ -16,7 +19,7 @@ use sysmon_proto::{HostInfo, Key, Msg, ProcKey, Sealer, UserName};
 #[command(version, about)]
 struct Args {
     /// Monitor address to send to, as host:port. Can be given more than once.
-    #[arg(short, long = "target", required_unless_present = "generate_key")]
+    #[arg(short, long = "target", required_unless_present_any = ["generate_key", "licenses"])]
     targets: Vec<String>,
     /// Sampling interval in milliseconds.
     #[arg(short, long, default_value_t = 1000)]
@@ -31,6 +34,10 @@ struct Args {
     /// Write a new random key to this file and exit.
     #[arg(long, value_name = "PATH", exclusive = true)]
     generate_key: Option<PathBuf>,
+    /// Print sysmon's license and the license notices of all third-party
+    /// software in this binary, then exit.
+    #[arg(long, exclusive = true)]
+    licenses: bool,
     /// Send HostInfo and user names every this many samples.
     #[arg(long, default_value_t = 10)]
     host_info_every: u32,
@@ -45,6 +52,9 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
 
+    if args.licenses {
+        return Ok(NOTICES.print()?);
+    }
     if let Some(path) = &args.generate_key {
         return write_new_key(path);
     }
@@ -211,4 +221,40 @@ fn unix_now_ns() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NOTICES;
+
+    #[test]
+    fn notices_cover_the_agents_dependencies() {
+        assert_eq!(NOTICES.product, "sysmon-agent");
+        let names: Vec<&str> = NOTICES.crates.iter().map(|c| c.name).collect();
+        for expected in [
+            "clap",
+            "libc",
+            "chacha20poly1305",
+            "postcard",
+            "zstd-sys",
+            "tracing",
+        ] {
+            assert!(names.contains(&expected), "{expected} missing");
+        }
+        // Not in the agent: the UI's dependencies, the build-only collector's
+        // JSON parser, proc macros, and our own crates.
+        for absent in [
+            "gpui-kit",
+            "jiff",
+            "serde_json",
+            "serde_derive",
+            "sysmon-proto",
+        ] {
+            assert!(!names.contains(&absent), "{absent} shouldn't be listed");
+        }
+        assert!(NOTICES.crates.iter().all(|c| !c.files.is_empty()));
+        let all = NOTICES.full_text();
+        assert!(all.starts_with("sysmon-agent "));
+        assert!(all.contains("Permission is hereby granted"));
+    }
 }

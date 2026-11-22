@@ -55,6 +55,8 @@ Everything is Rust, organised as one Cargo workspace.
 | `crates/store` (`sysmon-store`) | lib | Segment files: append-only writer, reader, index, retention |
 | `crates/model` (`sysmon-model`) | lib | Rate computation, history ring buffers, `DataSource` (live and replay) |
 | `crates/ui` (`sysmon-ui`) | bin | gpui-kit application: host list, header graphs, process table, timeline |
+| `crates/notices` (`sysmon-notices`) | lib | Embedded license notices: data types, `embed!`, the full notices document |
+| `crates/notices-build` (`sysmon-notices-build`) | lib | Build-script side: collects a binary's notices with `cargo metadata` |
 
 Dependency graph (arrows point at dependencies):
 
@@ -147,7 +149,8 @@ pub struct Frame {
 - It tracks the set of known `(pid, starttime)` pairs to decide when to emit
   `ProcMeta`.
 - CLI (`clap`): `--target host:port` (repeatable), `--interval-ms`,
-  `--compress`, `--key-file`, and `--generate-key <path>`.
+  `--compress`, `--key-file`, `--generate-key <path>`, and `--licenses`
+  (third-party license notices; see section 6).
 - Deployment: a static musl build
   (`rustup target add x86_64-unknown-linux-musl`, then
   `cargo build --release -p sysmon-agent --target x86_64-unknown-linux-musl`)
@@ -311,8 +314,14 @@ agent or the monitor was offline) are skipped rather than waited out.
 - **About and license notices:** Help → About opens a dialog with the
   version, sysmon's licenses, and every third-party crate in the binary with
   its license files (filterable, and savable as one document).
-  `sysmon-ui --licenses` prints the same document. `crates/ui/build.rs`
-  builds the list with `cargo metadata`:
+  `sysmon-ui --licenses` and `sysmon-agent --licenses` print the same kind
+  of document for their own binary. Each binary's `build.rs` calls
+  `sysmon_notices_build::generate`, and the binary embeds the result with
+  `sysmon_notices::embed!`. The build side is a separate crate so that its
+  `serde_json` never shows up as a dependency of the binaries (`cargo
+  metadata` merges features across the workspace, so a feature flag
+  wouldn't keep it out of the list). It builds the list with
+  `cargo metadata`:
   - It follows only normal dependencies from `sysmon-ui`, skipping
     proc-macro crates and everything under them, since none of that is
     linked in.

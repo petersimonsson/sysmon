@@ -7155,6 +7155,8 @@ dependencies = [
  "anyhow",
  "clap",
  "libc",
+ "sysmon-notices",
+ "sysmon-notices-build",
  "sysmon-proto",
  "tracing",
  "tracing-subscriber",
@@ -7178,6 +7180,22 @@ dependencies = [
  "sysmon-ingest",
  "sysmon-proto",
  "sysmon-store",
+]
+
+[[package]]
+name = "sysmon-notices"
+version = "0.1.0"
+dependencies = [
+ "zstd",
+]
+
+[[package]]
+name = "sysmon-notices-build"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sysmon-notices",
+ "zstd",
 ]
 
 [[package]]
@@ -7209,14 +7227,14 @@ dependencies = [
  "flume 0.11.1",
  "gpui-kit",
  "jiff",
- "serde_json",
  "sysmon-ingest",
  "sysmon-model",
+ "sysmon-notices",
+ "sysmon-notices-build",
  "sysmon-proto",
  "sysmon-store",
  "tracing",
  "tracing-subscriber",
- "zstd",
 ]
 
 [[package]]

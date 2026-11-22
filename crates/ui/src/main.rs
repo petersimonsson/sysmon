@@ -61,12 +61,7 @@ fn main() -> anyhow::Result<()> {
         .init();
     let args = Args::parse();
     if args.licenses {
-        use std::io::Write as _;
-        // A closed pipe (`--licenses | head`) is a normal way to stop reading.
-        return match std::io::stdout().write_all(notices::full_text().as_bytes()) {
-            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
-            _ => Ok(()),
-        };
+        return Ok(notices::NOTICES.print()?);
     }
     let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
 

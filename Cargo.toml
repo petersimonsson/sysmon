@@ -13,6 +13,8 @@ sysmon-proto = { path = "crates/proto" }
 sysmon-ingest = { path = "crates/ingest" }
 sysmon-store = { path = "crates/store" }
 sysmon-model = { path = "crates/model" }
+sysmon-notices = { path = "crates/notices" }
+sysmon-notices-build = { path = "crates/notices-build" }
 
 anyhow = "1"
 chacha20poly1305 = "0.11"

@@ -1,2 +1,4 @@
 /target
 /data
+# A global "*-build" ignore pattern would otherwise hide this crate.
+!/crates/notices-build/

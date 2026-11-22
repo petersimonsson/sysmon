@@ -8,8 +8,12 @@ license.workspace = true
 
 [dependencies]
 sysmon-proto.workspace = true
+sysmon-notices.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 libc.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[build-dependencies]
+sysmon-notices-build.workspace = true

@@ -208,6 +208,7 @@ The workspace has one crate per part:
 | `crates/store` | Recording files, index and retention |
 | `crates/model` | Rates, history, process trees, graph series, replay engine |
 | `crates/ui` | The gpui-kit application |
+| `crates/notices`, `crates/notices-build` | License notices embedded in both binaries |
 
 ```sh
 cargo test --workspace                    # all tests, including headless UI tests
@@ -224,19 +225,18 @@ start a piece of work with `jj new -m "<crate>: <what>"`, and see
 
 ## Distributing binaries
 
-The licenses of the crates the UI is built from (MIT, Apache-2.0, BSD and
-others) require their notices to be shipped with the binary. They're built
-into `sysmon-ui` (see Help → About), and you can write them out to ship
-alongside it:
+The licenses of the crates sysmon is built from (MIT, Apache-2.0, BSD and
+others) require their notices to be shipped with the binaries. Both binaries
+have them built in, and can write them out to ship alongside:
 
 ```sh
-sysmon-ui --licenses > THIRD_PARTY_LICENSES.txt
+sysmon-ui --licenses    > THIRD_PARTY_LICENSES-ui.txt      # also in Help → About
+sysmon-agent --licenses > THIRD_PARTY_LICENSES-agent.txt
 ```
 
-`crates/ui/build.rs` collects them at build time from every crate linked
-into the binary, so the list is always current. `sysmon-agent` has far fewer
-dependencies, but doesn't have this yet; if you distribute it, include its
-dependencies' notices too (for example with `cargo about`).
+Each binary's `build.rs` collects them at build time from exactly the crates
+linked into that binary (552 for the UI, 64 for the agent), so the lists are
+always current.
 
 ## License
 
