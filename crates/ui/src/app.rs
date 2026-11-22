@@ -498,7 +498,11 @@ impl AppState {
                             } else {
                                 theme.success
                             }))
-                            .child(host.name()),
+                            .child(clipped(
+                                ("host-name", id as usize),
+                                host.name(),
+                                format!("{} · host id {:016x}", host.name(), id),
+                            )),
                     )
                     .child(
                         div()
@@ -1467,14 +1471,7 @@ impl AppState {
                     .items_center()
                     .gap_2()
                     .child(div().flex_none().size(px(10.)).rounded_sm().bg(line.color))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(label),
-                    )
+                    .child(clipped(("legend-label", p.slot), label.clone(), label))
                     .child(
                         div()
                             .flex_none()
@@ -1951,12 +1948,22 @@ fn command_cell(
         .items_center()
         .overflow_hidden()
         .whitespace_nowrap();
-    let label = match &line.thread {
-        Some(t) => format!("↳ {}", t.comm),
-        None => command(&line.row),
+    let (label, tip) = match &line.thread {
+        Some(t) => (
+            format!("↳ {}", t.comm),
+            format!(
+                "thread {} \"{}\" of {} {}",
+                t.key.pid,
+                t.comm,
+                line.row.key.pid,
+                command(&line.row)
+            ),
+        ),
+        None => (command(&line.row), command(&line.row)),
     };
+    let text = clipped(("cmd", i), label, tip);
     let Some(t) = &line.tree else {
-        return cell.child(label);
+        return cell.child(text);
     };
     let twisty = if t.has_children {
         let key = line.row.key;
@@ -1991,7 +1998,7 @@ fn command_cell(
             .child(t.guides.clone()),
     )
     .child(twisty)
-    .child(div().flex_none().child(label))
+    .child(text)
     .when(t.collapsed, |d| {
         d.child(
             div()
@@ -2007,6 +2014,20 @@ fn command_cell(
                 )),
         )
     })
+}
+
+/// Text that ends with "…" when it doesn't fit, with the full text (or
+/// `tip`) on hover and as its accessible description.
+fn clipped(id: impl Into<ElementId>, text: String, tip: String) -> impl IntoElement {
+    div()
+        .id(id)
+        .test_support()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .child(text)
+        .aria_description(tip.clone())
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
 }
 
 /// The USER column's text: the name, or the uid while it isn't known.
@@ -2899,6 +2920,65 @@ mod tests {
             assert_eq!(
                 window.find(("user", 2usize)).description(),
                 Some("systemd-journal-remote (uid 961)")
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn long_hostnames_and_commands_are_clipped_with_the_full_text_kept(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        send_threads(&app, cx);
+        let long_host = "build-07.eu-west-1.compute.internal.corp.example.com";
+        let long_cmd = format!("/usr/bin/python3 -m worker --queue {}", "x".repeat(400));
+        app.update(cx, |app, cx| {
+            let host = app.live_hosts.get_mut(&1).unwrap();
+            host.info.as_mut().unwrap().hostname = long_host.into();
+            let meta = vec![sysmon_proto::ProcMeta {
+                key: key(10),
+                uid: 1000,
+                cmdline: long_cmd.clone(),
+            }];
+            apply(
+                &mut app.live_hosts,
+                sysmon_ingest::Event::ProcMeta { host_id: 1, meta },
+            );
+            cx.notify();
+        });
+        add_frame(&app, cx, 1);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        step(cx, &|window, cx| {
+            window.press("ctrl-h", cx);
+            window.press("shift-n", cx); // PID order: 1, 10, 101, 102, 11, 20
+        });
+        let (long_cmd2, long_host2) = (long_cmd.clone(), long_host.to_string());
+        step(cx, &move |window, cx| {
+            window.render_frame(cx);
+            // The hostname stays inside the 190 px sidebar.
+            let name = window.find(("host-name", 1usize));
+            assert!(name.bounds().size.width < px(190.), "{:?}", name.bounds());
+            assert!(name.description().unwrap().starts_with(&long_host2));
+            // The command stays inside its column; the full text is kept.
+            let row = window.find(("row", 1usize)).bounds();
+            let cmd = window.find(("cmd", 1usize));
+            assert!(
+                cmd.bounds().origin.x + cmd.bounds().size.width <= row.origin.x + row.size.width
+            );
+            assert_eq!(cmd.description(), Some(long_cmd2.as_str()));
+            // A thread row's tooltip says whose thread it is.
+            let thread = window.find(("cmd", 2usize));
+            assert!(
+                thread
+                    .description()
+                    .unwrap()
+                    .starts_with("thread 101 \"worker-a\" of 10 /usr/bin/python3"),
+                "{:?}",
+                thread.description()
             );
         });
     }
