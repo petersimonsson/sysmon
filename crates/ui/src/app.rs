@@ -56,7 +56,8 @@ const MAX_LIVE_HOSTS: usize = 256;
 pub struct Start {
     pub live: Option<flume::Receiver<Event>>,
     pub replay: Option<ReplayHandle>,
-    pub replay_label: String,
+    /// The recording `replay` plays.
+    pub replay_path: PathBuf,
     pub data_dir: PathBuf,
 }
 
@@ -84,6 +85,8 @@ struct ReplaySession {
     handle: ReplayHandle,
     label: String,
     hosts: BTreeMap<u64, HostModel>,
+    /// Batches with errors, for the timeline; found in the background.
+    log_marks: Vec<sysmon_model::LogMark>,
     _feed: Task<()>,
 }
 
@@ -130,6 +133,11 @@ pub struct AppState {
     /// The highlighted log line, by its receive and log times (which survive
     /// the model being rebuilt by a seek, unlike row ids).
     log_cursor: Option<(u64, u64)>,
+    /// Bring the highlighted log line into view on the next render that
+    /// has it (set when the seek's reset arrives and the list is rebuilt).
+    log_reveal: std::cell::Cell<bool>,
+    /// A seek to a log line is under way; reveal it after the reset.
+    log_reveal_after_reset: bool,
     filter: Entity<InputState>,
     timeline: Entity<SliderState>,
     scrubbing: bool,
@@ -274,6 +282,8 @@ impl AppState {
             log_follow: true,
             log_scroll: UniformListScrollHandle::new(),
             log_cursor: None,
+            log_reveal: Default::default(),
+            log_reveal_after_reset: false,
             filter,
             timeline,
             scrubbing: false,
@@ -285,7 +295,7 @@ impl AppState {
             _subscriptions: subscriptions,
         };
         if let Some(handle) = start.replay {
-            this.start_session(handle, start.replay_label, cx);
+            this.start_session(handle, start.replay_path, cx);
         }
         this
     }
@@ -350,9 +360,24 @@ impl AppState {
 
     // ---- replay ---------------------------------------------------------
 
-    fn start_session(&mut self, handle: ReplayHandle, label: String, cx: &mut Context<Self>) {
+    fn start_session(&mut self, handle: ReplayHandle, path: PathBuf, cx: &mut Context<Self>) {
         let id = self.next_session;
         self.next_session += 1;
+        let label = path.display().to_string();
+        // Errors in the whole recording, to mark on the timeline.
+        let scan = cx.background_spawn(async move { sysmon_model::logs::error_marks(&path) });
+        cx.spawn(async move |this, cx| {
+            let Ok(marks) = scan.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(s) = this.replay.as_mut().filter(|s| s.id == id) {
+                    s.log_marks = marks;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         let feed = handle.feed.clone();
         let task = cx.spawn(async move |this, cx| {
             while let Ok(first) = feed.recv_async().await {
@@ -361,11 +386,18 @@ impl AppState {
                     let Some(s) = this.replay.as_mut().filter(|s| s.id == id) else {
                         return;
                     };
+                    let mut reset = false;
                     for item in batch {
                         match item {
-                            Feed::Reset => s.hosts.clear(),
+                            Feed::Reset => {
+                                s.hosts.clear();
+                                reset = true;
+                            }
                             Feed::Event(e) => apply(&mut s.hosts, e),
                         }
+                    }
+                    if reset && std::mem::take(&mut this.log_reveal_after_reset) {
+                        this.log_reveal.set(true);
                     }
                     if this.view == View::Replay {
                         this.ensure_selection();
@@ -383,6 +415,7 @@ impl AppState {
             handle,
             label,
             hosts: BTreeMap::new(),
+            log_marks: Vec::new(),
             _feed: task,
         });
         self.view = View::Replay;
@@ -419,7 +452,9 @@ impl AppState {
         self.opening = Some(label.clone());
         self.error = None;
         cx.notify();
-        let opened = cx.background_spawn(async move { crate::pipeline::open_replay(&path, speed) });
+        let opened = cx.background_spawn(async move {
+            crate::pipeline::open_replay(&path, speed).map(|h| (h, path))
+        });
         cx.spawn(async move |this, cx| {
             let result = opened.await;
             let _ = this.update(cx, |this, cx| {
@@ -429,7 +464,7 @@ impl AppState {
                 }
                 this.opening = None;
                 match result {
-                    Ok(handle) => this.start_session(handle, label, cx),
+                    Ok((handle, path)) => this.start_session(handle, path, cx),
                     Err(e) => this.error = Some(format!("{e:#}")),
                 }
                 cx.notify();
@@ -1735,6 +1770,19 @@ impl AppState {
             )
     }
 
+    /// A click on the log line `key` (receive time, log time): highlight it,
+    /// stop following, and in a recording seek to when it was received, so
+    /// the graphs and process table show that moment.
+    fn log_clicked(&mut self, key: (u64, u64), cx: &mut Context<Self>) {
+        self.log_cursor = Some(key);
+        self.log_follow = false;
+        if self.view == View::Replay {
+            self.control(Control::Seek(key.0));
+            self.log_reveal_after_reset = true;
+        }
+        cx.notify();
+    }
+
     /// Graph / Logs, at the left of the bottom panel's toolbar.
     fn render_panel_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let picked = self.selection().is_some_and(|s| !s.is_empty());
@@ -1778,6 +1826,13 @@ impl AppState {
         if self.log_follow && count > 0 {
             self.log_scroll
                 .scroll_to_item(count - 1, ScrollStrategy::Bottom);
+        } else if self.log_reveal.get()
+            && let Some(i) = self
+                .log_cursor
+                .and_then(|c| rows.iter().position(|r| (r.received_ns, r.ts_unix_ns) == c))
+        {
+            self.log_reveal.set(false);
+            self.log_scroll.scroll_to_item(i, ScrollStrategy::Center);
         }
         let status = if host.logs.enabled() {
             format!("{count} lines")
@@ -1848,12 +1903,7 @@ impl AppState {
                     let on_click = {
                         let this = this.clone();
                         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                            let _ = this.update(cx, |app, cx| {
-                                app.log_cursor = Some(key);
-                                // Keep the clicked line where it is.
-                                app.log_follow = false;
-                                cx.notify();
-                            });
+                            let _ = this.update(cx, |app, cx| app.log_clicked(key, cx));
                         }
                     };
                     let base = div()
@@ -2254,6 +2304,42 @@ impl AppState {
             .collect();
     }
 
+    /// Red ticks under the timeline where the selected host logged errors.
+    fn render_log_marks(&self, st: &ReplayStatus, cx: &App) -> impl IntoElement + use<> {
+        // One tick per this fraction of the timeline at most.
+        const BUCKETS: f64 = 500.;
+        let theme = cx.theme();
+        let span = st.end_ns.saturating_sub(st.start_ns).max(1) as f64;
+        let mut buckets: Vec<u64> = self
+            .replay
+            .iter()
+            .flat_map(|s| &s.log_marks)
+            .filter(|m| Some(m.host_id) == self.selected)
+            .map(|m| ((m.received_ns.saturating_sub(st.start_ns)) as f64 / span * BUCKETS) as u64)
+            .collect();
+        buckets.dedup();
+        let mut strip = div()
+            .id("log-marks")
+            .test_support()
+            .relative()
+            .h(px(4.))
+            .mx(px(8.));
+        for (k, b) in buckets.into_iter().enumerate() {
+            strip = strip.child(
+                div()
+                    .id(("log-mark", k))
+                    .test_support()
+                    .absolute()
+                    .top_0()
+                    .left(relative((b as f64 / BUCKETS).min(1.0) as f32))
+                    .w(px(2.))
+                    .h_full()
+                    .bg(theme.danger),
+            );
+        }
+        strip
+    }
+
     fn render_timeline(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         if self.view != View::Replay {
             return None;
@@ -2304,7 +2390,14 @@ impl AppState {
                         .text_color(theme.muted_foreground)
                         .child(format::datetime(st.start_ns)),
                 )
-                .child(div().flex_1().child(Slider::new(&self.timeline)))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .child(Slider::new(&self.timeline))
+                        .child(self.render_log_marks(&st, cx)),
+                )
                 .child(
                     div()
                         .text_xs()
@@ -2665,6 +2758,7 @@ mod tests {
     };
     use gpui_kit::Modifiers;
     use sysmon_model::SeriesTarget;
+    use sysmon_model::{Control, Feed, ReplayHandle, ReplayStatus};
     use sysmon_proto::ProcKey;
 
     fn picked(app: &AppState) -> Vec<SeriesTarget> {
@@ -2697,7 +2791,7 @@ mod tests {
             let start = Start {
                 live: None,
                 replay: None,
-                replay_label: String::new(),
+                replay_path: std::path::PathBuf::new(),
                 data_dir: std::env::temp_dir(),
             };
             gpui_kit::open_window(options, cx, |window, cx| {
@@ -4019,5 +4113,132 @@ mod tests {
             );
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn recorded_logs_mark_errors_and_seek_when_clicked(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("sysmon-ui-logs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut rec = sysmon_store::Recorder::new(&dir);
+        let s = 1_000_000_000u64;
+        let t = 1_700_000_000 * s;
+        let line = |first_seq: u64, priority: u8, msg: &str, at: u64| sysmon_proto::LogBatch {
+            run: 5,
+            first_seq,
+            dropped: 0,
+            entries: vec![sysmon_proto::LogEntry {
+                ts_unix_ns: at,
+                priority,
+                unit: None,
+                ident: "app".into(),
+                pid: None,
+                message: msg.into(),
+                truncated: false,
+            }],
+        };
+        // Ten seconds of samples, a warning at 2 s and an error at 6 s, in
+        // the order received (as a recording always is).
+        for seq in 0..10u32 {
+            let at = t + seq as u64 * s;
+            let system = sysmon_proto::SystemSample {
+                ts_unix_ns: at,
+                ..Default::default()
+            };
+            for d in sysmon_proto::encode_sample(1, 2, seq, &system, &[], &[]).unwrap() {
+                rec.append(1, 2, at, &d).unwrap();
+            }
+            let log = match seq {
+                2 => Some(line(0, 4, "warned", at)),
+                6 => Some(line(1, 3, "failed", at)),
+                _ => None,
+            };
+            if let Some(b) = log {
+                let d = sysmon_proto::encode_logs(1, 2, seq, &b).unwrap();
+                rec.append(1, 2, at, &d[0]).unwrap();
+            }
+        }
+        rec.flush().unwrap();
+        drop(rec);
+
+        // The recording's events, fed by hand (an engine thread would wake
+        // the UI from outside the test scheduler).
+        let events: Vec<sysmon_ingest::Event> = {
+            let mut src = sysmon_model::ReplaySource::open(&dir).unwrap();
+            std::iter::from_fn(|| src.next_event()).collect()
+        };
+        let (handle, driver) = ReplayHandle::manual(ReplayStatus {
+            start_ns: t,
+            end_ns: t + 9 * s,
+            position_ns: t + 9 * s,
+            speed: 1.,
+            paused: true,
+            finished: true,
+        });
+        let (window, app) = open(cx);
+        app.update(cx, |app, cx| app.start_session(handle, dir.clone(), cx));
+        for e in events {
+            driver.feed.send(Feed::Event(e)).unwrap();
+        }
+        cx.run_until_parked();
+        app.read_with(cx, |a, _| {
+            let marks = &a.replay.as_ref().unwrap().log_marks;
+            assert_eq!(marks.len(), 1, "only the error is marked");
+            assert_eq!(marks[0].received_ns, t + 6 * s);
+            assert_eq!(a.hosts()[&1].logs.rows().len(), 2);
+        });
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert!(
+                w.try_find(("log-mark", 0usize)).is_some(),
+                "error marked on the timeline"
+            );
+            assert!(w.try_find(("log-mark", 1usize)).is_none());
+            w.press("l", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        // Clicking the warning seeks to when it was received.
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            w.click(("log-row", 0usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        app.read_with(cx, |a, _| {
+            assert_eq!(a.log_cursor, Some((t + 2 * s, t + 2 * s)));
+            assert!(
+                a.log_reveal_after_reset,
+                "to be brought into view after the seek"
+            );
+        });
+        assert_eq!(
+            driver.controls.try_recv().ok(),
+            Some(Control::Seek(t + 2 * s))
+        );
+
+        // After the seek the list is rebuilt; the warning is found again and
+        // brought into view.
+        driver.feed.send(Feed::Reset).unwrap();
+        let events: Vec<_> = {
+            let mut src = sysmon_model::ReplaySource::open(&dir).unwrap();
+            std::iter::from_fn(|| src.next_event()).collect()
+        };
+        for e in events.into_iter().take(4) {
+            driver.feed.send(Feed::Event(e)).unwrap();
+        }
+        cx.run_until_parked();
+        app.read_with(cx, |a, _| {
+            assert!(!a.log_reveal_after_reset);
+            assert_eq!(
+                a.hosts()[&1].logs.rows().len(),
+                1,
+                "rebuilt up to the warning"
+            );
+        });
+        cx.update_window(window, |_, w, cx| w.render_frame(cx))
+            .unwrap();
+        app.read_with(cx, |a, _| assert!(!a.log_reveal.get(), "revealed"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

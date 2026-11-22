@@ -89,7 +89,7 @@ fn main() -> anyhow::Result<()> {
         Some(path) => app::Start {
             live: None,
             replay: Some(pipeline::open_replay(path, args.speed)?),
-            replay_label: path.display().to_string(),
+            replay_path: path.clone(),
             data_dir,
         },
         None => {
@@ -108,7 +108,7 @@ fn main() -> anyhow::Result<()> {
             app::Start {
                 live: Some(live),
                 replay: None,
-                replay_label: String::new(),
+                replay_path: PathBuf::new(),
                 data_dir,
             }
         }
