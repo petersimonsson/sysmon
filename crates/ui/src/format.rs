@@ -54,6 +54,25 @@ fn offset_label(t: &ZonedDateTime) -> String {
     format!("UTC{}", t.strftime("%:z"))
 }
 
+/// Shorten `s` to at most `max` characters by replacing its middle with
+/// `…`, keeping both ends. Used for user names, where many share a prefix
+/// (`systemd-resolve`, `systemd-timesync`) and the end tells them apart.
+pub fn fit(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    if max <= 1 {
+        return "…".into();
+    }
+    let keep = max - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep / 2;
+    let start: String = s.chars().take(head).collect();
+    let end: String = s.chars().skip(n - tail).collect();
+    format!("{start}…{end}")
+}
+
 pub fn duration(ns: u64) -> String {
     let s = ns / 1_000_000_000;
     if s >= 3600 {
@@ -88,6 +107,20 @@ mod tests {
 
     fn fixed(offset_s: i32) -> TimeZone {
         TimeZone::fixed(jiff::tz::Offset::from_seconds(offset_s).unwrap())
+    }
+
+    #[test]
+    fn fit_keeps_both_ends() {
+        assert_eq!(fit("root", 16), "root");
+        assert_eq!(fit("systemd-timesync", 16), "systemd-timesync");
+        assert_eq!(fit("systemd-journal-remote", 16), "systemd-…-remote");
+        assert_eq!(fit("systemd-resolve", 12), "system…solve");
+        assert_eq!(fit("systemd-timesync", 12), "system…esync");
+        assert_eq!(fit("anna.lindström@corp.example", 9), "anna…mple");
+        assert_eq!(fit("abc", 1), "…");
+        for n in 2..20 {
+            assert!(fit("first.last@corp.example.com", n).chars().count() <= n);
+        }
     }
 
     #[test]

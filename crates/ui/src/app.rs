@@ -12,6 +12,7 @@ use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::AppMenuBar;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -31,6 +32,10 @@ use crate::widgets::{bar, sparkline};
 const ROW_HEIGHT: f32 = 20.;
 /// Width of the VIRT, RES and SHR columns; fits "1023.9 MiB".
 const SIZE_COL: f32 = 80.;
+/// The USER column fits the longest name shown, within these many characters;
+/// longer names are shortened in the middle.
+const USER_MIN_CHARS: usize = 4;
+const USER_MAX_CHARS: usize = 16;
 const MENU_BAR_HEIGHT: f32 = 30.;
 /// Initial height of the graph panel below the process list.
 const GRAPH_HEIGHT: f32 = 260.;
@@ -832,11 +837,25 @@ impl AppState {
         parts.join(" · ")
     }
 
-    fn render_procs(&self, host: &HostModel, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_procs(
+        &self,
+        host: &HostModel,
+        mono_char: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let mono = theme.mono_font_family.clone();
         let rows = Rc::new(self.table_lines(host, cx));
         let this = cx.entity().downgrade();
+        // As wide as the longest name shown (all rows, so it doesn't change
+        // while scrolling), within USER_MIN_CHARS..=USER_MAX_CHARS.
+        let user_chars = rows
+            .iter()
+            .map(|l| user_name(&l.row).chars().count())
+            .max()
+            .unwrap_or(0)
+            .clamp(USER_MIN_CHARS, USER_MAX_CHARS);
+        let user_w = mono_char * user_chars as f32 + px(4.);
         let picked: Rc<HashMap<ProcKey, usize>> = Rc::new(
             self.selection()
                 .map(|s| s.iter().map(|p| (p.target.key(), p.slot)).collect())
@@ -879,7 +898,12 @@ impl AppState {
             .border_color(theme.border)
             .child(div().w(px(14.)))
             .child(header_cell(SortKey::Pid, "PID", Some(64.), cx))
-            .child(header_cell(SortKey::User, "USER", Some(80.), cx))
+            .child(header_cell(
+                SortKey::User,
+                "USER",
+                Some(f32::from(user_w)),
+                cx,
+            ))
             .child(div().w(px(16.)).child("S"))
             .child(header_cell(SortKey::Cpu, "%CPU", Some(60.), cx))
             .child(header_cell(SortKey::Virt, "VIRT", Some(SIZE_COL), cx))
@@ -952,14 +976,27 @@ impl AppState {
                                 .on_click(on_pick),
                         )
                         .child(div().w(px(64.)).child(line.key().pid.to_string()))
-                        .child(
-                            div().w(px(80.)).overflow_hidden().child(
-                                p.user
-                                    .clone()
-                                    .or_else(|| p.uid.map(|u| u.to_string()))
-                                    .unwrap_or_else(|| "-".into()),
-                            ),
-                        )
+                        .child({
+                            let full = user_name(p);
+                            let tip = match (&p.user, p.uid) {
+                                (Some(name), Some(uid)) => format!("{name} (uid {uid})"),
+                                (None, Some(uid)) => format!("uid {uid} (no user name known)"),
+                                _ => "user not known yet".into(),
+                            };
+                            div()
+                                .id(("user", i))
+                                .test_support()
+                                .flex_none()
+                                .w(user_w)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(format::fit(&full, user_chars))
+                                // Also the accessible description, for screen readers.
+                                .aria_description(tip.clone())
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(tip.clone()).build(window, cx)
+                                })
+                        })
                         .child(
                             div()
                                 .w(px(16.))
@@ -1972,6 +2009,25 @@ fn command_cell(
     })
 }
 
+/// The USER column's text: the name, or the uid while it isn't known.
+fn user_name(p: &ProcRow) -> String {
+    p.user
+        .clone()
+        .or_else(|| p.uid.map(|u| u.to_string()))
+        .unwrap_or_else(|| "-".into())
+}
+
+/// Width of one character of the table's monospace font at its text size.
+fn mono_char_width(window: &Window, cx: &App) -> Pixels {
+    let theme = cx.theme();
+    let size = window.rem_size() * 0.75; // text_xs
+    let ts = window.text_system();
+    let id = ts.resolve_font(&font(theme.mono_font_family.clone()));
+    ts.advance(id, size, 'm')
+        .map(|s| s.width)
+        .unwrap_or(size * 0.6)
+}
+
 /// A size in KiB as table text; "–" when the agent didn't report it.
 fn size_cell(kib: Option<u64>) -> String {
     kib.map_or_else(|| "–".into(), |k| format::bytes(k as f64 * 1024.0))
@@ -1986,6 +2042,7 @@ fn command(p: &ProcRow) -> String {
 
 impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mono_char = mono_char_width(window, cx);
         self.refresh_graph_names();
         let graph_shown = self.graph_shown();
         // Keep the panel within the window if the window shrank.
@@ -2013,7 +2070,7 @@ impl Render for AppState {
                             .flex_col()
                             .flex_1()
                             .min_h_0()
-                            .child(self.render_procs(host, cx)),
+                            .child(self.render_procs(host, mono_char, cx)),
                     )
                     .when_some(graph, |d, graph| {
                         d.child(
@@ -2116,6 +2173,7 @@ mod tests {
     fn key(pid: u32) -> ProcKey {
         ProcKey { pid, starttime: 0 }
     }
+    use crate::format;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
         AnyWindowHandle, AppContext as _, Bounds, Entity, TestAppContext, WindowBounds,
@@ -2749,6 +2807,99 @@ mod tests {
         });
         app.read_with(cx, |app, _| {
             assert_eq!(app.graph_names[&key(101)], "worker-a (thread of 10)");
+        });
+    }
+
+    /// Give the test host's processes these users.
+    fn set_users(app: &Entity<AppState>, cx: &mut TestAppContext, users: &[(u32, u32, &str)]) {
+        app.update(cx, |app, cx| {
+            let meta = users
+                .iter()
+                .map(|&(pid, uid, _)| sysmon_proto::ProcMeta {
+                    key: key(pid),
+                    uid,
+                    cmdline: String::new(),
+                })
+                .collect();
+            apply(
+                &mut app.live_hosts,
+                sysmon_ingest::Event::ProcMeta { host_id: 1, meta },
+            );
+            let users = users
+                .iter()
+                .map(|&(_, uid, name)| sysmon_proto::UserName {
+                    uid,
+                    name: name.into(),
+                })
+                .collect();
+            apply(
+                &mut app.live_hosts,
+                sysmon_ingest::Event::Users { host_id: 1, users },
+            );
+            cx.notify();
+        });
+        // Names reach the rows with the next sample.
+        add_frame(app, cx, 1);
+    }
+
+    #[gpui_kit::test]
+    fn user_column_fits_names_up_to_16_characters(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        let width = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                let char_w = super::mono_char_width(window, cx);
+                (window.find("USER").bounds().size.width, char_w)
+            })
+            .unwrap()
+        };
+
+        set_users(&app, cx, &[(1, 0, "root"), (10, 1000, "anna")]);
+        let (w, ch) = width(cx);
+        assert!(
+            (w - (ch * 4.0 + px(4.))).abs() < px(1.),
+            "narrow for short names: {w:?}"
+        );
+
+        set_users(&app, cx, &[(11, 961, "systemd-journal-remote")]);
+        let (w, ch) = width(cx);
+        assert!(
+            (w - (ch * 16.0 + px(4.))).abs() < px(1.),
+            "capped at 16: {w:?}"
+        );
+
+        // Rows sort by CPU (PID order here): 1, 10, 11, 20. Cells line up
+        // with the header.
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            let header = window.find("USER").bounds();
+            let cell = window.find(("user", 2usize)).bounds();
+            assert!((cell.origin.x - header.origin.x).abs() < px(1.));
+            assert!((cell.size.width - header.size.width).abs() < px(1.));
+        });
+        app.read_with(cx, |app, cx| {
+            let lines = app.table_lines(&app.hosts()[&1], cx);
+            assert_eq!(super::user_name(&lines[2].row), "systemd-journal-remote");
+        });
+        assert_eq!(
+            format::fit("systemd-journal-remote", 16),
+            "systemd-…-remote"
+        );
+
+        // The full name and uid are the cell's tooltip and description.
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(("user", 2usize)).description(),
+                Some("systemd-journal-remote (uid 961)")
+            );
         });
     }
 }
