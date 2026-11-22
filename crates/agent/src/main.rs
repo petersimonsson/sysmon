@@ -3,17 +3,17 @@
 
 mod collect;
 mod send;
+mod targets;
 mod users;
 
 /// License notices of everything linked into this binary (see build.rs).
 static NOTICES: sysmon_notices::Notices = sysmon_notices::embed!();
 
 use std::collections::{HashMap, HashSet};
-use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use clap::Parser;
 use sysmon_proto::{HostInfo, Key, Msg, ProcKey, Sealer, UserName};
 
@@ -79,8 +79,8 @@ fn main() -> anyhow::Result<()> {
         .context("reading key file")?;
     let sealer = Sealer::new(key.as_ref(), args.compress);
 
-    let targets = resolve(&args.targets)?;
-    let sender = send::Sender::new(&targets)?;
+    let targets = targets::Targets::spawn(args.targets.clone(), targets::RESOLVE_EVERY)?;
+    let mut sender = send::Sender::default();
 
     let host_id = collect::host_id();
     let boot_id = collect::boot_id();
@@ -96,7 +96,7 @@ fn main() -> anyhow::Result<()> {
     tracing::info!(
         host_id = format_args!("{host_id:016x}"),
         host = %info.hostname,
-        ?targets,
+        targets = ?args.targets,
         compress = args.compress,
         encrypted = key.is_some(),
         "starting"
@@ -188,9 +188,9 @@ fn main() -> anyhow::Result<()> {
             })
             .collect();
         let bytes: usize = datagrams.iter().map(Vec::len).sum();
-        for target in &targets {
+        for target in targets.current() {
             for d in &datagrams {
-                if let Err(e) = sender.send_to(d, *target) {
+                if let Err(e) = sender.send_to(d, target) {
                     tracing::warn!(%target, error = %e, "send failed");
                     break;
                 }
@@ -303,21 +303,6 @@ fn host_info_datagram(
         chunks: 1,
     };
     Ok(sysmon_proto::encode(&header, &Msg::HostInfo(info.clone()))?)
-}
-
-fn resolve(targets: &[String]) -> anyhow::Result<Vec<SocketAddr>> {
-    let mut out = Vec::new();
-    for t in targets {
-        let addr = t
-            .to_socket_addrs()
-            .with_context(|| format!("resolving {t}"))?
-            .next();
-        match addr {
-            Some(a) => out.push(a),
-            None => bail!("{t} did not resolve to an address"),
-        }
-    }
-    Ok(out)
 }
 
 fn unix_now_ns() -> u64 {
