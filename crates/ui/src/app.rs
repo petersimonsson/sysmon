@@ -29,6 +29,8 @@ use crate::selection::{self, Selection};
 use crate::widgets::{bar, sparkline};
 
 const ROW_HEIGHT: f32 = 20.;
+/// Width of the VIRT, RES and SHR columns; fits "1023.9 MiB".
+const SIZE_COL: f32 = 80.;
 const MENU_BAR_HEIGHT: f32 = 30.;
 /// Initial height of the graph panel below the process list.
 const GRAPH_HEIGHT: f32 = 260.;
@@ -58,7 +60,10 @@ enum SortKey {
     Pid,
     User,
     Cpu,
-    Mem,
+    Virt,
+    /// Resident memory (RES).
+    Res,
+    Shr,
     Threads,
     Command,
 }
@@ -671,7 +676,9 @@ impl AppState {
                 SortKey::Pid => a.key.pid.cmp(&b.key.pid),
                 SortKey::User => a.user.cmp(&b.user).then(a.uid.cmp(&b.uid)),
                 SortKey::Cpu => a.cpu_pct.total_cmp(&b.cpu_pct),
-                SortKey::Mem => a.rss_kib.cmp(&b.rss_kib),
+                SortKey::Virt => a.virt_kib.cmp(&b.virt_kib),
+                SortKey::Res => a.rss_kib.cmp(&b.rss_kib),
+                SortKey::Shr => a.shr_kib.cmp(&b.shr_kib),
                 SortKey::Threads => a.threads.cmp(&b.threads),
                 SortKey::Command => command(a).cmp(&command(b)),
             };
@@ -716,6 +723,7 @@ impl AppState {
                 // A non-wrapping row keeps the indicator beside the label.
                 let cell = div()
                     .id(label)
+                    .test_support()
                     .flex()
                     .items_center()
                     .gap_1()
@@ -745,7 +753,9 @@ impl AppState {
             .child(header_cell(SortKey::User, "USER", Some(80.), cx))
             .child(div().w(px(16.)).child("S"))
             .child(header_cell(SortKey::Cpu, "%CPU", Some(60.), cx))
-            .child(header_cell(SortKey::Mem, "RSS", Some(72.), cx))
+            .child(header_cell(SortKey::Virt, "VIRT", Some(SIZE_COL), cx))
+            .child(header_cell(SortKey::Res, "RES", Some(SIZE_COL), cx))
+            .child(header_cell(SortKey::Shr, "SHR", Some(SIZE_COL), cx))
             .child(div().w(px(44.)).child("%MEM"))
             .child(header_cell(SortKey::Threads, "THR", Some(48.), cx))
             .child(header_cell(SortKey::Command, "COMMAND", None, cx));
@@ -818,11 +828,9 @@ impl AppState {
                         )
                         .child(div().w(px(16.)).child(p.state.to_string()))
                         .child(div().w(px(60.)).child(format!("{:.1}", p.cpu_pct)))
-                        .child(
-                            div()
-                                .w(px(72.))
-                                .child(format::bytes(p.rss_kib as f64 * 1024.0)),
-                        )
+                        .child(div().w(px(SIZE_COL)).child(size_cell(p.virt_kib)))
+                        .child(div().w(px(SIZE_COL)).child(size_cell(Some(p.rss_kib))))
+                        .child(div().w(px(SIZE_COL)).child(size_cell(p.shr_kib)))
                         .child(
                             div()
                                 .w(px(44.))
@@ -1306,7 +1314,10 @@ impl AppState {
             // Numbers sort high-to-low first, text A-to-Z.
             (
                 key,
-                matches!(key, SortKey::Cpu | SortKey::Mem | SortKey::Threads),
+                matches!(
+                    key,
+                    SortKey::Cpu | SortKey::Virt | SortKey::Res | SortKey::Shr | SortKey::Threads
+                ),
             )
         };
         cx.notify();
@@ -1405,7 +1416,9 @@ impl AppState {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SortByCpu, _, cx| this.sort_by(SortKey::Cpu, cx)))
-            .on_action(cx.listener(|this, _: &SortByMemory, _, cx| this.sort_by(SortKey::Mem, cx)))
+            .on_action(cx.listener(|this, _: &SortByMemory, _, cx| this.sort_by(SortKey::Res, cx)))
+            .on_action(cx.listener(|this, _: &SortByVirt, _, cx| this.sort_by(SortKey::Virt, cx)))
+            .on_action(cx.listener(|this, _: &SortByShr, _, cx| this.sort_by(SortKey::Shr, cx)))
             .on_action(cx.listener(|this, _: &SortByPid, _, cx| this.sort_by(SortKey::Pid, cx)))
             .on_action(cx.listener(|this, _: &SortByUser, _, cx| this.sort_by(SortKey::User, cx)))
             .on_action(
@@ -1429,6 +1442,8 @@ impl AppState {
             }))
             .on_action(cx.listener(|this, _: &GraphCpu, _, cx| this.set_metric(Metric::Cpu, cx)))
             .on_action(cx.listener(|this, _: &GraphRss, _, cx| this.set_metric(Metric::Rss, cx)))
+            .on_action(cx.listener(|this, _: &GraphVirt, _, cx| this.set_metric(Metric::Virt, cx)))
+            .on_action(cx.listener(|this, _: &GraphShr, _, cx| this.set_metric(Metric::Shr, cx)))
             .on_action(cx.listener(|this, _: &GraphMem, _, cx| this.set_metric(Metric::MemPct, cx)))
             .on_action(
                 cx.listener(|this, _: &GraphThreads, _, cx| this.set_metric(Metric::Threads, cx)),
@@ -1716,13 +1731,19 @@ fn command_cell(
                 .ml_2()
                 .text_color(theme.muted_foreground)
                 .child(format!(
-                    "+{} · {:.1}% CPU · {}",
+                    "+{} · {:.1}% CPU · RES {} · VIRT {}",
                     t.hidden,
                     t.hidden_cpu_pct,
-                    format::bytes(t.hidden_rss_kib as f64 * 1024.0)
+                    format::bytes(t.hidden_rss_kib as f64 * 1024.0),
+                    format::bytes(t.hidden_virt_kib as f64 * 1024.0)
                 )),
         )
     })
+}
+
+/// A size in KiB as table text; "–" when the agent didn't report it.
+fn size_cell(kib: Option<u64>) -> String {
+    kib.map_or_else(|| "–".into(), |k| format::bytes(k as f64 * 1024.0))
 }
 
 fn command(p: &ProcRow) -> String {
@@ -1922,11 +1943,11 @@ mod tests {
             assert!(app.read(cx).tree, "t toggles the tree");
 
             window.press("shift-m", cx);
-            assert_eq!(app.read(cx).sort, (SortKey::Mem, true));
+            assert_eq!(app.read(cx).sort, (SortKey::Res, true));
             window.press("shift-m", cx);
             assert_eq!(
                 app.read(cx).sort,
-                (SortKey::Mem, false),
+                (SortKey::Res, false),
                 "again flips direction"
             );
             window.press("shift-n", cx);
@@ -2168,7 +2189,7 @@ mod tests {
         });
 
         // Metric keys and hover.
-        step(cx, &|window, cx| window.press("2", cx));
+        step(cx, &|window, cx| window.press("3", cx));
         app.read_with(cx, |app, _| {
             assert_eq!(app.graph_metric, sysmon_model::Metric::Rss)
         });
@@ -2260,5 +2281,50 @@ mod tests {
         app.read_with(cx, |app, _| {
             assert!(!app.tree, "shortcuts work after Close too")
         });
+    }
+
+    #[gpui_kit::test]
+    fn virt_res_shr_columns_sort_and_graph(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        // Our column order, with the new columns around RES.
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            let x = |id: &'static str| window.find(id).bounds().origin.x;
+            assert!(x("%CPU") < x("VIRT"));
+            assert!(x("VIRT") < x("RES"));
+            assert!(x("RES") < x("SHR"));
+            assert!(x("SHR") < x("THR"));
+        });
+        step(cx, &|window, cx| window.click("VIRT", cx));
+        app.read_with(cx, |app, _| assert_eq!(app.sort, (SortKey::Virt, true)));
+        step(cx, &|window, cx| window.press("shift-s", cx));
+        app.read_with(cx, |app, _| assert_eq!(app.sort, (SortKey::Shr, true)));
+        step(cx, &|window, cx| window.press("shift-m", cx));
+        app.read_with(cx, |app, _| assert_eq!(app.sort, (SortKey::Res, true)));
+
+        // Graph keys follow the column order.
+        step(cx, &|window, cx| window.press("2", cx));
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.graph_metric, sysmon_model::Metric::Virt)
+        });
+        step(cx, &|window, cx| window.press("4", cx));
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.graph_metric, sysmon_model::Metric::Shr)
+        });
+
+        // The rows carry the values (fixture: 1 GiB VIRT, 100 shared pages).
+        app.read_with(cx, |app, _| {
+            let p = &app.hosts()[&1].snapshot.procs[0];
+            assert_eq!((p.virt_kib, p.shr_kib), (Some(1 << 20), Some(400)));
+        });
+        assert_eq!(super::size_cell(None), "–");
+        assert_eq!(super::size_cell(Some(1 << 20)), "1.0 GiB");
     }
 }

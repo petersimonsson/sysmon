@@ -31,6 +31,8 @@ actions!(
         PreviousHost,
         SortByCpu,
         SortByMemory,
+        SortByVirt,
+        SortByShr,
         SortByPid,
         SortByUser,
         SortByCommand,
@@ -43,7 +45,9 @@ actions!(
         ClearGraph,
         ToggleGraphPanel,
         GraphCpu,
+        GraphVirt,
         GraphRss,
+        GraphShr,
         GraphMem,
         GraphThreads,
         CycleGraphWindow,
@@ -136,13 +140,9 @@ pub const SHORTCUTS: &[Shortcut] = &[
         "Down 20 rows"
     ),
     shortcut!("Processes", ["shift-p"], SortByCpu, false, "Sort by CPU"),
-    shortcut!(
-        "Processes",
-        ["shift-m"],
-        SortByMemory,
-        false,
-        "Sort by memory"
-    ),
+    shortcut!("Processes", ["shift-v"], SortByVirt, false, "Sort by VIRT"),
+    shortcut!("Processes", ["shift-m"], SortByMemory, false, "Sort by RES"),
+    shortcut!("Processes", ["shift-s"], SortByShr, false, "Sort by SHR"),
     shortcut!("Processes", ["shift-n"], SortByPid, false, "Sort by PID"),
     shortcut!("Processes", ["shift-u"], SortByUser, false, "Sort by user"),
     shortcut!(
@@ -168,9 +168,11 @@ pub const SHORTCUTS: &[Shortcut] = &[
         "Show / hide the graph"
     ),
     shortcut!("Graph", ["1"], GraphCpu, false, "Graph %CPU"),
-    shortcut!("Graph", ["2"], GraphRss, false, "Graph RSS"),
-    shortcut!("Graph", ["3"], GraphMem, false, "Graph %MEM"),
-    shortcut!("Graph", ["4"], GraphThreads, false, "Graph threads"),
+    shortcut!("Graph", ["2"], GraphVirt, false, "Graph VIRT"),
+    shortcut!("Graph", ["3"], GraphRss, false, "Graph RES"),
+    shortcut!("Graph", ["4"], GraphShr, false, "Graph SHR"),
+    shortcut!("Graph", ["5"], GraphMem, false, "Graph %MEM"),
+    shortcut!("Graph", ["6"], GraphThreads, false, "Graph threads"),
     shortcut!(
         "Graph",
         ["w"],
@@ -239,7 +241,9 @@ fn menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::submenu(Menu::new("Sort By").items([
                 MenuItem::action("CPU", SortByCpu),
-                MenuItem::action("Memory", SortByMemory),
+                MenuItem::action("VIRT", SortByVirt),
+                MenuItem::action("RES", SortByMemory),
+                MenuItem::action("SHR", SortByShr),
                 MenuItem::action("PID", SortByPid),
                 MenuItem::action("User", SortByUser),
                 MenuItem::action("Command", SortByCommand),
@@ -252,7 +256,9 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Show / Hide Graph", ToggleGraphPanel),
             MenuItem::submenu(Menu::new("Metric").items([
                 MenuItem::action("%CPU", GraphCpu),
-                MenuItem::action("RSS", GraphRss),
+                MenuItem::action("VIRT", GraphVirt),
+                MenuItem::action("RES", GraphRss),
+                MenuItem::action("SHR", GraphShr),
                 MenuItem::action("%MEM", GraphMem),
                 MenuItem::action("Threads", GraphThreads),
             ])),
