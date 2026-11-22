@@ -3,6 +3,8 @@ name = "sysmon-notices"
 description = "License notices of third-party crates, collected at build time and embedded in sysmon's binaries"
 version.workspace = true
 edition.workspace = true
+# Lower than the UI, so agents build on older toolchains (tested with 1.93).
+rust-version = "1.93"
 publish.workspace = true
 license.workspace = true
 

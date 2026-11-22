@@ -3,6 +3,8 @@ name = "sysmon-notices-build"
 description = "Build-script side of sysmon-notices: collects license notices with cargo metadata"
 version.workspace = true
 edition.workspace = true
+# Lower than the UI, so agents build on older toolchains (tested with 1.93).
+rust-version = "1.93"
 publish.workspace = true
 license.workspace = true
 

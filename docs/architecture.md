@@ -225,7 +225,7 @@ pub struct Frame {
   sockets), and a static musl build
   (`rustup target add x86_64-unknown-linux-musl`, then
   `cargo build --release -p sysmon-agent --target x86_64-unknown-linux-musl`).
-  The musl build hasn't been tried yet.
+  CI builds the musl agent and checks that it's static and runs.
 
 ## 3. `sysmon-ingest`: receiver
 
@@ -600,7 +600,10 @@ Implemented, and covered by tests where noted:
   threads and threads, the USER column and shortened text, and the About
   dialog have headless UI tests; drawing itself is checked by running it.
 - `notices`, `notices-build`: license notices for both binaries (tested).
-- Not done yet: a headless recorder binary, and trying the musl build.
+- CI (GitHub Actions): formatting, clippy with warnings as errors, all
+  tests, the minimum Rust versions (agent 1.93, workspace 1.98) and the
+  static musl agent.
+- Not done yet: a headless recorder binary.
 
 Possible next steps:
 

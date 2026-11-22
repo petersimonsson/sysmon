@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request replaces a running check.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental builds only cost cache space on CI.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  test:
+    name: Clippy and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the UI's build dependencies
+        run: ./.github/install-deps.sh
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # --locked: Cargo.lock pins versions that matter (wgpu 30.0.1 for gpui).
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+
+  msrv:
+    name: Minimum Rust versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the UI's build dependencies
+        run: ./.github/install-deps.sh
+      # The agent and what it uses (rust-version 1.93 in their manifests).
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-agent
+      - run: cargo +1.93 test --locked -p sysmon-agent -p sysmon-proto -p sysmon-notices
+      # Everything, the UI included (the workspace's rust-version, 1.98).
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98"
+      - run: cargo +1.98 build --locked --workspace --all-targets
+
+  agent-musl:
+    name: Static agent (musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install musl-gcc (zstd-sys builds C code)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+      - run: cargo build --locked --release -p sysmon-agent --target x86_64-unknown-linux-musl
+      - name: Check it's static and runs
+        run: |
+          bin=target/x86_64-unknown-linux-musl/release/sysmon-agent
+          file "$bin"
+          # Rust's musl target builds static-pie executables by default.
+          file "$bin" | grep -Eq 'static(ally|-pie) linked'
+          "$bin" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sysmon-agent-x86_64-linux-musl
+          path: target/x86_64-unknown-linux-musl/release/sysmon-agent
+          retention-days: 14

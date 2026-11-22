@@ -3,6 +3,8 @@ name = "sysmon-proto"
 description = "sysmon wire protocol: types, framing and chunking"
 version.workspace = true
 edition.workspace = true
+# Lower than the UI, so agents build on older toolchains (tested with 1.93).
+rust-version = "1.93"
 publish.workspace = true
 license.workspace = true
 
