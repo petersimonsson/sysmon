@@ -315,10 +315,21 @@ impl AppState {
         }
     }
 
+    /// Host IDs in sidebar order: by name (case-insensitive), then ID.
+    fn host_order(&self) -> Vec<u64> {
+        let mut ids: Vec<(String, u64)> = self
+            .hosts()
+            .iter()
+            .map(|(&id, h)| (h.name().to_lowercase(), id))
+            .collect();
+        ids.sort();
+        ids.into_iter().map(|(_, id)| id).collect()
+    }
+
     fn ensure_selection(&mut self) {
         let hosts = self.hosts();
         if self.selected.is_none_or(|id| !hosts.contains_key(&id)) {
-            self.selected = hosts.keys().next().copied();
+            self.selected = self.host_order().first().copied();
         }
     }
 
@@ -533,7 +544,8 @@ impl AppState {
             .gap_1()
             .border_r_1()
             .border_color(theme.border);
-        for (&id, host) in self.hosts() {
+        for id in self.host_order() {
+            let host = &self.hosts()[&id];
             let selected = self.selected == Some(id);
             let loss = if host.frames_received == 0 {
                 0.0
@@ -1641,7 +1653,7 @@ impl AppState {
     }
 
     fn step_host(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let ids: Vec<u64> = self.hosts().keys().copied().collect();
+        let ids = self.host_order();
         if ids.is_empty() {
             return;
         }
@@ -3257,6 +3269,33 @@ mod tests {
                 app.live_hosts
                     .contains_key(&(10 + MAX_LIVE_HOSTS as u64 + 4))
             );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn hosts_are_listed_by_name(cx: &mut TestAppContext) {
+        let (_window, app) = open(cx);
+        let info = |host_id: u64, name: &str| sysmon_ingest::Event::HostInfo {
+            host_id,
+            info: sysmon_proto::HostInfo {
+                hostname: name.into(),
+                kernel: "6".into(),
+                cpu_count: 1,
+                mem_total_kib: 1 << 20,
+                clk_tck: 100,
+                page_size: 4096,
+                interval_ms: 1000,
+                sends_threads: false,
+            },
+        };
+        app.update(cx, |app, _| {
+            // IDs are hashes, unrelated to the names.
+            app.apply_live(info(3, "alpha"), 1);
+            app.apply_live(info(1, "Charlie"), 1);
+            app.apply_live(info(2, "bravo"), 1);
+            assert_eq!(app.host_order(), [3, 2, 1]);
+            app.ensure_selection();
+            assert_eq!(app.selected, Some(3));
         });
     }
 }
