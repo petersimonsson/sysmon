@@ -13,7 +13,9 @@
 use serde::{Deserialize, Serialize};
 
 mod frame;
+pub mod seal;
 pub use frame::Frame;
+pub use seal::{Key, Opener, Sealer};
 
 /// Magic bytes at the start of every datagram.
 pub const MAGIC: [u8; 2] = *b"SM";
@@ -24,12 +26,13 @@ pub const MAX_DATAGRAM: usize = 1200;
 /// Size of the fixed preamble (magic, version, flags).
 pub const PREAMBLE_LEN: usize = 4;
 
-/// Bits in the preamble `flags` byte. Reserved for future use.
+/// Bits in the preamble `flags` byte; see [`crate::seal`].
 pub mod flags {
-    /// Payload is zstd-compressed (not yet implemented).
+    /// Payload is zstd-compressed.
     pub const COMPRESSED: u8 = 0b0000_0001;
-    /// Payload is AEAD-encrypted with a pre-shared key (not yet implemented).
+    /// Payload is XChaCha20-Poly1305-encrypted with a pre-shared key.
     pub const ENCRYPTED: u8 = 0b0000_0010;
+    pub const KNOWN: u8 = COMPRESSED | ENCRYPTED;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +205,14 @@ pub enum Error {
     TooLarge(usize),
     #[error(transparent)]
     Postcard(#[from] postcard::Error),
+    #[error("datagram is encrypted and no key is configured")]
+    NeedsKey,
+    #[error("datagram failed authentication")]
+    Unauthenticated,
+    #[error("encryption failed")]
+    Crypto,
+    #[error("compression: {0}")]
+    Compression(std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -230,10 +241,15 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Msg)> {
     if buf[2] != VERSION {
         return Err(Error::UnsupportedVersion(buf[2]));
     }
-    if buf[3] != 0 {
-        return Err(Error::UnsupportedFlags(buf[3]));
+    let flags = buf[3];
+    if flags & !flags::KNOWN != 0 {
+        return Err(Error::UnsupportedFlags(flags));
     }
-    Ok(postcard::from_bytes(&buf[PREAMBLE_LEN..])?)
+    if flags & flags::ENCRYPTED != 0 {
+        return Err(Error::NeedsKey);
+    }
+    let payload = seal::decompress(flags, &buf[PREAMBLE_LEN..])?;
+    Ok(postcard::from_bytes(&payload)?)
 }
 
 /// Encode one sample as a `System` datagram followed by as many `Procs`
@@ -309,8 +325,9 @@ fn encode_standalone<T: Serialize + Clone>(
 
 /// Split `items` into consecutive ranges whose encoding fits in one datagram.
 fn pack<T: Serialize>(items: &[T]) -> Result<Vec<std::ops::Range<usize>>> {
-    // Worst-case varint header (10+19+5+3+3) + enum tag + vec length.
-    const OVERHEAD: usize = PREAMBLE_LEN + 48;
+    // Worst-case varint header (10+19+5+3+3) + enum tag + vec length, plus
+    // room for encryption so sealed datagrams still fit.
+    const OVERHEAD: usize = PREAMBLE_LEN + 48 + seal::SEAL_OVERHEAD;
     let budget = MAX_DATAGRAM - OVERHEAD;
 
     let mut groups = Vec::new();
@@ -377,6 +394,10 @@ mod tests {
         assert!(matches!(
             decode(b"SM\x09\x00"),
             Err(Error::UnsupportedVersion(9))
+        ));
+        assert!(matches!(
+            decode(b"SM\x01\x80"),
+            Err(Error::UnsupportedFlags(0x80))
         ));
         assert!(matches!(decode(b"S"), Err(Error::Truncated)));
     }

@@ -1,0 +1,39 @@
+# systemd unit for sysmon-agent.
+#
+# Install:
+#   install -m 755 sysmon-agent /usr/local/bin/
+#   install -m 644 sysmon-agent.service /etc/systemd/system/
+#   install -d -m 700 /etc/sysmon
+#   sysmon-agent --generate-key /etc/sysmon/key     # copy to the monitor too
+#   printf 'SYSMON_TARGET=monitor.example:9876\n' > /etc/default/sysmon-agent
+#   systemctl daemon-reload && systemctl enable --now sysmon-agent
+
+[Unit]
+Description=sysmon agent (pushes /proc counters to a sysmon monitor)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/default/sysmon-agent
+LoadCredential=key:/etc/sysmon/key
+ExecStart=/usr/local/bin/sysmon-agent --target ${SYSMON_TARGET} --compress --key-file ${CREDENTIALS_DIRECTORY}/key
+Restart=always
+RestartSec=5
+
+# Sandboxing. /proc must stay fully visible so all processes can be sampled.
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

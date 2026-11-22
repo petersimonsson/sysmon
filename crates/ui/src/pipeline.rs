@@ -15,6 +15,7 @@ const RAW_QUEUE: usize = 16 * 1024;
 
 pub fn start_live(
     listen: SocketAddr,
+    opener: sysmon_proto::Opener,
     data_dir: Option<PathBuf>,
 ) -> anyhow::Result<flume::Receiver<Event>> {
     let (events_tx, events_rx) = flume::bounded(EVENT_QUEUE);
@@ -30,6 +31,7 @@ pub fn start_live(
     };
     sysmon_ingest::spawn(
         listen,
+        opener,
         Sinks {
             events: events_tx,
             raw,

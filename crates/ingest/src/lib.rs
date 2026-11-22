@@ -24,7 +24,14 @@ pub struct Sinks {
 }
 
 /// Bind `addr` and run the receive loop on a dedicated thread.
-pub fn spawn(addr: SocketAddr, sinks: Sinks) -> std::io::Result<JoinHandle<()>> {
+///
+/// Datagrams are authenticated and decrypted with `opener` first; anything
+/// that fails is dropped before it reaches the recorder or the assembler.
+pub fn spawn(
+    addr: SocketAddr,
+    opener: sysmon_proto::Opener,
+    sinks: Sinks,
+) -> std::io::Result<JoinHandle<()>> {
     let socket = UdpSocket::bind(addr)?;
     // Wake regularly so partial samples are flushed even when traffic stops.
     socket.set_read_timeout(Some(Duration::from_millis(250)))?;
@@ -32,10 +39,11 @@ pub fn spawn(addr: SocketAddr, sinks: Sinks) -> std::io::Result<JoinHandle<()>> 
 
     std::thread::Builder::new()
         .name("sysmon-ingest".into())
-        .spawn(move || run(socket, sinks))
+        .spawn(move || run(socket, opener, sinks))
 }
 
-fn run(socket: UdpSocket, sinks: Sinks) {
+fn run(socket: UdpSocket, opener: sysmon_proto::Opener, sinks: Sinks) {
+    let mut rejected = 0u64;
     let mut assembler = Assembler::new(Duration::from_millis(1500));
     let mut buf = vec![0u8; 64 * 1024];
     let mut dropped = 0u64;
@@ -44,7 +52,17 @@ fn run(socket: UdpSocket, sinks: Sinks) {
         let now = Instant::now();
         match socket.recv_from(&mut buf) {
             Ok((len, from)) => {
-                let bytes = &buf[..len];
+                let bytes = match opener.open(&buf[..len]) {
+                    Ok(b) => b,
+                    Err(err) => {
+                        rejected += 1;
+                        if rejected.is_power_of_two() {
+                            tracing::warn!(%from, %err, rejected, "rejected datagram");
+                        }
+                        continue;
+                    }
+                };
+                let bytes = &bytes[..];
                 if let Some(raw) = &sinks.raw {
                     let item = RawDatagram {
                         recv_ts_ns: unix_now_ns(),

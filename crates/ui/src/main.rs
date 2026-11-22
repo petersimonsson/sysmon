@@ -19,6 +19,10 @@ struct Args {
     /// Directory recordings are written to. Defaults to `$XDG_DATA_HOME/sysmon`.
     #[arg(short, long)]
     data_dir: Option<PathBuf>,
+    /// Accept only datagrams encrypted with this pre-shared key file
+    /// (generate one with `sysmon-agent --generate-key`).
+    #[arg(short, long)]
+    key_file: Option<PathBuf>,
     /// Don't record received data to disk.
     #[arg(long)]
     no_record: bool,
@@ -43,7 +47,7 @@ fn main() -> anyhow::Result<()> {
             let data_dir =
                 (!args.no_record).then(|| args.data_dir.clone().unwrap_or_else(default_data_dir));
             (
-                pipeline::start_live(args.listen, data_dir)?,
+                pipeline::start_live(args.listen, opener(&args)?, data_dir)?,
                 app::Mode::Live,
             )
         }
@@ -66,6 +70,15 @@ fn main() -> anyhow::Result<()> {
         cx.activate(true);
     });
     Ok(())
+}
+
+fn opener(args: &Args) -> anyhow::Result<sysmon_proto::Opener> {
+    let key = args
+        .key_file
+        .as_deref()
+        .map(sysmon_proto::Key::from_file)
+        .transpose()?;
+    Ok(sysmon_proto::Opener::new(key.as_ref()))
 }
 
 fn default_data_dir() -> PathBuf {
