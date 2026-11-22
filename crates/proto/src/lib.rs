@@ -15,13 +15,14 @@ use serde::{Deserialize, Serialize};
 mod frame;
 pub mod seal;
 pub mod v1;
+pub mod v2;
 pub use frame::Frame;
 pub use seal::{Key, Opener, Sealer};
 
 /// Magic bytes at the start of every datagram.
 pub const MAGIC: [u8; 2] = *b"SM";
 /// Current protocol version.
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 /// Oldest version [`decode`] still reads.
 pub const MIN_VERSION: u8 = 1;
 /// Upper bound on encoded datagram size, chosen to fit common path MTUs.
@@ -63,6 +64,8 @@ pub enum Msg {
     /// Names for the uids of running processes. New variants go last so
     /// existing recordings keep decoding.
     Users(Vec<UserName>),
+    /// Chunks after the processes of a sample, when the agent sends threads.
+    Threads(Vec<ThreadSample>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +85,8 @@ pub struct HostInfo {
     pub page_size: u32,
     /// Agent sampling interval in milliseconds.
     pub interval_ms: u32,
+    /// Whether samples include [`Msg::Threads`] (`sysmon-agent --threads`).
+    pub sends_threads: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -174,6 +179,35 @@ pub struct ProcSample {
     /// Resident shared pages, from `/proc/[pid]/statm`; `None` from v1
     /// agents, or if the process exited between reading `stat` and `statm`.
     pub shared_pages: Option<u64>,
+    /// The kernel's `PF_KTHREAD` flag; `None` from v1 and v2 agents.
+    pub kernel_thread: Option<bool>,
+}
+
+/// One thread of a process, other than its main thread (which is the
+/// process's own [`ProcSample`]). Memory is the process's, so it isn't sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadSample {
+    /// The owning process's pid.
+    pub tgid: u32,
+    pub tid: u32,
+    /// With `tid`, identifies the thread (thread ids share the pid space).
+    pub starttime: u64,
+    pub state: u8,
+    pub utime: u64,
+    pub stime: u64,
+    /// The thread's name (`/proc/[pid]/task/[tid]/comm`).
+    pub comm: String,
+}
+
+impl ThreadSample {
+    /// Thread ids are unique among live pids, so `(tid, starttime)` makes a
+    /// key that never collides with a process's.
+    pub fn key(&self) -> ProcKey {
+        ProcKey {
+            pid: self.tid,
+            starttime: self.starttime,
+        }
+    }
 }
 
 impl ProcSample {
@@ -258,24 +292,34 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Msg)> {
         return Err(Error::NeedsKey);
     }
     let payload = seal::decompress(flags, &buf[PREAMBLE_LEN..])?;
-    if version == 1 {
-        let (h, m): (Header, v1::Msg) = postcard::from_bytes(&payload)?;
-        return Ok((h, m.into()));
+    match version {
+        1 => {
+            let (h, m): (Header, v1::Msg) = postcard::from_bytes(&payload)?;
+            return Ok((h, m.into()));
+        }
+        2 => {
+            let (h, m): (Header, v2::Msg) = postcard::from_bytes(&payload)?;
+            return Ok((h, m.into()));
+        }
+        _ => {}
     }
     Ok(postcard::from_bytes(&payload)?)
 }
 
 /// Encode one sample as a `System` datagram followed by as many `Procs`
-/// datagrams as needed, each within [`MAX_DATAGRAM`].
+/// and then `Threads` datagrams as needed, each within [`MAX_DATAGRAM`].
 pub fn encode_sample(
     host_id: u64,
     boot_id: u128,
     seq: u32,
     system: &SystemSample,
     procs: &[ProcSample],
+    threads: &[ThreadSample],
 ) -> Result<Vec<Vec<u8>>> {
     let groups = pack(procs)?;
-    let chunks = u16::try_from(1 + groups.len()).map_err(|_| Error::TooLarge(procs.len()))?;
+    let thread_groups = pack(threads)?;
+    let chunks = u16::try_from(1 + groups.len() + thread_groups.len())
+        .map_err(|_| Error::TooLarge(procs.len() + threads.len()))?;
     let header = |chunk| Header {
         host_id,
         boot_id,
@@ -286,11 +330,17 @@ pub fn encode_sample(
 
     let mut out = Vec::with_capacity(chunks as usize);
     out.push(encode(&header(0), &Msg::System(system.clone()))?);
-    for (i, range) in groups.into_iter().enumerate() {
+    let mut chunk = 1;
+    for range in groups {
+        out.push(encode(&header(chunk), &Msg::Procs(procs[range].to_vec()))?);
+        chunk += 1;
+    }
+    for range in thread_groups {
         out.push(encode(
-            &header(i as u16 + 1),
-            &Msg::Procs(procs[range].to_vec()),
+            &header(chunk),
+            &Msg::Threads(threads[range].to_vec()),
         )?);
+        chunk += 1;
     }
     Ok(out)
 }
@@ -381,6 +431,7 @@ mod tests {
             comm: "some-process".into(),
             vsize_bytes: Some(1 << 30),
             shared_pages: Some(100),
+            kernel_thread: None,
         }
     }
 
@@ -458,15 +509,97 @@ mod tests {
             Err(Error::UnsupportedVersion(0))
         ));
         assert!(matches!(
-            decode(b"SM\x03\x00"),
-            Err(Error::UnsupportedVersion(3))
+            decode(b"SM\x04\x00"),
+            Err(Error::UnsupportedVersion(4))
         ));
+    }
+
+    #[test]
+    fn v2_datagrams_still_decode() {
+        let header = Header {
+            host_id: 1,
+            boot_id: 2,
+            seq: 3,
+            chunk: 0,
+            chunks: 1,
+        };
+        let old = v2::ProcSample {
+            pid: 7,
+            ppid: 1,
+            starttime: 9,
+            state: b'S',
+            utime: 10,
+            stime: 20,
+            rss_pages: 30,
+            threads: 4,
+            comm: "v2".into(),
+            vsize_bytes: Some(4096),
+            shared_pages: Some(5),
+        };
+        let buf = v2::encode(&header, &v2::Msg::Procs(vec![old])).unwrap();
+        let Msg::Procs(procs) = decode(&buf).unwrap().1 else {
+            panic!("not Procs")
+        };
+        assert_eq!(
+            (procs[0].vsize_bytes, procs[0].shared_pages),
+            (Some(4096), Some(5))
+        );
+        assert_eq!(procs[0].kernel_thread, None);
+
+        let info = v1::HostInfo {
+            hostname: "h".into(),
+            kernel: "k".into(),
+            cpu_count: 1,
+            mem_total_kib: 2,
+            clk_tck: 100,
+            page_size: 4096,
+            interval_ms: 1000,
+        };
+        let buf = v2::encode(&header, &v2::Msg::HostInfo(info)).unwrap();
+        let Msg::HostInfo(info) = decode(&buf).unwrap().1 else {
+            panic!("not HostInfo")
+        };
+        assert!(!info.sends_threads);
+    }
+
+    #[test]
+    fn threads_follow_processes_in_a_sample() {
+        let procs: Vec<_> = (0..100).map(proc).collect();
+        let thread = |i: u32| ThreadSample {
+            tgid: i % 100,
+            tid: 1000 + i,
+            starttime: 5,
+            state: b'S',
+            utime: 1,
+            stime: 2,
+            comm: "worker".into(),
+        };
+        let threads: Vec<_> = (0..300).map(thread).collect();
+        let dgrams = encode_sample(1, 2, 7, &SystemSample::default(), &procs, &threads).unwrap();
+        let (mut got_p, mut got_t, mut seen_threads) = (Vec::new(), Vec::new(), false);
+        for d in &dgrams {
+            assert!(d.len() <= MAX_DATAGRAM);
+            match decode(d).unwrap().1 {
+                Msg::System(_) => {}
+                Msg::Procs(p) => {
+                    assert!(!seen_threads, "processes come first");
+                    got_p.extend(p);
+                }
+                Msg::Threads(t) => {
+                    seen_threads = true;
+                    got_t.extend(t);
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!((got_p, got_t), (procs, threads));
+        assert_eq!(thread(1).key().pid, 1001, "a thread's key uses its tid");
     }
 
     #[test]
     fn chunking_preserves_every_process() {
         let procs: Vec<_> = (0..500).map(proc).collect();
-        let dgrams = encode_sample(1, 2, 7, &SystemSample::default(), &procs).unwrap();
+        let dgrams = encode_sample(1, 2, 7, &SystemSample::default(), &procs, &[]).unwrap();
         assert!(dgrams.len() > 2);
 
         let mut seen = Vec::new();
@@ -488,7 +621,7 @@ mod tests {
 
     #[test]
     fn sample_without_procs_is_one_datagram() {
-        let dgrams = encode_sample(1, 2, 0, &SystemSample::default(), &[]).unwrap();
+        let dgrams = encode_sample(1, 2, 0, &SystemSample::default(), &[], &[]).unwrap();
         assert_eq!(dgrams.len(), 1);
     }
 }

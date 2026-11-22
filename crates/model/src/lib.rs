@@ -48,7 +48,8 @@ mod tests {
                     ..Default::default()
                 };
                 let recv = base + s * SEC + host * 1000;
-                for d in sysmon_proto::encode_sample(host, 7, s as u32, &system, &[]).unwrap() {
+                for d in sysmon_proto::encode_sample(host, 7, s as u32, &system, &[], &[]).unwrap()
+                {
                     rec.append(host, 7, recv, &d).unwrap();
                 }
             }

@@ -74,6 +74,8 @@ pub fn host_info(interval_ms: u32) -> HostInfo {
         clk_tck: clk_tck.max(1) as u32,
         page_size: page_size.max(1) as u32,
         interval_ms,
+        // Set by the next change, with --threads.
+        sends_threads: false,
     }
 }
 
@@ -155,6 +157,7 @@ fn parse_proc_stat(pid: u32, s: &str) -> Option<ProcSample> {
         vsize_bytes: num(23),
         // From statm; filled in by the caller.
         shared_pages: None,
+        kernel_thread: None,
     })
 }
 

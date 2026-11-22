@@ -1987,6 +1987,7 @@ mod tests {
                 comm: comm.into(),
                 vsize_bytes: Some(1 << 30),
                 shared_pages: Some(100),
+                kernel_thread: None,
             };
             let frame = sysmon_proto::Frame {
                 host_id: 1,

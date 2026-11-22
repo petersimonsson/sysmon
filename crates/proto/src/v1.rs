@@ -5,7 +5,34 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Header, HostInfo, ProcMeta, SystemSample, UserName};
+use crate::{Header, ProcMeta, SystemSample, UserName};
+
+/// `HostInfo` as in v1 and v2 (before `sends_threads`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostInfo {
+    pub hostname: String,
+    pub kernel: String,
+    pub cpu_count: u16,
+    pub mem_total_kib: u64,
+    pub clk_tck: u32,
+    pub page_size: u32,
+    pub interval_ms: u32,
+}
+
+impl From<HostInfo> for crate::HostInfo {
+    fn from(i: HostInfo) -> Self {
+        Self {
+            hostname: i.hostname,
+            kernel: i.kernel,
+            cpu_count: i.cpu_count,
+            mem_total_kib: i.mem_total_kib,
+            clk_tck: i.clk_tck,
+            page_size: i.page_size,
+            interval_ms: i.interval_ms,
+            sends_threads: false,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcSample {
@@ -43,6 +70,7 @@ impl From<ProcSample> for crate::ProcSample {
             comm: p.comm,
             vsize_bytes: None,
             shared_pages: None,
+            kernel_thread: None,
         }
     }
 }
@@ -50,7 +78,7 @@ impl From<ProcSample> for crate::ProcSample {
 impl From<Msg> for crate::Msg {
     fn from(m: Msg) -> Self {
         match m {
-            Msg::HostInfo(i) => crate::Msg::HostInfo(i),
+            Msg::HostInfo(i) => crate::Msg::HostInfo(i.into()),
             Msg::System(s) => crate::Msg::System(s),
             Msg::Procs(p) => crate::Msg::Procs(p.into_iter().map(Into::into).collect()),
             Msg::ProcMeta(m) => crate::Msg::ProcMeta(m),

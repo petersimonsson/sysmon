@@ -132,7 +132,12 @@ fn main() -> anyhow::Result<()> {
             host_id, boot_id, seq, &meta,
         )?);
         datagrams.extend(sysmon_proto::encode_sample(
-            host_id, boot_id, seq, &system, &procs,
+            host_id,
+            boot_id,
+            seq,
+            &system,
+            &procs,
+            &[],
         )?);
 
         let mut bytes = 0;

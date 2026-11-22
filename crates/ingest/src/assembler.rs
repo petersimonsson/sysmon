@@ -81,7 +81,7 @@ impl Assembler {
                 });
                 return;
             }
-            Msg::System(_) | Msg::Procs(_) => {}
+            Msg::System(_) | Msg::Procs(_) | Msg::Threads(_) => {}
         }
         if h.chunk >= h.chunks {
             return;
@@ -125,6 +125,8 @@ impl Assembler {
         match msg {
             Msg::System(s) => partial.frame.system = Some(s),
             Msg::Procs(p) => partial.frame.procs.extend(p),
+            // Counted as a chunk; added to frames in the ingest change.
+            Msg::Threads(_) => {}
             _ => unreachable!(),
         }
 
@@ -188,12 +190,13 @@ mod tests {
                 comm: "a-fairly-long-comm".into(),
                 vsize_bytes: Some(1 << 30),
                 shared_pages: Some(100),
+                kernel_thread: None,
             })
             .collect()
     }
 
     fn datagrams(seq: u32, boot_id: u128) -> Vec<(Header, Msg)> {
-        encode_sample(9, boot_id, seq, &SystemSample::default(), &procs(200))
+        encode_sample(9, boot_id, seq, &SystemSample::default(), &procs(200), &[])
             .unwrap()
             .iter()
             .map(|d| decode(d).unwrap())

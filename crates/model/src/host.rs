@@ -370,6 +370,7 @@ mod tests {
             comm: format!("p{pid}"),
             vsize_bytes: Some(1 << 30),
             shared_pages: Some(100),
+            kernel_thread: None,
         }
     }
 

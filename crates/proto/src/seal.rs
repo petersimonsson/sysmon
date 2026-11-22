@@ -240,9 +240,10 @@ mod tests {
                 comm: "kworker/u64:2".into(),
                 vsize_bytes: Some(1 << 30),
                 shared_pages: Some(100),
+                kernel_thread: None,
             })
             .collect();
-        encode_sample(1, 2, 3, &SystemSample::default(), &procs).unwrap()
+        encode_sample(1, 2, 3, &SystemSample::default(), &procs, &[]).unwrap()
     }
 
     #[test]
