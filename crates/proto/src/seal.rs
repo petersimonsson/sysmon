@@ -198,6 +198,27 @@ impl Opener {
     }
 }
 
+/// An opened (not encrypted) datagram with its compression undone: the
+/// same datagram, flagged uncompressed. Recordings store datagrams this
+/// way, since blocks of plain datagrams compress far better together than
+/// datagrams compressed one by one.
+pub fn decompressed(datagram: &[u8]) -> Result<Cow<'_, [u8]>> {
+    check_preamble(datagram)?;
+    let flags = datagram[3];
+    if flags & flags::ENCRYPTED != 0 {
+        return Err(Error::NeedsKey);
+    }
+    if flags & flags::COMPRESSED == 0 {
+        return Ok(Cow::Borrowed(datagram));
+    }
+    let plain = decompress(flags, &datagram[PREAMBLE_LEN..])?;
+    let mut out = Vec::with_capacity(PREAMBLE_LEN + plain.len());
+    out.extend_from_slice(&datagram[..3]);
+    out.push(flags & !flags::COMPRESSED);
+    out.extend_from_slice(&plain);
+    Ok(Cow::Owned(out))
+}
+
 /// Undo compression on a payload, if its flags say so.
 pub(crate) fn decompress(flags: u8, payload: &[u8]) -> Result<Cow<'_, [u8]>> {
     if flags & flags::COMPRESSED == 0 {
@@ -244,6 +265,28 @@ mod tests {
             })
             .collect();
         encode_sample(1, 2, 3, &SystemSample::default(), &procs, &[]).unwrap()
+    }
+
+    #[test]
+    fn decompressed_datagrams_decode_the_same() {
+        let d = crate::encode_sample(1, 2, 3, &crate::SystemSample::default(), &[], &[])
+            .unwrap()
+            .remove(0);
+        let sealed = Sealer::new(None, true).seal(d.clone()).unwrap();
+        assert_ne!(sealed[3] & flags::COMPRESSED, 0, "compressed to start with");
+        let plain = decompressed(&sealed).unwrap();
+        assert_eq!(plain[3] & flags::COMPRESSED, 0);
+        assert_eq!(plain[2], sealed[2], "version kept");
+        assert_eq!(
+            crate::decode(&plain).unwrap(),
+            crate::decode(&sealed).unwrap()
+        );
+        // Already plain: unchanged, not copied.
+        assert!(matches!(decompressed(&d).unwrap(), Cow::Borrowed(_)));
+        // Still encrypted: refused (recordings hold opened datagrams).
+        let key = crate::Key::generate();
+        let enc = Sealer::new(Some(&key), true).seal(d).unwrap();
+        assert!(matches!(decompressed(&enc), Err(Error::NeedsKey)));
     }
 
     #[test]

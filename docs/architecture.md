@@ -37,8 +37,12 @@ Everything is Rust, organised as one Cargo workspace.
    that each hold whole records, so losing one chunk loses only that chunk's
    processes for one tick.
 3. **The disk format is the wire format.** The recorder stores received
-   datagrams verbatim, plus a receive timestamp. Replay feeds them through the
-   same decoder and assembler as live data.
+   datagrams, opened (decrypted) and decompressed, plus a receive
+   timestamp. Replay feeds them through the same decoder and assembler as
+   live data. Decompressing first matters: blocks of plain datagrams
+   compress together to about half the size of datagrams the agent
+   compressed one by one (measured with a real agent: 11 vs 20 MB per
+   host-hour).
 4. **Live and replay end in the same models.** Both produce the same ingest
    `Event`s, applied to `HostModel`s the same way. Live events arrive on the
    ingest channel; replay ones on the replay engine's `Feed` channel, which

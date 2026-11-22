@@ -1,7 +1,8 @@
 //! sysmon on-disk recordings.
 //!
-//! Received datagrams are stored verbatim, so the disk format is the wire
-//! format and replay reuses the live decoder.
+//! Received datagrams are stored as datagrams (the caller opens and
+//! decompresses them first), so the disk format is the wire format and
+//! replay reuses the live decoder.
 //!
 //! ```text
 //! <data_dir>/<host_id>/<boot_id>/<YYYY-MM-DDTHH>.seg   segment
