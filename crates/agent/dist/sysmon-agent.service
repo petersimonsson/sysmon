@@ -19,11 +19,19 @@ LoadCredential=key:/etc/sysmon/key
 ExecStart=/usr/local/bin/sysmon-agent --target ${SYSMON_TARGET} --compress --key-file ${CREDENTIALS_DIRECTORY}/key
 # To send threads too (about 2.5x the CPU and bandwidth), use this instead:
 #ExecStart=/usr/local/bin/sysmon-agent --target ${SYSMON_TARGET} --compress --key-file ${CREDENTIALS_DIRECTORY}/key --threads
+# To send journal lines (warning and above) too, use this instead; the
+# group and state directory below give it the journal and a place to keep
+# its position, so a restart neither skips nor repeats lines:
+#ExecStart=/usr/local/bin/sysmon-agent --target ${SYSMON_TARGET} --compress --key-file ${CREDENTIALS_DIRECTORY}/key --logs
 Restart=always
 RestartSec=5
 
 # Sandboxing. /proc must stay fully visible so all processes can be sampled.
 DynamicUser=yes
+# Read access to the system journal, for --logs (journalctl runs as the agent).
+SupplementaryGroups=systemd-journal
+# $STATE_DIRECTORY/journal-cursor holds the --logs position.
+StateDirectory=sysmon-agent
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
