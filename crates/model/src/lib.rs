@@ -4,12 +4,14 @@
 mod clock;
 mod host;
 pub mod replay;
+pub mod series;
 mod source;
 pub mod tree;
 
 pub use clock::PlaybackClock;
 pub use host::{DiskRate, HISTORY_LEN, HistoryPoint, HostModel, NetRate, ProcRow, Snapshot};
 pub use replay::{Control, Feed, ReplayHandle, ReplayStatus};
+pub use series::{Metric, SeriesTarget};
 pub use source::{DataSource, LiveSource, ReplaySource, SourceKind};
 pub use tree::TreeLine;
 

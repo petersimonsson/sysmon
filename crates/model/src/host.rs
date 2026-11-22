@@ -1,5 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
+use crate::series::{self, Metric, ProcFrame, ProcPoint, SeriesTarget};
+
 use sysmon_ingest::Event;
 use sysmon_proto::{CpuCounters, Frame, HostInfo, MemInfo, ProcKey, ProcMeta, SystemSample};
 
@@ -14,6 +16,8 @@ pub struct HostModel {
     pub info: Option<HostInfo>,
     pub snapshot: Snapshot,
     pub history: VecDeque<HistoryPoint>,
+    /// Every process in each of the last [`HISTORY_LEN`] samples, for graphs.
+    pub proc_history: VecDeque<ProcFrame>,
     pub frames_received: u64,
     pub frames_incomplete: u64,
     /// Sample timestamp of the last frame that had one.
@@ -218,6 +222,29 @@ impl HostModel {
             self.meta.retain(|k, _| proc_ticks.contains_key(k));
         }
 
+        // Rows carried over a lost chunk are left out, so graphs show a gap
+        // rather than a repeated value.
+        let mut points: Vec<ProcPoint> = procs
+            .iter()
+            .filter(|r| !r.stale)
+            .map(|r| ProcPoint {
+                key: r.key,
+                ppid: r.ppid,
+                cpu_pct: r.cpu_pct,
+                rss_kib: r.rss_kib,
+                threads: r.threads,
+            })
+            .collect();
+        points.sort_by_key(|p| p.key);
+        self.proc_history.push_back(ProcFrame {
+            ts_unix_ns: ts,
+            mem_total_kib: system.mem.total,
+            procs: points,
+        });
+        while self.proc_history.len() > HISTORY_LEN {
+            self.proc_history.pop_front();
+        }
+
         let mem = system.mem;
         self.history.push_back(HistoryPoint {
             ts_unix_ns: ts,
@@ -246,6 +273,27 @@ impl HostModel {
             system,
             proc_ticks,
         });
+    }
+}
+
+impl HostModel {
+    /// A graph line for `target` covering samples taken at or after `since_ns`.
+    pub fn series(
+        &self,
+        target: SeriesTarget,
+        metric: Metric,
+        since_ns: u64,
+    ) -> Vec<(u64, Option<f32>)> {
+        let start = self
+            .proc_history
+            .partition_point(|f| f.ts_unix_ns < since_ns);
+        series::series(self.proc_history.range(start..), target, metric)
+    }
+
+    /// The target's value and member count in the latest sample.
+    pub fn latest(&self, target: SeriesTarget, metric: Metric) -> Option<(f32, usize)> {
+        let f = self.proc_history.back()?;
+        Some((f.sample(target, metric)?, f.members(target)))
     }
 }
 
@@ -376,6 +424,26 @@ mod tests {
         m.apply(frame(2, 102, 100, 100, vec![proc(10, 200)], true));
         assert_eq!(m.snapshot.cpu_pct, vec![50.0]);
         assert_eq!(m.snapshot.procs[0].cpu_pct, 100.0);
+    }
+
+    #[test]
+    fn proc_history_is_bounded_and_skips_stale_rows() {
+        let mut m = HostModel::new(1);
+        m.apply(frame(0, 100, 0, 0, vec![proc(10, 0), proc(11, 0)], true));
+        m.apply(frame(1, 101, 0, 0, vec![proc(10, 100)], false));
+        let target = SeriesTarget::Process(proc(11, 0).key());
+        let s = m.series(target, Metric::Cpu, 0);
+        assert_eq!(s.len(), 2);
+        assert!(s[0].1.is_some());
+        assert_eq!(s[1].1, None, "carried-over row is a gap, not a value");
+        assert_eq!(m.series(target, Metric::Cpu, 101 * 1_000_000_000).len(), 1);
+
+        for i in 0..(HISTORY_LEN as u64 + 50) {
+            m.apply(frame(2 + i as u32, 102 + i, 0, 0, vec![proc(10, i)], true));
+        }
+        assert_eq!(m.proc_history.len(), HISTORY_LEN);
+        let p10 = SeriesTarget::Process(proc(10, 0).key());
+        assert_eq!(m.latest(p10, Metric::Threads), Some((1.0, 1)));
     }
 
     #[test]
