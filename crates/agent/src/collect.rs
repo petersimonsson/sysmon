@@ -63,8 +63,8 @@ pub fn host_info(interval_ms: u32, sends_threads: bool) -> HostInfo {
     };
     let mem_total_kib = read_meminfo().total;
     HostInfo {
-        hostname: hostname(),
-        kernel: read_trimmed("/proc/sys/kernel/osrelease"),
+        hostname: cap(&hostname(), 255),
+        kernel: cap(&read_trimmed("/proc/sys/kernel/osrelease"), 255),
         // The CPUs in /proc/stat, as the per-core bars show them. Not
         // available_parallelism(), which counts only the CPUs this process
         // may run on (taskset, cgroup cpusets, a unit's CPUAffinity=).
@@ -343,6 +343,15 @@ pub fn boottime_ns() -> Option<u64> {
     // SAFETY: `ts` is a valid timespec for clock_gettime to fill in.
     let rc = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };
     (rc == 0).then(|| ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64)
+}
+
+/// `s` cut to at most `max` bytes, at a character boundary.
+pub fn cap(s: &str, max: usize) -> String {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
 fn hostname() -> String {

@@ -102,16 +102,20 @@ fn main() -> anyhow::Result<()> {
     let mut procs = Vec::new();
     let mut threads = Vec::new();
     let mut next_tick = Instant::now();
+    let mut warnings = Warnings::default();
 
-    for seq in 0u32.. {
+    // Wraps after 2^32 samples (497 days at the fastest 10 ms interval);
+    // the monitor takes the new 0 as an agent restart and carries on.
+    let mut seq: u32 = 0;
+    loop {
         let mut datagrams = Vec::new();
-        let host_tick = seq % host_info_every == 0;
+        let host_tick = seq.is_multiple_of(host_info_every);
 
         let system = collect::system(unix_now_ns());
         collect::procs(&mut procs, args.threads.then_some(&mut threads));
 
         // Metadata for new processes, or for all of them on a refresh tick.
-        let refresh = seq % args.meta_refresh_every.max(1) == 0;
+        let refresh = seq.is_multiple_of(args.meta_refresh_every.max(1));
         let current: HashSet<ProcKey> = procs.iter().map(|p| p.key()).collect();
         known.retain(|k, _| current.contains(k));
         let meta: Vec<_> = current
@@ -124,9 +128,12 @@ fn main() -> anyhow::Result<()> {
         }
 
         if host_tick {
-            datagrams.push(host_info_datagram(host_id, boot_id, seq, &info)?);
+            datagrams.extend(warnings.or_skip(
+                "host info",
+                host_info_datagram(host_id, boot_id, seq, &info).map(|d| vec![d]),
+            ));
         }
-        if seq % USER_REFRESH_EVERY == 0 {
+        if seq.is_multiple_of(USER_REFRESH_EVERY) {
             users.refresh();
         }
         // Names for the uids in use: with every HostInfo, and as soon as a
@@ -142,21 +149,37 @@ fn main() -> anyhow::Result<()> {
             .iter()
             .any(|u| sent_users.get(&u.uid) != Some(&u.name));
         if host_tick || news {
-            datagrams.extend(sysmon_proto::encode_users(host_id, boot_id, seq, &names)?);
+            datagrams.extend(users_datagrams(
+                host_id,
+                boot_id,
+                seq,
+                &names,
+                &mut warnings,
+            ));
             sent_users = names.into_iter().map(|u| (u.uid, u.name)).collect();
         }
-        datagrams.extend(sysmon_proto::encode_proc_meta(
-            host_id, boot_id, seq, &meta,
-        )?);
-        datagrams.extend(sysmon_proto::encode_sample(
-            host_id, boot_id, seq, &system, &procs, &threads,
-        )?);
+        datagrams.extend(warnings.or_skip(
+            "process metadata",
+            sysmon_proto::encode_proc_meta(host_id, boot_id, seq, &meta).map_err(Into::into),
+        ));
+        datagrams.extend(
+            warnings.or_skip(
+                "sample",
+                sysmon_proto::encode_sample(host_id, boot_id, seq, &system, &procs, &threads)
+                    .map_err(Into::into),
+            ),
+        );
 
-        let mut bytes = 0;
-        for d in datagrams.iter_mut() {
-            *d = sealer.seal(std::mem::take(d))?;
-            bytes += d.len();
-        }
+        let datagrams: Vec<Vec<u8>> = datagrams
+            .into_iter()
+            .flat_map(|d| {
+                warnings.or_skip(
+                    "sealing",
+                    sealer.seal(d).map(|d| vec![d]).map_err(Into::into),
+                )
+            })
+            .collect();
+        let bytes: usize = datagrams.iter().map(Vec::len).sum();
         for target in &targets {
             for d in &datagrams {
                 if let Err(e) = sender.send_to(d, *target) {
@@ -181,8 +204,52 @@ fn main() -> anyhow::Result<()> {
             // Fell behind (suspend, overload): skip missed ticks rather than burst.
             next_tick = now;
         }
+        seq = seq.wrapping_add(1);
     }
-    unreachable!()
+}
+
+/// Longest user name sent; longer ones (only seen from odd directories) are
+/// cut, so they can't make the whole `Users` message too large to send.
+const MAX_USER_NAME: usize = 256;
+
+/// The `Users` datagrams for `names`, with over-long names cut.
+fn users_datagrams(
+    host_id: u64,
+    boot_id: u128,
+    seq: u32,
+    names: &[UserName],
+    warnings: &mut Warnings,
+) -> Vec<Vec<u8>> {
+    let names: Vec<UserName> = names
+        .iter()
+        .map(|u| UserName {
+            uid: u.uid,
+            name: collect::cap(&u.name, MAX_USER_NAME),
+        })
+        .collect();
+    warnings.or_skip(
+        "user names",
+        sysmon_proto::encode_users(host_id, boot_id, seq, &names).map_err(Into::into),
+    )
+}
+
+/// Encoding problems are logged once each and the affected part of the
+/// sample skipped: one record that can't be sent mustn't stop the agent.
+#[derive(Default)]
+struct Warnings {
+    seen: HashSet<String>,
+}
+
+impl Warnings {
+    fn or_skip(&mut self, what: &str, r: anyhow::Result<Vec<Vec<u8>>>) -> Vec<Vec<u8>> {
+        r.unwrap_or_else(|e| {
+            let msg = format!("{what}: {e:#}");
+            if self.seen.insert(msg.clone()) {
+                tracing::warn!("skipping {msg}");
+            }
+            Vec::new()
+        })
+    }
 }
 
 /// Look user names up again every this many samples (they rarely change,
@@ -246,7 +313,42 @@ fn unix_now_ns() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::NOTICES;
+    use super::{NOTICES, Warnings, users_datagrams};
+    use sysmon_proto::{Msg, UserName};
+
+    #[test]
+    fn an_over_long_user_name_doesnt_stop_the_agent() {
+        let names = [
+            UserName {
+                uid: 1000,
+                name: "anna".into(),
+            },
+            UserName {
+                uid: 1001,
+                name: "x".repeat(5000),
+            },
+        ];
+        // The uncut name alone is too large for a datagram.
+        assert!(sysmon_proto::encode_users(1, 2, 3, &names).is_err());
+        let mut warnings = Warnings::default();
+        let datagrams = users_datagrams(1, 2, 3, &names, &mut warnings);
+        let sent: Vec<UserName> = datagrams
+            .iter()
+            .flat_map(|d| match sysmon_proto::decode(d).unwrap().1 {
+                Msg::Users(u) => u,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].name, "anna");
+        assert_eq!(sent[1].name.len(), super::MAX_USER_NAME);
+
+        // Anything else that fails is skipped and warned about once.
+        let failed = warnings.or_skip("test", Err(anyhow::anyhow!("boom")));
+        assert!(failed.is_empty());
+        warnings.or_skip("test", Err(anyhow::anyhow!("boom")));
+        assert_eq!(warnings.seen.len(), 1);
+    }
 
     #[test]
     fn notices_cover_the_agents_dependencies() {
