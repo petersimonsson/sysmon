@@ -45,6 +45,8 @@ const GRAPH_MIN_LIST: f32 = 300.;
 /// Slider resolution: positions are mapped onto 0..TIMELINE_STEPS.
 const TIMELINE_STEPS: f32 = 10_000.;
 const SPEEDS: [f64; 5] = [1., 4., 16., 64., 256.];
+/// Longest stretch of replay catch-up applied between two frames.
+const REPLAY_SLICE: Duration = Duration::from_millis(8);
 /// A live host not heard from for this long is dropped, history and all.
 const FORGET_AFTER_NS: u64 = 3600 * 1_000_000_000;
 /// At most this many live hosts are kept; past it, the one silent longest
@@ -155,6 +157,11 @@ pub struct AppState {
     /// tests one without an engine thread (which would wake the UI from
     /// outside gpui's deterministic test scheduler).
     open_replay: fn(&std::path::Path, f64) -> anyhow::Result<ReplayHandle>,
+    /// Longest stretch of replay catch-up applied between two frames.
+    replay_slice: Duration,
+    /// Slices applied so far, for tests.
+    #[cfg(test)]
+    replay_slices: usize,
     /// The replay status last shown; the ticker redraws only when it changes.
     shown_status: Option<ReplayStatus>,
     scroll: UniformListScrollHandle,
@@ -310,6 +317,9 @@ impl AppState {
             scrubbing: false,
             opening: None,
             open_replay: crate::pipeline::open_replay,
+            replay_slice: REPLAY_SLICE,
+            #[cfg(test)]
+            replay_slices: 0,
             shown_status: None,
             scroll: UniformListScrollHandle::new(),
             error: None,
@@ -401,37 +411,30 @@ impl AppState {
         })
         .detach();
         let feed = handle.feed.clone();
+        // A seek delivers the 10 minutes before the target at once: about
+        // 120 ms of work per host. It's applied in slices of at most
+        // `replay_slice`, so the window keeps drawing (and a recording with
+        // many hosts doesn't freeze for seconds) while it catches up.
         let task = cx.spawn(async move |this, cx| {
+            let mut queue: std::collections::VecDeque<Feed> = Default::default();
             while let Ok(first) = feed.recv_async().await {
-                let batch: Vec<Feed> = std::iter::once(first).chain(feed.try_iter()).collect();
-                let alive = this.update(cx, |this, cx| {
-                    let Some(s) = this.replay.as_mut().filter(|s| s.id == id) else {
+                queue.push_back(first);
+                while !queue.is_empty() {
+                    queue.extend(feed.try_iter());
+                    // Whatever comes before the last reset would be thrown
+                    // away by it (seeking again while catching up).
+                    if let Some(last) = queue.iter().rposition(|f| matches!(f, Feed::Reset)) {
+                        queue.drain(..last);
+                    }
+                    let alive =
+                        this.update(cx, |this, cx| this.apply_replay_slice(id, &mut queue, cx));
+                    if alive.is_err() {
                         return;
-                    };
-                    let mut reset = false;
-                    for item in batch {
-                        match item {
-                            Feed::Reset => {
-                                s.hosts.clear();
-                                reset = true;
-                            }
-                            Feed::Event(e) => apply(&mut s.hosts, e),
-                        }
                     }
-                    if reset {
-                        // The recording's models were rebuilt; so are the lines.
-                        this.graph_lines.borrow_mut().clear();
-                        if std::mem::take(&mut this.log_reveal_after_reset) {
-                            this.log_reveal.set(true);
-                        }
+                    if !queue.is_empty() {
+                        // Let the window draw before the next slice.
+                        cx.background_executor().timer(Duration::ZERO).await;
                     }
-                    if this.view == View::Replay {
-                        this.ensure_selection();
-                        cx.notify();
-                    }
-                });
-                if alive.is_err() {
-                    break;
                 }
             }
         });
@@ -448,6 +451,48 @@ impl AppState {
         self.selected = None;
         self.error = None;
         cx.notify();
+    }
+
+    /// Apply queued replay items for up to `replay_slice` (at least one).
+    fn apply_replay_slice(
+        &mut self,
+        id: u64,
+        queue: &mut std::collections::VecDeque<Feed>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(s) = self.replay.as_mut().filter(|s| s.id == id) else {
+            queue.clear();
+            return;
+        };
+        let deadline = std::time::Instant::now() + self.replay_slice;
+        let mut reset = false;
+        while let Some(item) = queue.pop_front() {
+            match item {
+                Feed::Reset => {
+                    s.hosts.clear();
+                    reset = true;
+                }
+                Feed::Event(e) => apply(&mut s.hosts, e),
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+        #[cfg(test)]
+        {
+            self.replay_slices += 1;
+        }
+        if reset {
+            // The recording's models were rebuilt; so are the lines.
+            self.graph_lines.borrow_mut().clear();
+            if std::mem::take(&mut self.log_reveal_after_reset) {
+                self.log_reveal.set(true);
+            }
+        }
+        if self.view == View::Replay {
+            self.ensure_selection();
+            cx.notify();
+        }
     }
 
     fn open_recording(&mut self, cx: &mut Context<Self>) {
@@ -4625,5 +4670,55 @@ mod tests {
             assert_eq!(mark.as_deref(), Some(expected.as_str()));
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn replay_catch_up_is_applied_in_slices_and_skips_superseded_work(cx: &mut TestAppContext) {
+        let (_window, app) = open(cx);
+        let (handle, driver) = ReplayHandle::manual(ReplayStatus::default());
+        app.update(cx, |app, cx| {
+            app.start_session(handle, std::path::PathBuf::from("/nonexistent"), cx);
+            // One item per slice, to count them.
+            app.replay_slice = std::time::Duration::ZERO;
+        });
+        let frame = |seq: u32| {
+            Feed::Event(sysmon_ingest::Event::Frame(sysmon_proto::Frame {
+                host_id: 1,
+                boot_id: 1,
+                seq,
+                system: Some(sysmon_proto::SystemSample {
+                    ts_unix_ns: (1 + seq as u64) * 1_000_000_000,
+                    ..Default::default()
+                }),
+                procs: vec![],
+                threads: vec![],
+                complete: true,
+                received_ns: 0,
+            }))
+        };
+        for seq in 0..5 {
+            driver.feed.send(frame(seq)).unwrap();
+        }
+        cx.run_until_parked();
+        app.read_with(cx, |a, _| {
+            assert_eq!(a.replay_slices, 5, "one slice each, with frames between");
+            assert_eq!(a.hosts()[&1].frames_received, 5, "all applied");
+        });
+
+        // A seek's reset queued behind unapplied work: that work is skipped.
+        for seq in 5..50 {
+            driver.feed.send(frame(seq)).unwrap();
+        }
+        driver.feed.send(Feed::Reset).unwrap();
+        driver.feed.send(frame(100)).unwrap();
+        cx.run_until_parked();
+        app.read_with(cx, |a, _| {
+            assert_eq!(
+                a.replay_slices,
+                5 + 2,
+                "just the reset and the frame after it"
+            );
+            assert_eq!(a.hosts()[&1].frames_received, 1);
+        });
     }
 }
