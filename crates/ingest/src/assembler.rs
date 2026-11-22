@@ -186,6 +186,8 @@ mod tests {
                 rss_pages: 1,
                 threads: 1,
                 comm: "a-fairly-long-comm".into(),
+                vsize_bytes: Some(1 << 30),
+                shared_pages: Some(100),
             })
             .collect()
     }

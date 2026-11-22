@@ -1964,6 +1964,8 @@ mod tests {
                 rss_pages: pid as u64,
                 threads: 1,
                 comm: comm.into(),
+                vsize_bytes: Some(1 << 30),
+                shared_pages: Some(100),
             };
             let frame = sysmon_proto::Frame {
                 host_id: 1,

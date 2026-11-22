@@ -358,6 +358,8 @@ mod tests {
             rss_pages: 1,
             threads: 1,
             comm: format!("p{pid}"),
+            vsize_bytes: Some(1 << 30),
+            shared_pages: Some(100),
         }
     }
 

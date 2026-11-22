@@ -125,7 +125,8 @@ impl Sealer {
             return Ok(out);
         };
         flags |= flags::ENCRYPTED;
-        let preamble = [MAGIC[0], MAGIC[1], VERSION, flags];
+        // Keep the datagram's own version; it's authenticated with the rest.
+        let preamble = [MAGIC[0], MAGIC[1], datagram[2], flags];
         let nonce = XNonce::generate();
         let ct = cipher
             .encrypt(
@@ -214,7 +215,7 @@ fn check_preamble(buf: &[u8]) -> Result<()> {
     if buf[..2] != MAGIC {
         return Err(Error::BadMagic);
     }
-    if buf[2] != VERSION {
+    if !(crate::MIN_VERSION..=VERSION).contains(&buf[2]) {
         return Err(Error::UnsupportedVersion(buf[2]));
     }
     Ok(())
@@ -237,6 +238,8 @@ mod tests {
                 rss_pages: 789,
                 threads: 2,
                 comm: "kworker/u64:2".into(),
+                vsize_bytes: Some(1 << 30),
+                shared_pages: Some(100),
             })
             .collect();
         encode_sample(1, 2, 3, &SystemSample::default(), &procs).unwrap()
@@ -314,6 +317,23 @@ mod tests {
             Err(Error::NeedsKey)
         ));
         assert!(Opener::new(None).open(&d).is_ok());
+    }
+
+    #[test]
+    fn v1_datagrams_seal_and_open() {
+        let h = Header {
+            host_id: 1,
+            boot_id: 2,
+            seq: 3,
+            chunk: 0,
+            chunks: 1,
+        };
+        let d = crate::v1::encode(&h, &crate::v1::Msg::Procs(vec![])).unwrap();
+        let key = Key::generate();
+        let sealed = Sealer::new(Some(&key), true).seal(d).unwrap();
+        assert_eq!(sealed[2], 1, "version byte kept");
+        let opened = Opener::new(Some(&key)).open(&sealed).unwrap();
+        assert_eq!(decode(&opened).unwrap(), (h, Msg::Procs(vec![])));
     }
 
     #[test]

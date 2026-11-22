@@ -14,13 +14,16 @@ use serde::{Deserialize, Serialize};
 
 mod frame;
 pub mod seal;
+pub mod v1;
 pub use frame::Frame;
 pub use seal::{Key, Opener, Sealer};
 
 /// Magic bytes at the start of every datagram.
 pub const MAGIC: [u8; 2] = *b"SM";
 /// Current protocol version.
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
+/// Oldest version [`decode`] still reads.
+pub const MIN_VERSION: u8 = 1;
 /// Upper bound on encoded datagram size, chosen to fit common path MTUs.
 pub const MAX_DATAGRAM: usize = 1200;
 /// Size of the fixed preamble (magic, version, flags).
@@ -166,6 +169,11 @@ pub struct ProcSample {
     pub threads: u32,
     /// `comm`, at most 16 bytes.
     pub comm: String,
+    /// Virtual memory size (`vsize`); `None` from v1 agents.
+    pub vsize_bytes: Option<u64>,
+    /// Resident shared pages, from `/proc/[pid]/statm`; `None` from v1
+    /// agents, or if the process exited between reading `stat` and `statm`.
+    pub shared_pages: Option<u64>,
 }
 
 impl ProcSample {
@@ -238,8 +246,9 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Msg)> {
     if buf[..2] != MAGIC {
         return Err(Error::BadMagic);
     }
-    if buf[2] != VERSION {
-        return Err(Error::UnsupportedVersion(buf[2]));
+    let version = buf[2];
+    if !(MIN_VERSION..=VERSION).contains(&version) {
+        return Err(Error::UnsupportedVersion(version));
     }
     let flags = buf[3];
     if flags & !flags::KNOWN != 0 {
@@ -249,6 +258,10 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Msg)> {
         return Err(Error::NeedsKey);
     }
     let payload = seal::decompress(flags, &buf[PREAMBLE_LEN..])?;
+    if version == 1 {
+        let (h, m): (Header, v1::Msg) = postcard::from_bytes(&payload)?;
+        return Ok((h, m.into()));
+    }
     Ok(postcard::from_bytes(&payload)?)
 }
 
@@ -366,6 +379,8 @@ mod tests {
             rss_pages: 4096,
             threads: 4,
             comm: "some-process".into(),
+            vsize_bytes: Some(1 << 30),
+            shared_pages: Some(100),
         }
     }
 
@@ -400,6 +415,52 @@ mod tests {
             Err(Error::UnsupportedFlags(0x80))
         ));
         assert!(matches!(decode(b"S"), Err(Error::Truncated)));
+    }
+
+    #[test]
+    fn v1_datagrams_still_decode() {
+        let header = Header {
+            host_id: 1,
+            boot_id: 2,
+            seq: 3,
+            chunk: 1,
+            chunks: 2,
+        };
+        let old = v1::ProcSample {
+            pid: 7,
+            ppid: 1,
+            starttime: 9,
+            state: b'S',
+            utime: 10,
+            stime: 20,
+            rss_pages: 30,
+            threads: 4,
+            comm: "old".into(),
+        };
+        let buf = v1::encode(&header, &v1::Msg::Procs(vec![old])).unwrap();
+        assert_eq!(buf[2], 1);
+        let (h, msg) = decode(&buf).unwrap();
+        assert_eq!(h, header);
+        let Msg::Procs(procs) = msg else {
+            panic!("not Procs")
+        };
+        assert_eq!(
+            (procs[0].pid, procs[0].rss_pages, &procs[0].comm[..]),
+            (7, 30, "old")
+        );
+        assert_eq!((procs[0].vsize_bytes, procs[0].shared_pages), (None, None));
+    }
+
+    #[test]
+    fn versions_outside_the_supported_range_are_rejected() {
+        assert!(matches!(
+            decode(b"SM\x00\x00"),
+            Err(Error::UnsupportedVersion(0))
+        ));
+        assert!(matches!(
+            decode(b"SM\x03\x00"),
+            Err(Error::UnsupportedVersion(3))
+        ));
     }
 
     #[test]

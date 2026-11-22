@@ -123,4 +123,58 @@ mod tests {
         frames_within(Duration::from_millis(800));
         assert!(handle.status().finished);
     }
+
+    #[test]
+    fn recordings_from_v1_agents_still_replay() {
+        let dir = tmp_dir("v1");
+        let base = 1_795_330_800 * SEC;
+        let mut rec = sysmon_store::Recorder::new(&dir);
+        for seq in 0..3u32 {
+            let h = |chunk| sysmon_proto::Header {
+                host_id: 5,
+                boot_id: 6,
+                seq,
+                chunk,
+                chunks: 2,
+            };
+            let system = SystemSample {
+                ts_unix_ns: base + seq as u64 * SEC,
+                ..Default::default()
+            };
+            let proc = sysmon_proto::v1::ProcSample {
+                pid: 42,
+                ppid: 1,
+                starttime: 1,
+                state: b'R',
+                utime: seq as u64 * 100,
+                stime: 0,
+                rss_pages: 10,
+                threads: 1,
+                comm: "v1".into(),
+            };
+            let ts = base + seq as u64 * SEC;
+            for (chunk, msg) in [
+                sysmon_proto::v1::Msg::System(system),
+                sysmon_proto::v1::Msg::Procs(vec![proc]),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let d = sysmon_proto::v1::encode(&h(chunk as u16), &msg).unwrap();
+                rec.append(5, 6, ts, &d).unwrap();
+            }
+        }
+        drop(rec);
+
+        let mut src = ReplaySource::open(&dir).unwrap();
+        let mut host = HostModel::new(5);
+        let mut frames = 0;
+        while let Some(e) = src.next_event() {
+            frames += matches!(e, sysmon_ingest::Event::Frame(_)) as usize;
+            host.apply(e);
+        }
+        assert_eq!(frames, 3);
+        let p = &host.snapshot.procs[0];
+        assert_eq!((p.key.pid, p.cpu_pct), (42, 100.0));
+    }
 }

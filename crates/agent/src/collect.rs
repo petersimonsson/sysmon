@@ -143,6 +143,9 @@ fn parse_proc_stat(pid: u32, s: &str) -> Option<ProcSample> {
         rss_pages: num(24)?,
         threads: num(20)? as u32,
         comm,
+        // Collected from the next change on.
+        vsize_bytes: None,
+        shared_pages: None,
     })
 }
 
