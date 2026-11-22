@@ -1,57 +1,98 @@
 use std::fs::File;
-use std::io::{BufReader, Read};
-use std::path::Path;
+use std::io::{BufReader, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
-use crate::{
-    BLOCK_HEADER_LEN, Error, FILE_HEADER_LEN, FILE_MAGIC, FILE_VERSION, Record, Result,
-    parse_records,
-};
+use crate::block;
+use crate::index::{self, IndexEntry};
+use crate::{FILE_HEADER_LEN, Record, Result};
 
-/// Sequential reader over a segment file. Iteration stops at the first
-/// incomplete block, which is a crash's torn tail or a block still being
-/// written.
+/// Reader over a segment file. Iteration stops at the first incomplete
+/// block, which is a crash's torn tail or a block still being written.
 pub struct SegmentReader {
+    path: PathBuf,
     file: BufReader<File>,
     offset: u64,
     pending: std::vec::IntoIter<Record>,
+    skip_before: u64,
     done: bool,
+    payload: Vec<u8>,
 }
 
 impl SegmentReader {
     pub fn open(path: &Path) -> Result<Self> {
         let mut file = BufReader::new(File::open(path)?);
-        let mut header = [0u8; FILE_HEADER_LEN as usize];
-        file.read_exact(&mut header)?;
-        if &header[..5] != FILE_MAGIC {
-            return Err(Error::BadMagic);
-        }
-        if header[5] != FILE_VERSION {
-            return Err(Error::UnsupportedVersion(header[5]));
-        }
+        block::check_file_header(&mut file)?;
         Ok(Self {
+            path: path.to_path_buf(),
             file,
             offset: FILE_HEADER_LEN,
             pending: Vec::new().into_iter(),
+            skip_before: 0,
             done: false,
+            payload: Vec::new(),
         })
     }
 
-    fn next_block(&mut self) -> Result<Option<Vec<Record>>> {
-        let mut bh = [0u8; BLOCK_HEADER_LEN];
-        if self.file.read_exact(&mut bh).is_err() {
-            return Ok(None);
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The block index, completed by scanning if the `.idx` file is stale.
+    pub fn index(&mut self) -> Result<Vec<IndexEntry>> {
+        let entries = index::load(&self.path, &mut self.file)?.entries;
+        self.file.seek(SeekFrom::Start(self.offset))?;
+        Ok(entries)
+    }
+
+    /// First and last receive timestamps in the segment.
+    pub fn time_range(&mut self) -> Result<Option<(u64, u64)>> {
+        let entries = self.index()?;
+        Ok(entries
+            .first()
+            .zip(entries.last())
+            .map(|(f, l)| (f.first_ts, l.last_ts)))
+    }
+
+    /// Position the reader so the next record is the first one received at
+    /// or after `ts`.
+    pub fn seek(&mut self, ts: u64) -> Result<()> {
+        let entries = self.index()?;
+        self.pending = Vec::new().into_iter();
+        self.skip_before = ts;
+        match entries.get(index::find(&entries, ts)) {
+            Some(e) => {
+                self.offset = e.block.offset;
+                self.done = false;
+            }
+            None => {
+                self.offset = entries.last().map_or(FILE_HEADER_LEN, |e| e.block.end());
+                self.done = true;
+            }
         }
-        let size = u32::from_le_bytes(bh[..4].try_into().unwrap()) as usize;
-        let crc = u32::from_le_bytes(bh[4..].try_into().unwrap());
-        let mut payload = vec![0u8; size];
-        if self.file.read_exact(&mut payload).is_err() || crc32fast::hash(&payload) != crc {
-            return Ok(None);
-        }
-        let raw = zstd::stream::decode_all(&payload[..])?;
+        self.file.seek(SeekFrom::Start(self.offset))?;
+        Ok(())
+    }
+
+    fn next_block(&mut self) -> Result<bool> {
+        let Some(b) = block::read_block(&mut self.file, self.offset, &mut self.payload) else {
+            // Rewind so a later call can pick up a block that was still being written.
+            self.file.seek(SeekFrom::Start(self.offset))?;
+            return Ok(false);
+        };
         let mut records = Vec::new();
-        parse_records(&raw, &mut records).ok_or(Error::Corrupt(self.offset))?;
-        self.offset += (BLOCK_HEADER_LEN + size) as u64;
-        Ok(Some(records))
+        block::decode_block(&self.payload, b.offset, &mut records)?;
+        if self.skip_before > 0 {
+            records.retain(|r| r.recv_ts_ns >= self.skip_before);
+        }
+        self.pending = records.into_iter();
+        self.offset = b.end();
+        Ok(true)
+    }
+
+    /// Resume reading after the end was reached, e.g. to follow a segment
+    /// that is still being written.
+    pub fn resume(&mut self) {
+        self.done = false;
     }
 }
 
@@ -67,8 +108,8 @@ impl Iterator for SegmentReader {
                 return None;
             }
             match self.next_block() {
-                Ok(Some(records)) => self.pending = records.into_iter(),
-                Ok(None) => {
+                Ok(true) => {}
+                Ok(false) => {
                     self.done = true;
                     return None;
                 }
