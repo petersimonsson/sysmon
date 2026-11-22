@@ -233,8 +233,9 @@ and seek) reaches them. It returns a `ReplayHandle`:
 - `send(Control)`: `SetPaused`, `TogglePause`, `SetSpeed`, `Seek(ts)`;
 - `status()`: start, end, position, speed, paused, finished.
 
-A seek starts reading 3 s before the target, so the models already have
-rates when the target is shown. Gaps in the recording longer than 5 s (an
+A seek starts reading the full history window (10 min) before the target and
+delivers it at once, so the models have rates and the process graphs are
+full as soon as the target is shown. Gaps in the recording longer than 5 s (an
 agent or the monitor was offline) are skipped rather than waited out.
 
 ### `HostModel`
@@ -249,6 +250,16 @@ agent or the monitor was offline) are skipped rather than waited out.
   marked `stale` (a complete frame drops processes that really exited);
 - a ring buffer of derived system metrics (10 minutes at 1 Hz) for sparklines;
 - the process table, joined with `ProcMeta` (cmdline, uid) and `Users`;
+- `proc_history`: every process of the last 600 samples, frame-major
+  (`series::ProcFrame`: timestamp, memory total, and each process's key,
+  ppid, %CPU, RSS and threads). Rows carried over lost chunks are left out,
+  so graphs show a gap instead of a repeated value. `series(target, metric,
+  since)` gives one graph line, where `target` is a `Process(key)` or a
+  `Subtree(key)` and `metric` is %CPU, RSS, %MEM (against that sample's
+  memory total) or threads. A subtree total is taken from each sample's own
+  parent links, so children count only while they exist. Memory: a point
+  is 40 bytes, so 40 × processes × 600 per host, about 12 MB for 500
+  processes;
 - liveness: when the last sample was taken, and the incomplete-frame rate.
 
 ## 6. `sysmon-ui`: gpui-kit application
@@ -282,6 +293,18 @@ agent or the monitor was offline) are skipped rather than waited out.
     shows how many descendants it hides and their summed CPU and memory.
     When filtering, matches are shown with their ancestors (dimmed) so they
     keep their place. Expand all / Collapse all act on the selected host;
+  - **process graphs:** pick up to 8 rows with the checkbox column,
+    Ctrl+click (toggle), Shift+click (range), or the row cursor (↑/↓, `j`/`k`)
+    and `g`. Picking a collapsed tree row graphs its subtree's total. Picks
+    are kept per view and host by `ProcKey`, so they survive sorting,
+    filtering and tree changes, and each keeps its colour while picked;
+  - a **graph panel** below the process list while anything is picked: one
+    line per pick for the chosen metric (%CPU, RSS, %MEM, threads) over
+    1, 5 or 10 minutes, drawn on a canvas (`graph.rs`). Lines break where a
+    process was absent. Hovering shows a crosshair, and the legend switches
+    to the values at that moment. The legend names each line (with a
+    subtree's member count, or "exited") and removes it with ×. Drag the
+    divider above the panel to resize it;
   - in the Recording view, a replay bar: play/pause, 1× to 256× speed, a
     timeline `Slider` that seeks on release, and start, position and end
     times (UTC).
@@ -298,14 +321,19 @@ agent or the monitor was offline) are skipped rather than waited out.
   | Ctrl+1, Ctrl+2 | Live view, Recording view |
   | Ctrl+↓, Ctrl+↑ | Next / previous host |
   | Ctrl+F or `/` | Filter processes (Enter returns, Esc clears) |
+  | ↑/↓ or `j`/`k`, PgUp/PgDn | Move the row cursor |
   | `t`, `e`, `c` | Tree view, expand all, collapse all |
+  | `g`, Ctrl+G | Graph the cursor row (collapsed: its subtree), clear the graph |
+  | `1`–`4`, `w`, `v` | Graph %CPU / RSS / %MEM / threads, cycle window, show/hide |
   | Shift+P / M / N / U / C | Sort by CPU / memory / PID / user / command (again flips) |
   | Space, `]`, `[` | Play/pause, faster, slower |
   | ←/→, Shift+←/→, Home/End | Seek 10 s, 1 min, to start/end |
   | F1 or `?` | Shortcuts overlay |
 - **Tests:** headless UI tests (`gpui-kit` `test-support`, dev-only) press
-  keys in a real window and check the resulting state, including that
-  single-key shortcuts don't fire while the filter has focus.
+  keys and click in a real window and check the resulting state and layout:
+  shortcuts (and that single-key ones don't fire while typing in the
+  filter), the menu bar's position, picking rows, and the graph panel's
+  placement, divider drag, legend and subtree values.
 - **Opening recordings:** Open recording…, or
   `sysmon-ui --replay <data_dir>/<host>/…` (which doesn't listen).
 
@@ -379,17 +407,19 @@ Implemented, and covered by tests where noted:
 - `store`: segment writer and reader, torn-tail recovery, sparse index with
   seek and rebuild, catalog, retention (tested).
 - `model`: CPU, per-process, net and disk rates, rows carried over lost
-  chunks, process tree building (tested); playback clock (tested); multi-host merged replay with
+  chunks, process tree building, per-process history and graph series
+  including subtree totals (tested); playback clock (tested); multi-host merged replay with
   seek, and the paced replay engine (tested); `replay` example.
-- `ui`: everything in section 6. Keyboard handling has headless UI tests;
-  the rest is checked by running it.
+- `ui`: everything in section 6. Keyboard, selection, the menu bar and the
+  graph panel have headless UI tests; drawing itself is checked by running
+  it.
 
 Possible next steps:
 
-1. More UI tests: clicks, the replay bar, and accessibility snapshots of the
-   process table.
-2. Per-process sparklines and a details pane (per-interface and per-disk
-   rates are already in the model).
+1. More UI tests: the replay bar, and accessibility snapshots of the process
+   table.
+2. A details pane for a process or interface (per-interface and per-disk
+   rates are already in the model), and graphs of those rates.
 3. Thumbnails on the timeline (CPU across the whole recording, from the
    index or a summary file), and multiple selected hosts side by side.
 4. Agent: per-process I/O (`/proc/[pid]/io`, needs privileges), cgroup and
