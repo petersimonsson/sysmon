@@ -8,9 +8,11 @@ use sysmon_ingest::Event;
 
 use crate::{PlaybackClock, ReplaySource};
 
-/// After a seek, start reading this far before the target so the models
-/// have the previous samples they need for rates.
-const SEEK_LEAD_NS: u64 = 3_000_000_000;
+/// After a seek, start reading this far before the target, delivering that
+/// stretch at once. The models then have the samples they need for rates,
+/// and the process graphs show their full window straight away instead of
+/// filling up from empty.
+pub const SEEK_LEAD_NS: u64 = crate::host::HISTORY_WINDOW_S * 1_000_000_000;
 /// Longest the engine sleeps, so controls are handled promptly.
 const MAX_SLEEP: Duration = Duration::from_millis(100);
 /// Gaps in the recording longer than this are skipped instead of waited out.

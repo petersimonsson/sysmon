@@ -5,8 +5,10 @@ use crate::series::{self, Metric, ProcFrame, ProcPoint, SeriesTarget};
 use sysmon_ingest::Event;
 use sysmon_proto::{CpuCounters, Frame, HostInfo, MemInfo, ProcKey, ProcMeta, SystemSample};
 
-/// Number of history points kept for sparklines (10 minutes at 1 Hz).
+/// Number of history points kept for sparklines and process graphs.
 pub const HISTORY_LEN: usize = 600;
+/// The time [`HISTORY_LEN`] covers at the default 1 Hz sampling.
+pub const HISTORY_WINDOW_S: u64 = 600;
 const SECTOR_BYTES: f64 = 512.0;
 
 /// Everything the UI shows for one host.

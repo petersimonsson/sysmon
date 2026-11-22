@@ -9,7 +9,9 @@ mod source;
 pub mod tree;
 
 pub use clock::PlaybackClock;
-pub use host::{DiskRate, HISTORY_LEN, HistoryPoint, HostModel, NetRate, ProcRow, Snapshot};
+pub use host::{
+    DiskRate, HISTORY_LEN, HISTORY_WINDOW_S, HistoryPoint, HostModel, NetRate, ProcRow, Snapshot,
+};
 pub use replay::{Control, Feed, ReplayHandle, ReplayStatus};
 pub use series::{Metric, SeriesTarget};
 pub use source::{DataSource, LiveSource, ReplaySource, SourceKind};
@@ -109,8 +111,10 @@ mod tests {
 
         handle.send(Control::Seek(base + 50 * SEC));
         assert!(matches!(handle.feed.recv().unwrap(), Feed::Reset));
-        // Paused at 50 s, the lead-in up to the target is still delivered.
-        assert!(frames_within(Duration::from_millis(300)) >= 4);
+        // Paused at 50 s, the whole lead-in up to the target is delivered at
+        // once: everything from the start, both hosts (51 samples each).
+        let lead_in = frames_within(Duration::from_millis(300));
+        assert!((100..=104).contains(&lead_in), "{lead_in}");
         let st = handle.status();
         assert_eq!(st.position_ns, base + 50 * SEC);
 
