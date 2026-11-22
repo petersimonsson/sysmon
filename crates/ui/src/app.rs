@@ -125,6 +125,8 @@ pub struct AppState {
     filter: Entity<InputState>,
     timeline: Entity<SliderState>,
     scrubbing: bool,
+    /// The recording being opened, if any.
+    opening: Option<String>,
     /// The replay status last shown; the ticker redraws only when it changes.
     shown_status: Option<ReplayStatus>,
     scroll: UniformListScrollHandle,
@@ -263,6 +265,7 @@ impl AppState {
             filter,
             timeline,
             scrubbing: false,
+            opening: None,
             shown_status: None,
             scroll: UniformListScrollHandle::new(),
             error: None,
@@ -383,7 +386,6 @@ impl AppState {
             multiple: false,
             prompt: Some("Open recording".into()),
         });
-        let speed = self.status().map_or(1.0, |s| s.speed);
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
                 return;
@@ -391,14 +393,34 @@ impl AppState {
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
+            let _ = this.update(cx, |this, cx| this.open_path(path, cx));
+        })
+        .detach();
+    }
+
+    /// Open the recording at `path` in the background: opening reads every
+    /// segment's index (rebuilding stale ones by scanning), which can take a
+    /// while for a big data directory.
+    fn open_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let speed = self.status().map_or(1.0, |s| s.speed);
+        let label = path.display().to_string();
+        self.opening = Some(label.clone());
+        self.error = None;
+        cx.notify();
+        let opened = cx.background_spawn(async move { crate::pipeline::open_replay(&path, speed) });
+        cx.spawn(async move |this, cx| {
+            let result = opened.await;
             let _ = this.update(cx, |this, cx| {
-                match crate::pipeline::open_replay(&path, speed) {
-                    Ok(handle) => this.start_session(handle, path.display().to_string(), cx),
-                    Err(e) => {
-                        this.error = Some(format!("{e:#}"));
-                        cx.notify();
-                    }
+                // Only the latest request counts.
+                if this.opening.as_ref() != Some(&label) {
+                    return;
                 }
+                this.opening = None;
+                match result {
+                    Ok(handle) => this.start_session(handle, label, cx),
+                    Err(e) => this.error = Some(format!("{e:#}")),
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -501,6 +523,14 @@ impl AppState {
                 );
         }
         bar.child(div().flex_1())
+            .when_some(self.opening.clone(), |b, path| {
+                b.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(format!("Opening {path}…")),
+                )
+            })
             .when_some(self.error.clone(), |b, e| {
                 b.child(div().text_xs().text_color(theme.danger).child(e))
                     .child(
@@ -3353,5 +3383,45 @@ mod tests {
                 .collect();
             assert_eq!(tids, [12, 11, 10]);
         });
+    }
+
+    #[gpui_kit::test]
+    fn recordings_open_in_the_background(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("sysmon-ui-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut rec = sysmon_store::Recorder::new(&dir);
+        let now = sysmon_ingest::unix_now_ns();
+        for seq in 0..3u32 {
+            let system = sysmon_proto::SystemSample {
+                ts_unix_ns: now + seq as u64 * 1_000_000_000,
+                ..Default::default()
+            };
+            for d in sysmon_proto::encode_sample(1, 2, seq, &system, &[], &[]).unwrap() {
+                rec.append(1, 2, now + seq as u64 * 1_000_000_000, &d)
+                    .unwrap();
+            }
+        }
+        rec.flush().unwrap();
+        drop(rec);
+
+        let (_window, app) = open(cx);
+        app.update(cx, |app, cx| app.open_path(dir.clone(), cx));
+        // Returned at once, with the work still to do.
+        app.read_with(cx, |app, _| {
+            assert!(app.opening.is_some());
+            assert!(app.replay.is_none());
+        });
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(app.opening.is_none());
+            assert!(app.replay.is_some(), "error: {:?}", app.error);
+            assert_eq!(app.view, View::Replay);
+        });
+
+        // A failure is reported, not fatal.
+        app.update(cx, |app, cx| app.open_path(dir.join("nothing-here"), cx));
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| assert!(app.error.is_some()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
