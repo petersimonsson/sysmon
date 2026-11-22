@@ -108,9 +108,21 @@ The host shows up in the sidebar within a second.
    (measured with ~1700 threads: 17 ms and 26 KB per sample), so it's off by
    default.
 
+   Add `--logs` to send the machine's journal lines too (warning and above;
+   change with `--log-priority`, e.g. `err` or `info`, and limit to units
+   with `--log-unit`, which can be repeated). The agent runs `journalctl`, so
+   it must be in the `systemd-journal` group to see system logs. Logs often
+   hold sensitive details, so `--logs` needs `--key-file` unless you add
+   `--logs-unencrypted`. Over 200 lines or 256 KiB per second, lines are
+   dropped and the UI says how many. Use `--log-cursor-file` to keep the
+   journal position across restarts (the systemd unit does this for you), so
+   a restarted agent sends what was logged while it was down.
+
    **Upgrading:** update the monitor before the agents. A newer monitor reads
    data from older agents (and old recordings), but an older monitor rejects
-   a newer agent's data.
+   a newer agent's data. The exception is logs: a monitor from before them
+   still reads everything else from an agent sending `--logs`, and only
+   rejects the log datagrams.
 
 ### Running the agent as a service
 
@@ -118,7 +130,9 @@ The host shows up in the sidebar within a second.
 comment at the top of the file has the install steps. In short: copy the
 binary to `/usr/local/bin`, the key to `/etc/sysmon/key`, put
 `SYSMON_TARGET=monitor.example:9876` in `/etc/default/sysmon-agent`, then
-`systemctl enable --now sysmon-agent`.
+`systemctl enable --now sysmon-agent`. To send journal lines, switch to the
+commented-out `--logs` line in the unit; it already has the journal group
+and a state directory for the journal position.
 
 ### Desktop entry
 
@@ -188,6 +202,17 @@ application menu: copy it to `~/.local/share/applications/` (with
     10 minutes) at the top of the panel.
   - Hover over the chart to read the values at that moment.
   - Drag the divider above the panel to resize it.
+- **Logs:** press `L`, or choose the **Logs** tab in the bottom panel, to see
+  the host's journal lines (from agents started with `--logs`): time,
+  priority (errors red, warnings orange), unit, PID and message, with the
+  full message on hover.
+  - The list keeps the newest line in view; scroll up to stop that, and
+    **Jump to latest** to start again.
+  - Filter by text, show **All**, **Warnings** or **Errors**, or click a
+    unit to see only its lines (click its chip in the toolbar to undo).
+  - Click a PID to find the process in the table. Click a line to select it:
+    its time is marked on the graph.
+  - Lines lost on the network, or dropped by the agent, are shown as such.
 - **Times** are shown in your local time zone.
 - **Help → About sysmon** shows the version, sysmon's licenses, and the
   license of every third-party crate built into the UI, with the full texts.
@@ -210,6 +235,11 @@ directory, one host or boot directory, or a single `.seg` file. Use the
 replay bar at the bottom to play, pause, change speed and seek. Recordings
 from several hosts play back together, in the order they were received.
 
+Logs are recorded too. Red ticks under the replay bar show where the
+selected host logged errors. In the Logs tab, clicking a line jumps there,
+so the graphs and process table show that moment; after a jump, the list
+shows the 10 minutes leading up to it.
+
 ### Keyboard
 
 Press **F1** or **?** in the app for the full list. The most useful ones:
@@ -219,6 +249,7 @@ Press **F1** or **?** in the app for the full list. The most useful ones:
 | Ctrl+O, Ctrl+Q | Open recording, quit |
 | Ctrl+1, Ctrl+2 | Live view, Recording view |
 | Ctrl+↑ / Ctrl+↓ | Previous / next host |
+| `l` | Logs, or back to the graph |
 | Ctrl+F or `/` | Filter (Enter goes back to the list, Esc clears) |
 | ↑/↓ or `j`/`k` | Move the row cursor |
 | `g`, Ctrl+G | Graph the cursor row, clear the graph |
@@ -243,6 +274,8 @@ cargo run -p sysmon-ingest --example dump -- 0.0.0.0:9876 sysmon.key
 # Print a recording sample by sample, or its last sample as a process tree
 cargo run -p sysmon-model --example replay -- ~/.local/share/sysmon
 cargo run -p sysmon-model --example replay -- ~/.local/share/sysmon --tree
+# ... or the journal lines it holds, and where errors are
+cargo run -p sysmon-model --example replay -- ~/.local/share/sysmon --logs
 ```
 
 ## Development
