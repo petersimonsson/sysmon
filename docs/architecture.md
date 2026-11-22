@@ -39,11 +39,14 @@ Everything is Rust, organised as one Cargo workspace.
 3. **The disk format is the wire format.** The recorder stores received
    datagrams verbatim, plus a receive timestamp. Replay feeds them through the
    same decoder and assembler as live data.
-4. **The UI doesn't know where its data comes from.** Live and replay both
-   implement one `DataSource` trait that yields `Frame`s.
+4. **Live and replay end in the same models.** Both produce the same ingest
+   `Event`s, applied to `HostModel`s the same way. Live events arrive on the
+   ingest channel; replay ones on the replay engine's `Feed` channel, which
+   adds a `Reset` on seek (section 5).
 5. **Only `sysmon-ui` depends on gpui.** Protocol, ingest, storage and
    modelling are plain libraries that can be tested headless. A headless
-   recorder is just `ingest` + `store`.
+   recorder would be just `ingest` + `store`; none is built yet (the
+   recorder runs inside `sysmon-ui`).
 
 ## Workspace layout
 
@@ -53,20 +56,22 @@ Everything is Rust, organised as one Cargo workspace.
 | `crates/agent` (`sysmon-agent`) | bin | Collect from `/proc`, encode, send over UDP |
 | `crates/ingest` (`sysmon-ingest`) | lib | UDP receive thread, chunk reassembly, fan-out |
 | `crates/store` (`sysmon-store`) | lib | Segment files: append-only writer, reader, index, retention |
-| `crates/model` (`sysmon-model`) | lib | Rate computation, history ring buffers, `DataSource` (live and replay) |
+| `crates/model` (`sysmon-model`) | lib | Rates, history, process trees, graph series, `ReplaySource` and the replay engine |
 | `crates/ui` (`sysmon-ui`) | bin | gpui-kit application: host list, header graphs, process table, timeline |
 | `crates/notices` (`sysmon-notices`) | lib | Embedded license notices: data types, `embed!`, the full notices document |
 | `crates/notices-build` (`sysmon-notices-build`) | lib | Build-script side: collects a binary's notices with `cargo metadata` |
 
-Dependency graph (arrows point at dependencies):
+Dependencies between the workspace crates (normal dependencies; each
+binary's `build.rs` also uses `notices-build`, which depends on `notices`):
 
-```
-agent ──► proto ◄── ingest ◄──┐
-            ▲  ▲              ├── ui
-          store └── model ◄───┘
-            ▲         │
-            └─────────┘   (model's ReplaySource reads the store)
-```
+| Crate | Depends on |
+|---|---|
+| `proto`, `store`, `notices` | (none) |
+| `ingest` | `proto` |
+| `model` | `proto`, `ingest`, `store` (its `ReplaySource` reads recordings) |
+| `agent` | `proto`, `notices` |
+| `ui` | `proto`, `ingest`, `store`, `model`, `notices` |
+| `notices-build` | `notices` |
 
 ## 1. `sysmon-proto`: wire protocol
 
@@ -160,9 +165,10 @@ pub struct Frame {
 
 ## 2. `sysmon-agent`: collector
 
-- One thread and no async runtime:
-  `loop { collect(); encode(); send(); sleep_until(next_tick) }` with a
-  blocking `std::net::UdpSocket`.
+- No async runtime. The main thread runs the sampling loop,
+  `loop { collect(); encode(); send(); sleep_until(next_tick) }`, with a
+  blocking `std::net::UdpSocket`. A second thread does user-name lookups
+  (below).
 - It reads `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`, `/proc/[pid]/stat`,
   `/proc/[pid]/statm`, `/proc/net/dev` and `/proc/diskstats` into one reused
   buffer. `statm` is read only for SHR (its third field). That second read
@@ -187,10 +193,11 @@ pub struct Frame {
   one, which is the process row. Measured with ~470 processes and ~1700
   threads: 6.8 → 17 ms per sample, and 10.1 → 26.5 KB per sample
   compressed.
-- Deployment: a static musl build
+- Deployment: the sandboxed systemd unit in
+  `crates/agent/dist/sysmon-agent.service`, and a static musl build
   (`rustup target add x86_64-unknown-linux-musl`, then
-  `cargo build --release -p sysmon-agent --target x86_64-unknown-linux-musl`)
-  plus the sandboxed systemd unit in `crates/agent/dist/sysmon-agent.service`.
+  `cargo build --release -p sysmon-agent --target x86_64-unknown-linux-musl`).
+  The musl build hasn't been tried yet.
 
 ## 3. `sysmon-ingest`: receiver
 
@@ -201,8 +208,8 @@ pub struct Frame {
   - the **assembler**, which decodes the datagram.
 - The `Assembler` keys partial samples by `(host_id, seq)`. It emits a `Frame`
   as soon as all `chunks` have arrived, or with `complete = false` once a
-  newer `seq` arrives or the sample times out (~1.5× the interval). A
-  `boot_id` change resets that host's state.
+  newer `seq` arrives or the sample times out (a fixed 1.5 s, not tied to
+  the host's interval). A `boot_id` change resets that host's state.
 - **Agent restarts:** a restarted agent has the same host and boot but numbers
   its samples from 0 again. The assembler treats a sample 0 seen after later
   ones, or a sample more than 64 behind the newest, as a restart and resets
@@ -264,19 +271,17 @@ record := recv_ts_ns:u64le  len:u16le  datagram[len]
 
 ## 5. `sysmon-model`: state and data sources
 
-```rust
-pub trait DataSource: Send {
-    fn next_event(&mut self) -> Option<Event>;   // Frame | HostInfo | ProcMeta
-    fn seek(&mut self, _ts_unix_ns: u64) {}
-    fn kind(&self) -> SourceKind;                // Live | Replay
-}
-```
+Events (`sysmon_ingest::Event`: `Frame`, `HostInfo`, `ProcMeta`, `Users`)
+come from one of two places:
 
-- `LiveSource` wraps the ingest `Receiver<Event>`.
-- `ReplaySource` opens every segment under a path, groups them into one
-  stream per (host, boot), and merges the streams by **receive time**, which
-  is the monitor's single clock. It feeds records through an `Assembler`
-  exactly as live traffic is fed, and seeks each stream through the index.
+- **Live:** the ingest thread's `Receiver<Event>`, drained by the UI.
+- **Replay:** `ReplaySource` opens every segment under a path, groups them
+  into one stream per (host, boot), and merges the streams by **receive
+  time**, which is the monitor's single clock. It feeds records through an
+  `Assembler` exactly as live traffic is fed, and seeks each stream through
+  the index (`seek_to`). Its `next_event()` reads as fast as possible, for
+  headless tools and tests; the UI plays recordings through the engine
+  below.
 
 ### Replay engine
 
@@ -332,7 +337,7 @@ agent or the monitor was offline) are skipped rather than waited out.
   queue, and calls `cx.notify()` once per batch. A 200 ms ticker moves the
   timeline slider and position while replaying.
 - **Views** (built from `gpui_kit::component`):
-  - a menu bar (File, View, Processes, Playback, Help). On Linux and
+  - a menu bar (File, View, Processes, Graph, Playback, Help). On Linux and
     Windows it's gpui-kit's in-window `AppMenuBar`; on macOS it's the native
     menu bar (`cx.set_menus`). Menu items show their shortcuts;
   - a toolbar with Live / Recording and Open recording… (the system file
@@ -395,9 +400,10 @@ agent or the monitor was offline) are skipped rather than waited out.
   metadata` merges features across the workspace, so a feature flag
   wouldn't keep it out of the list). It builds the list with
   `cargo metadata`:
-  - It follows only normal dependencies from `sysmon-ui`, skipping
-    proc-macro crates and everything under them, since none of that is
-    linked in.
+  - It follows only normal dependencies from the binary's own package,
+    skipping proc-macro crates and everything under them, since none of
+    that is linked in. Workspace crates are covered by sysmon's own license
+    and left out.
   - It collects files named LICENSE*, LICENCE*, COPYING*, NOTICE*,
     COPYRIGHT* or UNLICENSE* anywhere in each package (which picks up
     bundled code, such as zstd's C sources or the Lucide icons).
@@ -446,9 +452,10 @@ agent or the monitor was offline) are skipped rather than waited out.
 | Thread | Work |
 |---|---|
 | gpui main | Rendering and `HostModel` updates (cheap: the difference between two frames) |
-| net | `recv_from`, decode, assemble |
-| store | Compress, append and rotate segments; apply retention |
-| replay (per open recording) | Read and decompress blocks; pace events by the playback clock |
+| `sysmon-ingest` | `recv_from`, open (decrypt), decode, assemble |
+| `sysmon-recorder` | Compress, append and rotate segments; apply retention; write out on stop |
+| `sysmon-replay` (per open recording) | Read and decompress blocks; pace events by the playback clock |
+| `sysmon-signals` | On SIGINT/SIGTERM/SIGHUP, stop the recorder and exit |
 
 ## Security
 
@@ -469,8 +476,13 @@ or read them. There are two options, which can be combined:
      with it. Without a key, it rejects encrypted datagrams.
    - Datagrams are decrypted before recording, so recordings don't need the
      key. Keep the data directory as private as the network.
-   - Replayed datagrams that are still authentic are mostly harmless: the
-     assembler drops sequence numbers it has already emitted for that boot.
+   - Replayed datagrams that are still authentic are mostly harmless. The
+     assembler drops sequence numbers slightly behind the newest. A replayed
+     sample 0, or one far behind, looks like an agent restart and resets
+     that host's sequence tracking, but `HostModel` then ignores it, since
+     it isn't newer than the last sample. At worst one sample shows as
+     incomplete. Replayed datagrams are still written to the recording;
+     replay drops them the same way.
 
 Compression (`--compress`) runs before encryption and is applied only when it
 shrinks the payload. On a host with about 490 processes, one tick was
@@ -500,23 +512,29 @@ cargo run -p sysmon-model --example replay -- <path> [--tree]  # print a recordi
 
 Implemented, and covered by tests where noted:
 
-- `proto`: types, framing, chunking of samples, `ProcMeta` and `Users`; zstd
-  compression; XChaCha20-Poly1305 sealing, including tamper, wrong-key and
-  plaintext rejection (tested).
-- `agent`: collection from `/proc` with a reused buffer; HostInfo, ProcMeta
-  and Users scheduling; compression, encryption, key generation; systemd
-  unit (parser tested).
+- `proto`: protocol v3 with v1 and v2 still decodable; types, framing,
+  chunking of samples, threads, `ProcMeta` and `Users`; zstd compression;
+  XChaCha20-Poly1305 sealing, including tamper, wrong-key and plaintext
+  rejection (tested).
+- `agent`: collection from `/proc` with a reused buffer, including VIRT,
+  SHR, kernel threads and (with `--threads`) threads; user names through
+  NSS on a background thread; HostInfo, ProcMeta and Users scheduling;
+  compression, encryption, key generation; `--licenses`; systemd unit
+  (parsers and lookups tested).
 - `ingest`: authenticated receive thread and assembler: completion, loss,
-  timeout and reboot handling (tested); `dump` example.
+  timeout, reboot and agent-restart handling (tested); `dump` example.
 - `store`: segment writer and reader, torn-tail recovery, sparse index with
   seek and rebuild, catalog, retention (tested).
 - `model`: CPU, per-process, net and disk rates, rows carried over lost
   chunks, process tree building, per-process history and graph series
   including subtree totals (tested); playback clock (tested); multi-host merged replay with
   seek, and the paced replay engine (tested); `replay` example.
-- `ui`: everything in section 6. Keyboard, selection, the menu bar and the
-  graph panel have headless UI tests; drawing itself is checked by running
-  it.
+- `ui`: everything in section 6, plus writing out the recording on stop
+  (tested). Keyboard, selection, the menu bar, the graph panel, kernel
+  threads and threads, the USER column and shortened text, and the About
+  dialog have headless UI tests; drawing itself is checked by running it.
+- `notices`, `notices-build`: license notices for both binaries (tested).
+- Not done yet: a headless recorder binary, and trying the musl build.
 
 Possible next steps:
 
@@ -540,4 +558,6 @@ tools keep working).
   parent change.
 - `target/` and `data/` are ignored so build output and recordings never end
   up in a snapshot.
-- To publish, run `jj bookmark set main -r @-` and then `jj git push`.
+- The repository has no remote yet. To publish, add one
+  (`jj git remote add origin <url>`), then run `jj bookmark set main -r @-`
+  and `jj git push`.
