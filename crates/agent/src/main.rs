@@ -2,13 +2,14 @@
 //! monitors over UDP.
 
 mod collect;
+mod send;
 mod users;
 
 /// License notices of everything linked into this binary (see build.rs).
 static NOTICES: sysmon_notices::Notices = sysmon_notices::embed!();
 
 use std::collections::{HashMap, HashSet};
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -75,7 +76,7 @@ fn main() -> anyhow::Result<()> {
     let sealer = Sealer::new(key.as_ref(), args.compress);
 
     let targets = resolve(&args.targets)?;
-    let socket = UdpSocket::bind(("0.0.0.0", 0)).context("binding UDP socket")?;
+    let sender = send::Sender::new(&targets)?;
 
     let host_id = collect::host_id();
     let boot_id = collect::boot_id();
@@ -154,7 +155,7 @@ fn main() -> anyhow::Result<()> {
         }
         for target in &targets {
             for d in &datagrams {
-                if let Err(e) = socket.send_to(d, target) {
+                if let Err(e) = sender.send_to(d, *target) {
                     tracing::warn!(%target, error = %e, "send failed");
                     break;
                 }
