@@ -142,6 +142,7 @@ fn follow(config: Config, shared: Arc<Mutex<Shared>>) {
             // First run: only what's logged from now on.
             None => cmd.arg("--lines=0"),
         };
+        stop_with_us(&mut cmd);
         let started = cmd.stdout(Stdio::piped()).stdin(Stdio::null()).spawn();
         let mut child = match started {
             Ok(c) => c,
@@ -177,6 +178,28 @@ fn follow(config: Config, shared: Arc<Mutex<Shared>>) {
             shared.lock().unwrap().cursor = None;
         }
         std::thread::sleep(RESTART_AFTER);
+    }
+}
+
+/// Have the kernel stop the child when this thread (the journal reader,
+/// which lives as long as the agent) goes. Otherwise a journalctl left
+/// behind by an agent stopped outside systemd kept running until its next
+/// matching line failed to write.
+fn stop_with_us(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: getpid is async-signal-safe and called before forking.
+    let parent = unsafe { libc::getpid() };
+    // SAFETY: between fork and exec only async-signal-safe calls are made
+    // (prctl, getppid, raise).
+    unsafe {
+        cmd.pre_exec(move || {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong);
+            // The agent may already have gone before the line above.
+            if libc::getppid() != parent {
+                libc::raise(libc::SIGTERM);
+            }
+            Ok(())
+        });
     }
 }
 
