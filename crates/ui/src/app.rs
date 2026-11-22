@@ -16,18 +16,24 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use sysmon_ingest::Event;
 use sysmon_model::{
-    Control, Feed, HISTORY_LEN, HostModel, ProcRow, ReplayHandle, ReplayStatus, SeriesTarget,
-    TreeLine,
+    Control, Feed, HISTORY_LEN, HostModel, Metric, ProcRow, ReplayHandle, ReplayStatus,
+    SeriesTarget, TreeLine,
 };
 use sysmon_proto::ProcKey;
 
 use crate::actions::{self, *};
 use crate::format;
+use crate::graph;
 use crate::selection::{self, Selection};
 use crate::widgets::{bar, sparkline};
 
 const ROW_HEIGHT: f32 = 20.;
 const MENU_BAR_HEIGHT: f32 = 30.;
+/// Initial height of the graph panel below the process list.
+const GRAPH_HEIGHT: f32 = 260.;
+/// Smallest graph panel, and room always left for the rest of the window.
+const GRAPH_MIN: f32 = 140.;
+const GRAPH_MIN_LIST: f32 = 300.;
 /// Slider resolution: positions are mapped onto 0..TIMELINE_STEPS.
 const TIMELINE_STEPS: f32 = 10_000.;
 const SPEEDS: [f64; 5] = [1., 4., 16., 64., 256.];
@@ -80,6 +86,19 @@ pub struct AppState {
     selections: HashMap<(View, u64), Selection>,
     /// The highlighted row, moved with ↑/↓ and toggled into the graph with G.
     cursor: Option<ProcKey>,
+    graph_metric: Metric,
+    graph_window_s: u64,
+    graph_visible: bool,
+    /// Mouse position over the chart, as a fraction of its width.
+    graph_hover: Option<f32>,
+    graph_bounds: graph::ChartBounds,
+    /// Last known command of each graphed process, so the legend can still
+    /// name processes that have exited.
+    graph_names: HashMap<ProcKey, String>,
+    /// Height of the graph panel; drag the divider above it to change it.
+    graph_height: Pixels,
+    /// While dragging the divider: pointer y and panel height at the start.
+    graph_drag: Option<(Pixels, Pixels)>,
     filter: Entity<InputState>,
     timeline: Entity<SliderState>,
     scrubbing: bool,
@@ -200,6 +219,15 @@ impl AppState {
             collapsed: HashSet::new(),
             selections: HashMap::new(),
             cursor: None,
+            graph_metric: Metric::Cpu,
+            graph_window_s: graph::WINDOWS_S[2],
+            graph_visible: true,
+            graph_hover: None,
+            graph_bounds: Default::default(),
+
+            graph_names: HashMap::new(),
+            graph_height: px(GRAPH_HEIGHT),
+            graph_drag: None,
             filter,
             timeline,
             scrubbing: false,
@@ -965,6 +993,286 @@ impl AppState {
         }
     }
 
+    fn set_metric(&mut self, metric: Metric, cx: &mut Context<Self>) {
+        self.graph_metric = metric;
+        self.graph_visible = true;
+        cx.notify();
+    }
+
+    fn graph_shown(&self) -> bool {
+        self.graph_visible && self.selection().is_some_and(|s| !s.is_empty())
+    }
+
+    /// Remember the command of each graphed process while it's still running.
+    fn refresh_graph_names(&mut self) {
+        let Some(host) = self.selected.and_then(|id| self.hosts().get(&id)) else {
+            return;
+        };
+        let Some(sel) = self.selection() else {
+            return;
+        };
+        let names: Vec<(ProcKey, String)> = sel
+            .iter()
+            .filter_map(|p| {
+                let key = p.target.key();
+                let row = host.snapshot.procs.iter().find(|r| r.key == key)?;
+                Some((key, row.comm.clone()))
+            })
+            .collect();
+        self.graph_names.extend(names);
+    }
+
+    fn render_graph(&self, host: &HostModel, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        let metric = self.graph_metric;
+        let picks: Vec<selection::Picked> = self
+            .selection()
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default();
+        let end = host.proc_history.back().map_or(0, |f| f.ts_unix_ns);
+        let start = end.saturating_sub(self.graph_window_s * 1_000_000_000);
+        let lines: Vec<graph::Line> = picks
+            .iter()
+            .map(|p| graph::Line {
+                color: selection::color(p.slot),
+                points: host.series(p.target, metric, start),
+            })
+            .collect();
+        let y_max = graph::y_max(metric, &lines);
+        let hover_ns = self
+            .graph_hover
+            .map(|f| start + ((end - start) as f64 * f as f64) as u64);
+
+        // Toolbar: metric, window, clear, hide.
+        let mut toolbar = div().flex().items_center().gap_1().px_2().py_1().child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .mr_1()
+                .child("Graph"),
+        );
+        for (i, m) in Metric::ALL.into_iter().enumerate() {
+            toolbar = toolbar.child(
+                Button::new(("metric", i))
+                    .label(m.label())
+                    .small()
+                    .when(m == metric, |b| b.primary())
+                    .when(m != metric, |b| b.ghost())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_metric(m, cx))),
+            );
+        }
+        toolbar = toolbar.child(div().w(px(12.)));
+        for (i, w) in graph::WINDOWS_S.into_iter().enumerate() {
+            toolbar = toolbar.child(
+                Button::new(("window", i))
+                    .label(format!("{} min", w / 60))
+                    .small()
+                    .when(w == self.graph_window_s, |b| b.primary())
+                    .when(w != self.graph_window_s, |b| b.ghost())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.graph_window_s = w;
+                        cx.notify();
+                    })),
+            );
+        }
+        toolbar = toolbar
+            .child(div().flex_1())
+            .child(
+                Button::new("graph-clear")
+                    .label("Clear")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(s) = this.selection_mut() {
+                            s.clear();
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("graph-hide")
+                    .label("Hide")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.graph_visible = false;
+                        cx.notify();
+                    })),
+            );
+
+        // Chart with y labels on the left and times underneath.
+        let y_labels = div()
+            .flex()
+            .flex_col()
+            .justify_between()
+            .w(px(64.))
+            .h_full()
+            .pr_1()
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .items_end()
+            .child(graph::format_value(metric, y_max))
+            .child(graph::format_value(metric, y_max / 2.0))
+            .child(graph::format_value(metric, 0.0));
+        let plot = div()
+            .id("graph-plot")
+            .test_support()
+            .flex_1()
+            .h_full()
+            .border_1()
+            .border_color(theme.border)
+            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
+                if let Some(b) = this.graph_bounds.get() {
+                    let f = f32::from(ev.position.x - b.origin.x) / f32::from(b.size.width);
+                    this.graph_hover = Some(f.clamp(0.0, 1.0));
+                    cx.notify();
+                }
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.graph_hover = None;
+                    cx.notify();
+                }
+            }))
+            .child(graph::chart(
+                graph::ChartSpec {
+                    lines: lines
+                        .iter()
+                        .map(|l| graph::Line {
+                            color: l.color,
+                            points: l.points.clone(),
+                        })
+                        .collect(),
+                    start_ns: start,
+                    end_ns: end,
+                    y_max,
+                    hover_ns,
+                    grid: theme.border,
+                    crosshair: theme.muted_foreground,
+                },
+                self.graph_bounds.clone(),
+            ));
+        let x_labels = div()
+            .flex()
+            .justify_between()
+            .pl(px(64.))
+            .text_xs()
+            .text_color(theme.muted_foreground)
+            .child(format::time_utc(start))
+            .child(hover_ns.map(format::time_utc).unwrap_or_default())
+            .child(format::time_utc(end));
+        let chart = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .gap_1()
+            .child(div().flex().flex_1().min_h_0().child(y_labels).child(plot))
+            .child(x_labels);
+
+        // Legend: one entry per line with its value now (or at the crosshair).
+        let mut legend = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w(px(300.))
+            .pl_3()
+            .text_xs()
+            .child(
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child(match hover_ns {
+                        Some(t) => format!("{} at {}", metric.label(), format::time_utc(t)),
+                        None => format!("{} now", metric.label()),
+                    }),
+            );
+        for (p, line) in picks.iter().zip(&lines) {
+            let key = p.target.key();
+            let name = self
+                .graph_names
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| "?".into());
+            let latest = host.latest(p.target, metric);
+            let label = match p.target {
+                SeriesTarget::Process(_) => format!("{} {name}", key.pid),
+                SeriesTarget::Subtree(_) => {
+                    let n = latest.map_or(0, |(_, n)| n);
+                    format!("{} {name} + subtree ({n})", key.pid)
+                }
+            };
+            let value = match hover_ns {
+                Some(t) => graph::value_at(&line.points, t),
+                None => latest.map(|(v, _)| v),
+            };
+            let value = match (value, latest) {
+                (Some(v), _) => graph::format_value(metric, v),
+                (None, None) => "exited".into(),
+                (None, Some(_)) => "–".into(),
+            };
+            legend = legend.child(
+                div()
+                    .id(("legend", p.slot))
+                    .test_support()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_none().size(px(10.)).rounded_sm().bg(line.color))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(theme.mono_font_family.clone())
+                            .child(value),
+                    )
+                    .child(
+                        div()
+                            .id(("legend-remove", p.slot))
+                            .test_support()
+                            .flex_none()
+                            .px_1()
+                            .cursor_pointer()
+                            .text_color(theme.muted_foreground)
+                            .child("×")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(s) = this.selection_mut() {
+                                    s.remove(key);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+
+        div()
+            .id("graph-panel")
+            .test_support()
+            .flex()
+            .flex_col()
+            .size_full()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(toolbar)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .px_2()
+                    .pb_2()
+                    .child(chart)
+                    .child(legend),
+            )
+    }
+
     /// Sort by `key`, or flip the direction if already sorted by it.
     fn sort_by(&mut self, key: SortKey, cx: &mut Context<Self>) {
         self.sort = if self.sort.0 == key {
@@ -1087,6 +1395,24 @@ impl AppState {
                 if let Some(s) = this.selection_mut() {
                     s.clear();
                 }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleGraphPanel, _, cx| {
+                this.graph_visible = !this.graph_visible;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GraphCpu, _, cx| this.set_metric(Metric::Cpu, cx)))
+            .on_action(cx.listener(|this, _: &GraphRss, _, cx| this.set_metric(Metric::Rss, cx)))
+            .on_action(cx.listener(|this, _: &GraphMem, _, cx| this.set_metric(Metric::MemPct, cx)))
+            .on_action(
+                cx.listener(|this, _: &GraphThreads, _, cx| this.set_metric(Metric::Threads, cx)),
+            )
+            .on_action(cx.listener(|this, _: &CycleGraphWindow, _, cx| {
+                let i = graph::WINDOWS_S
+                    .iter()
+                    .position(|&w| w == this.graph_window_s)
+                    .map_or(0, |i| (i + 1) % graph::WINDOWS_S.len());
+                this.graph_window_s = graph::WINDOWS_S[i];
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &TogglePause, _, _| {
@@ -1382,20 +1708,59 @@ fn command(p: &ProcRow) -> String {
 }
 
 impl Render for AppState {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_graph_names();
+        let graph_shown = self.graph_shown();
+        // Keep the panel within the window if the window shrank.
+        let max_graph = (window.viewport_size().height - px(GRAPH_MIN_LIST)).max(px(GRAPH_MIN));
+        self.graph_height = self.graph_height.clamp(px(GRAPH_MIN), max_graph);
         let theme = cx.theme().clone();
         let toolbar = self.render_toolbar(cx);
         let sidebar = self.render_sidebar(cx);
         let timeline = self.render_timeline(cx);
 
         let main = match self.selected.and_then(|id| self.hosts().get(&id)) {
-            Some(host) => div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .child(Self::render_header(host, cx))
-                .child(self.render_procs(host, cx)),
+            Some(host) => {
+                let graph = graph_shown.then(|| self.render_graph(host, cx));
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Self::render_header(host, cx))
+                    .child(
+                        div()
+                            .id("procs-panel")
+                            .test_support()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h_0()
+                            .child(self.render_procs(host, cx)),
+                    )
+                    .when_some(graph, |d, graph| {
+                        d.child(
+                            // Divider: drag to resize the graph panel.
+                            div()
+                                .id("graph-resize")
+                                .test_support()
+                                .flex_none()
+                                .h(px(5.))
+                                .cursor_row_resize()
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .hover(|d| d.bg(theme.accent))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                                        this.graph_drag = Some((ev.position.y, this.graph_height));
+                                        cx.notify();
+                                    }),
+                                ),
+                        )
+                        .child(div().flex_none().h(self.graph_height).child(graph))
+                    })
+            }
             None => div()
                 .flex()
                 .flex_1()
@@ -1410,6 +1775,22 @@ impl Render for AppState {
 
         let shortcuts = self.show_shortcuts.then(|| self.render_shortcuts(cx));
         let root = div()
+            // Divider drags are tracked on the root so they continue when
+            // the pointer leaves the divider.
+            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
+                if let Some((y0, h0)) = this.graph_drag {
+                    this.graph_height = (h0 + (y0 - ev.position.y)).clamp(px(GRAPH_MIN), max_graph);
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    if this.graph_drag.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .key_context(actions::CONTEXT)
             .track_focus(&self.focus)
             .relative()
@@ -1540,6 +1921,11 @@ mod tests {
 
     /// Give the app one live host so the process table (and its filter) renders.
     fn add_host(app: &Entity<AppState>, cx: &mut TestAppContext) {
+        add_frame(app, cx, 0);
+    }
+
+    /// Sample `seq` of the test host, `seq` seconds in, with CPU ticks growing.
+    fn add_frame(app: &Entity<AppState>, cx: &mut TestAppContext, seq: u32) {
         app.update(cx, |app, cx| {
             // 1 ─┬─ 10 ── 11
             //    └─ 20
@@ -1548,7 +1934,7 @@ mod tests {
                 ppid,
                 starttime: 0,
                 state: b'S',
-                utime: 0,
+                utime: seq as u64 * pid as u64,
                 stime: 0,
                 rss_pages: pid as u64,
                 threads: 1,
@@ -1557,8 +1943,11 @@ mod tests {
             let frame = sysmon_proto::Frame {
                 host_id: 1,
                 boot_id: 1,
-                seq: 0,
-                system: Some(sysmon_proto::SystemSample::default()),
+                seq,
+                system: Some(sysmon_proto::SystemSample {
+                    ts_unix_ns: 1_000_000_000 * (1 + seq as u64),
+                    ..Default::default()
+                }),
                 procs: vec![
                     proc(1, 0, "init"),
                     proc(10, 1, "bash"),
@@ -1706,6 +2095,97 @@ mod tests {
                 Some((2.0, 2)),
                 "pid 10 and its child 11"
             );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn graph_panel_sits_below_the_process_list(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        for seq in 0..5 {
+            add_frame(&app, cx, seq);
+        }
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("graph-panel").is_none(),
+                "hidden until something is picked"
+            );
+        });
+        step(cx, &|window, cx| window.click(("pick", 1usize), cx));
+        step(cx, &|window, cx| window.click(("pick", 2usize), cx));
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            let procs = window.find("procs-panel").bounds();
+            let graph = window.find("graph-panel").bounds();
+            assert!(graph.origin.y >= procs.origin.y + procs.size.height - px(1.));
+            assert!((graph.size.height - px(super::GRAPH_HEIGHT)).abs() < px(8.));
+            assert!(window.try_find(("legend", 0usize)).is_some());
+            assert!(window.try_find(("legend", 1usize)).is_some());
+        });
+
+        // Dragging the divider up by 100 px makes the panel 100 px taller.
+        step(cx, &|window, cx| {
+            let handle = window.find("graph-resize").bounds().center();
+            window.drag(handle, handle - point(px(0.), px(100.)), cx);
+        });
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.graph_height, px(super::GRAPH_HEIGHT + 100.));
+            assert!(app.graph_drag.is_none(), "drag ended on mouse up");
+        });
+
+        // Metric keys and hover.
+        step(cx, &|window, cx| window.press("2", cx));
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.graph_metric, sysmon_model::Metric::Rss)
+        });
+        step(cx, &|window, cx| window.hover("graph-plot", cx));
+        app.read_with(cx, |app, _| {
+            let f = app.graph_hover.expect("hovering sets the crosshair");
+            assert!((f - 0.5).abs() < 0.05, "{f}");
+        });
+
+        // A subtree line: pid 10 and its child 11 use 10 + 11 ticks/s
+        // (clk_tck 100), so 21 % CPU.
+        step(cx, &|window, cx| {
+            window.press("1", cx);
+            window.press("shift-n", cx); // PID order: 1, 10, 11, 20
+            window.press("t", cx);
+        });
+        step(cx, &|window, cx| window.click(("twisty", 1usize), cx));
+        step(cx, &|window, cx| window.click(("pick", 1usize), cx)); // unpick 10
+        step(cx, &|window, cx| window.click(("pick", 1usize), cx)); // repick as subtree
+        app.read_with(cx, |app, _| {
+            let host = &app.hosts()[&1];
+            let t = SeriesTarget::Subtree(key(10));
+            assert!(picked(app).contains(&t));
+            assert_eq!(host.latest(t, sysmon_model::Metric::Cpu), Some((21.0, 2)));
+            assert_eq!(host.series(t, sysmon_model::Metric::Cpu, 0).len(), 5);
+        });
+        step(cx, &|window, cx| window.render_frame(cx));
+
+        // Removing from the legend unpicks the process.
+        step(cx, &|window, cx| {
+            window.click(("legend-remove", 0usize), cx)
+        });
+        app.read_with(cx, |app, _| assert_eq!(picked(app).len(), 1));
+
+        // V hides and shows the panel.
+        step(cx, &|window, cx| window.press("v", cx));
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("graph-panel").is_none());
+        });
+        step(cx, &|window, cx| window.press("v", cx));
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("graph-panel").is_some());
         });
     }
 }

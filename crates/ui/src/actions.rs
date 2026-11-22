@@ -41,6 +41,12 @@ actions!(
         CursorPageDown,
         ToggleGraph,
         ClearGraph,
+        ToggleGraphPanel,
+        GraphCpu,
+        GraphRss,
+        GraphMem,
+        GraphThreads,
+        CycleGraphWindow,
     ]
 );
 
@@ -128,14 +134,6 @@ pub const SHORTCUTS: &[Shortcut] = &[
         false,
         "Down 20 rows"
     ),
-    shortcut!(
-        "Graph",
-        ["g"],
-        ToggleGraph,
-        false,
-        "Graph the row (collapsed: its subtree)"
-    ),
-    shortcut!("Graph", ["ctrl-g"], ClearGraph, true, "Remove all lines"),
     shortcut!("Processes", ["shift-p"], SortByCpu, false, "Sort by CPU"),
     shortcut!(
         "Processes",
@@ -152,6 +150,32 @@ pub const SHORTCUTS: &[Shortcut] = &[
         SortByCommand,
         false,
         "Sort by command"
+    ),
+    shortcut!(
+        "Graph",
+        ["g"],
+        ToggleGraph,
+        false,
+        "Graph the row (collapsed: its subtree)"
+    ),
+    shortcut!("Graph", ["ctrl-g"], ClearGraph, true, "Remove all lines"),
+    shortcut!(
+        "Graph",
+        ["v"],
+        ToggleGraphPanel,
+        false,
+        "Show / hide the graph"
+    ),
+    shortcut!("Graph", ["1"], GraphCpu, false, "Graph %CPU"),
+    shortcut!("Graph", ["2"], GraphRss, false, "Graph RSS"),
+    shortcut!("Graph", ["3"], GraphMem, false, "Graph %MEM"),
+    shortcut!("Graph", ["4"], GraphThreads, false, "Graph threads"),
+    shortcut!(
+        "Graph",
+        ["w"],
+        CycleGraphWindow,
+        false,
+        "Time window: 1 / 5 / 10 min"
     ),
     shortcut!("Playback", ["space"], TogglePause, false, "Play / pause"),
     shortcut!("Playback", ["]"], Faster, false, "Faster"),
@@ -223,6 +247,15 @@ fn menus() -> Vec<Menu> {
         Menu::new("Graph").items([
             MenuItem::action("Graph Selected Row", ToggleGraph),
             MenuItem::action("Clear Graph", ClearGraph),
+            MenuItem::separator(),
+            MenuItem::action("Show / Hide Graph", ToggleGraphPanel),
+            MenuItem::submenu(Menu::new("Metric").items([
+                MenuItem::action("%CPU", GraphCpu),
+                MenuItem::action("RSS", GraphRss),
+                MenuItem::action("%MEM", GraphMem),
+                MenuItem::action("Threads", GraphThreads),
+            ])),
+            MenuItem::action("Cycle Time Window", CycleGraphWindow),
         ]),
         Menu::new("Playback").items([
             MenuItem::action("Play / Pause", TogglePause),
@@ -281,6 +314,17 @@ mod tests {
         assert_eq!(display_key("f1"), "F1");
         assert_eq!(display_key("?"), "?");
         assert_eq!(display_key("]"), "]");
+    }
+
+    #[test]
+    fn groups_are_contiguous() {
+        let mut seen: Vec<&str> = Vec::new();
+        for s in SHORTCUTS {
+            if seen.last() != Some(&s.group) {
+                assert!(!seen.contains(&s.group), "{} appears twice", s.group);
+                seen.push(s.group);
+            }
+        }
     }
 
     #[test]

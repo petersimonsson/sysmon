@@ -4,6 +4,7 @@
 mod actions;
 mod app;
 mod format;
+mod graph;
 mod pipeline;
 mod selection;
 mod widgets;
