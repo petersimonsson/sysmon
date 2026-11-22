@@ -29,6 +29,18 @@ impl Recorder {
         recv_ts_ns: u64,
         datagram: &[u8],
     ) -> Result<()> {
+        self.append_marked(host_id, boot_id, recv_ts_ns, datagram, false)
+    }
+
+    /// [`Self::append`], marking the record's block (see [`crate::marks`]).
+    pub fn append_marked(
+        &mut self,
+        host_id: u64,
+        boot_id: u128,
+        recv_ts_ns: u64,
+        datagram: &[u8],
+        marked: bool,
+    ) -> Result<()> {
         let hour = recv_ts_ns / HOUR_NS;
         let key = (host_id, boot_id);
         let rotate = self.writers.get(&key).is_none_or(|(h, _)| *h != hour);
@@ -43,7 +55,7 @@ impl Recorder {
             .get_mut(&key)
             .unwrap()
             .1
-            .append(recv_ts_ns, datagram)
+            .append_marked(recv_ts_ns, datagram, marked)
     }
 
     /// Flush every open segment, and close those for hours before `now_ns`'s,

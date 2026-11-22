@@ -20,6 +20,10 @@ pub struct SegmentWriter {
     end: u64,
     buf: Vec<u8>,
     block_ts: Option<(u64, u64)>,
+    /// The `.marks` file, if this segment has one (see [`crate::marks`]).
+    marks: Option<File>,
+    /// The pending block holds a marked record.
+    block_marked: bool,
 }
 
 impl SegmentWriter {
@@ -34,8 +38,11 @@ impl SegmentWriter {
             .open(path)?;
 
         let len = file.metadata()?.len();
+        let marks_path = crate::marks::marks_path(path);
         let (end, index) = if len == 0 {
             block::write_file_header(&mut file)?;
+            // A new segment's marks are complete from the start.
+            let _ = File::create(&marks_path);
             (FILE_HEADER_LEN, index::write_all(path, &[])?)
         } else {
             file.seek(SeekFrom::Start(0))?;
@@ -56,6 +63,9 @@ impl SegmentWriter {
             (end, index)
         };
         file.seek(SeekFrom::Start(end))?;
+        // Only append to marks that exist: a segment from before them has
+        // none, and stays without (readers then scan it).
+        let marks = OpenOptions::new().append(true).open(&marks_path).ok();
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -64,6 +74,8 @@ impl SegmentWriter {
             end,
             buf: Vec::with_capacity(BLOCK_MAX_BYTES),
             block_ts: None,
+            marks,
+            block_marked: false,
         })
     }
 
@@ -72,6 +84,13 @@ impl SegmentWriter {
     }
 
     pub fn append(&mut self, recv_ts_ns: u64, datagram: &[u8]) -> Result<()> {
+        self.append_marked(recv_ts_ns, datagram, false)
+    }
+
+    /// [`Self::append`], noting in the segment's marks that the record's
+    /// block holds something the caller wants to find again quickly.
+    pub fn append_marked(&mut self, recv_ts_ns: u64, datagram: &[u8], marked: bool) -> Result<()> {
+        self.block_marked |= marked;
         let len = u16::try_from(datagram.len()).map_err(|_| Error::TooLarge(datagram.len()))?;
         let (first, last) = self.block_ts.get_or_insert((recv_ts_ns, recv_ts_ns));
         *last = recv_ts_ns;
@@ -111,6 +130,14 @@ impl SegmentWriter {
             && idx.write_all(&entry.to_bytes()).is_err()
         {
             self.index = None;
+        }
+        // Marks are hints: written after the block, not synced. One lost in
+        // a crash only goes unmarked.
+        if std::mem::take(&mut self.block_marked)
+            && let Some(m) = &mut self.marks
+            && m.write_all(&entry.block.offset.to_le_bytes()).is_err()
+        {
+            self.marks = None;
         }
         Ok(())
     }
