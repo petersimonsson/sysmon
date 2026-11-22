@@ -273,6 +273,12 @@ agent or the monitor was offline) are skipped rather than waited out.
   - a process table: a virtualized `uniform_list`, clickable column headers
     to sort (PID, user, %CPU, RSS, threads, command), a filter input (command,
     user or exact PID), and stale rows dimmed;
+  - a **Tree** toggle that groups processes under their parent
+    (`sysmon_model::tree::build`). Siblings follow the current sort, guide
+    lines show the structure, and ▾/▸ collapse a subtree. A collapsed row
+    shows how many descendants it hides and their summed CPU and memory.
+    When filtering, matches are shown with their ancestors (dimmed) so they
+    keep their place. Expand all / Collapse all act on the selected host;
   - in the Recording view, a replay bar: play/pause, 1× to 256× speed, a
     timeline `Slider` that seeks on release, and start, position and end
     times (UTC).
@@ -331,7 +337,7 @@ cargo run --release -p sysmon-ui -- --replay ~/.local/share/sysmon --speed 4
 
 # Headless tools
 cargo run -p sysmon-ingest --example dump -- 0.0.0.0:9876 [key] # print received frames
-cargo run -p sysmon-model --example replay -- <path>           # print a recording
+cargo run -p sysmon-model --example replay -- <path> [--tree]  # print a recording
 ```
 
 ## Status
@@ -349,7 +355,7 @@ Implemented, and covered by tests where noted:
 - `store`: segment writer and reader, torn-tail recovery, sparse index with
   seek and rebuild, catalog, retention (tested).
 - `model`: CPU, per-process, net and disk rates, rows carried over lost
-  chunks (tested); playback clock (tested); multi-host merged replay with
+  chunks, process tree building (tested); playback clock (tested); multi-host merged replay with
   seek, and the paced replay engine (tested); `replay` example.
 - `ui`: everything in section 6. It is checked by running it, but has no
   automated UI tests.
@@ -358,8 +364,8 @@ Possible next steps:
 
 1. UI tests with gpui-kit's `test-support` (headless windows and
    accessibility snapshots).
-2. A process tree view by `ppid`, per-process sparklines, and a details pane
-   (per-interface and per-disk rates are already in the model).
+2. Per-process sparklines and a details pane (per-interface and per-disk
+   rates are already in the model).
 3. Thumbnails on the timeline (CPU across the whole recording, from the
    index or a summary file), and multiple selected hosts side by side.
 4. Agent: per-process I/O (`/proc/[pid]/io`, needs privileges), cgroup and

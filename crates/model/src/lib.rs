@@ -5,11 +5,13 @@ mod clock;
 mod host;
 pub mod replay;
 mod source;
+pub mod tree;
 
 pub use clock::PlaybackClock;
 pub use host::{DiskRate, HISTORY_LEN, HistoryPoint, HostModel, NetRate, ProcRow, Snapshot};
 pub use replay::{Control, Feed, ReplayHandle, ReplayStatus};
 pub use source::{DataSource, LiveSource, ReplaySource, SourceKind};
+pub use tree::TreeLine;
 
 #[cfg(test)]
 mod tests {

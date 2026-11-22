@@ -1,7 +1,7 @@
 //! Top-level gpui entity: owns the live and replay host models and renders
 //! the toolbar, host list, header, process table and replay timeline.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -13,7 +13,10 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use sysmon_ingest::Event;
-use sysmon_model::{Control, Feed, HISTORY_LEN, HostModel, ProcRow, ReplayHandle, ReplayStatus};
+use sysmon_model::{
+    Control, Feed, HISTORY_LEN, HostModel, ProcRow, ReplayHandle, ReplayStatus, TreeLine,
+};
+use sysmon_proto::ProcKey;
 
 use crate::format;
 use crate::widgets::{bar, sparkline};
@@ -64,6 +67,9 @@ pub struct AppState {
     data_dir: PathBuf,
     selected: Option<u64>,
     sort: (SortKey, bool),
+    /// Show processes as a tree grouped by parent.
+    tree: bool,
+    collapsed: HashSet<ProcKey>,
     filter: Entity<InputState>,
     timeline: Entity<SliderState>,
     scrubbing: bool,
@@ -154,6 +160,8 @@ impl AppState {
             data_dir: start.data_dir,
             selected: None,
             sort: (SortKey::Cpu, true),
+            tree: false,
+            collapsed: HashSet::new(),
             filter,
             timeline,
             scrubbing: false,
@@ -563,23 +571,27 @@ impl AppState {
             .child(cores)
     }
 
-    fn sorted_rows(&self, host: &HostModel, cx: &App) -> Vec<ProcRow> {
+    /// The rows to show, in order. In tree mode every row is kept (so
+    /// ancestors of filter matches can be shown) and each line carries its
+    /// tree position; otherwise only filter matches are kept.
+    fn table_lines(&self, host: &HostModel, cx: &App) -> Vec<Line> {
         let needle = self.filter.read(cx).value().to_lowercase();
+        let matches = |p: &ProcRow| {
+            needle.is_empty()
+                || p.comm.to_lowercase().contains(&needle)
+                || p.cmdline
+                    .as_ref()
+                    .is_some_and(|c| c.to_lowercase().contains(&needle))
+                || p.user
+                    .as_ref()
+                    .is_some_and(|u| u.to_lowercase().contains(&needle))
+                || p.key.pid.to_string() == needle
+        };
         let mut rows: Vec<ProcRow> = host
             .snapshot
             .procs
             .iter()
-            .filter(|p| {
-                needle.is_empty()
-                    || p.comm.to_lowercase().contains(&needle)
-                    || p.cmdline
-                        .as_ref()
-                        .is_some_and(|c| c.to_lowercase().contains(&needle))
-                    || p.user
-                        .as_ref()
-                        .is_some_and(|u| u.to_lowercase().contains(&needle))
-                    || p.key.pid.to_string() == needle
-            })
+            .filter(|p| self.tree || matches(p))
             .cloned()
             .collect();
         let (key, desc) = self.sort;
@@ -595,13 +607,29 @@ impl AppState {
             let ord = if desc { ord.reverse() } else { ord };
             ord.then(a.key.pid.cmp(&b.key.pid))
         });
-        rows
+
+        if !self.tree {
+            return rows
+                .into_iter()
+                .map(|row| Line { row, tree: None })
+                .collect();
+        }
+        let filter: Option<&dyn Fn(&ProcRow) -> bool> =
+            (!needle.is_empty()).then_some(&matches as &dyn Fn(&ProcRow) -> bool);
+        sysmon_model::tree::build(&rows, filter, &self.collapsed)
+            .into_iter()
+            .map(|t| Line {
+                row: rows[t.row].clone(),
+                tree: Some(t),
+            })
+            .collect()
     }
 
     fn render_procs(&self, host: &HostModel, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let mono = theme.mono_font_family.clone();
-        let rows = Rc::new(self.sorted_rows(host, cx));
+        let rows = Rc::new(self.table_lines(host, cx));
+        let this = cx.entity().downgrade();
         let mem_total = host.snapshot.mem.total.max(1) as f32;
 
         let (sort_key, desc) = self.sort;
@@ -657,7 +685,9 @@ impl AppState {
         let list = uniform_list("procs", count, move |range, _, _| {
             range
                 .map(|i| {
-                    let p = &rows[i];
+                    let line = &rows[i];
+                    let p = &line.row;
+                    let dim = p.stale || line.tree.as_ref().is_some_and(|t| !t.matched);
                     div()
                         .flex()
                         .gap_2()
@@ -667,7 +697,7 @@ impl AppState {
                         .text_xs()
                         .font_family(mono.clone())
                         .when(i % 2 == 1, |d| d.bg(theme.muted.opacity(0.3)))
-                        .when(p.stale, |d| d.text_color(theme.muted_foreground))
+                        .when(dim, |d| d.text_color(theme.muted_foreground))
                         .child(div().w(px(64.)).child(p.key.pid.to_string()))
                         .child(
                             div().w(px(80.)).overflow_hidden().child(
@@ -690,7 +720,7 @@ impl AppState {
                                 .child(format!("{:.1}", p.rss_kib as f32 / mem_total * 100.0)),
                         )
                         .child(div().w(px(48.)).child(p.threads.to_string()))
-                        .child(div().flex_1().overflow_hidden().child(command(p)))
+                        .child(command_cell(line, i, &this, &theme))
                 })
                 .collect()
         })
@@ -714,6 +744,39 @@ impl AppState {
                             .child(Input::new(&self.filter).small().cleanable(true)),
                     )
                     .child(
+                        Button::new("tree")
+                            .label("Tree")
+                            .small()
+                            .when(self.tree, |b| b.primary())
+                            .when(!self.tree, |b| b.ghost())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.tree = !this.tree;
+                                cx.notify();
+                            })),
+                    )
+                    .when(self.tree, |d| {
+                        d.child(
+                            Button::new("expand-all")
+                                .label("Expand all")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.collapsed.clear();
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("collapse-all")
+                                .label("Collapse all")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.collapse_all();
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .child(
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
@@ -722,6 +785,21 @@ impl AppState {
             )
             .child(header)
             .child(list)
+    }
+
+    /// Collapse every process that has children in the selected host.
+    fn collapse_all(&mut self) {
+        let Some(host) = self.selected.and_then(|id| self.hosts().get(&id)) else {
+            return;
+        };
+        let parents: HashSet<u32> = host.snapshot.procs.iter().map(|p| p.ppid).collect();
+        self.collapsed = host
+            .snapshot
+            .procs
+            .iter()
+            .filter(|p| parents.contains(&p.key.pid))
+            .map(|p| p.key)
+            .collect();
     }
 
     fn render_timeline(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
@@ -797,6 +875,75 @@ fn apply(hosts: &mut BTreeMap<u64, HostModel>, event: Event) {
         .entry(id)
         .or_insert_with(|| HostModel::new(id))
         .apply(event);
+}
+
+/// One row of the process table.
+struct Line {
+    row: ProcRow,
+    tree: Option<TreeLine>,
+}
+
+/// The COMMAND cell: in tree mode, guide lines, a clickable expand/collapse
+/// marker, and a summary of what a collapsed subtree hides.
+fn command_cell(
+    line: &Line,
+    i: usize,
+    this: &WeakEntity<AppState>,
+    theme: &gpui_kit::component::Theme,
+) -> impl IntoElement + use<> {
+    let cell = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .whitespace_nowrap();
+    let Some(t) = &line.tree else {
+        return cell.child(command(&line.row));
+    };
+    let twisty = if t.has_children {
+        let key = line.row.key;
+        let this = this.clone();
+        div()
+            .id(("twisty", i))
+            .flex_none()
+            .w(px(14.))
+            .cursor_pointer()
+            .text_color(theme.foreground)
+            .child(if t.collapsed { "▸" } else { "▾" })
+            .on_click(move |_, _, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if !this.collapsed.remove(&key) {
+                        this.collapsed.insert(key);
+                    }
+                    cx.notify();
+                });
+            })
+    } else {
+        div().id(("twisty", i)).flex_none().w(px(14.))
+    };
+    cell.child(
+        div()
+            .flex_none()
+            .text_color(theme.muted_foreground)
+            .child(t.guides.clone()),
+    )
+    .child(twisty)
+    .child(div().flex_none().child(command(&line.row)))
+    .when(t.collapsed, |d| {
+        d.child(
+            div()
+                .flex_none()
+                .ml_2()
+                .text_color(theme.muted_foreground)
+                .child(format!(
+                    "+{} · {:.1}% CPU · {}",
+                    t.hidden,
+                    t.hidden_cpu_pct,
+                    format::bytes(t.hidden_rss_kib as f64 * 1024.0)
+                )),
+        )
+    })
 }
 
 fn command(p: &ProcRow) -> String {
