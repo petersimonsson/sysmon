@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::AppMenuBar;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
@@ -1004,6 +1005,14 @@ impl AppState {
                 .title("About sysmon")
                 .w(px(1000.))
                 .child(view.clone())
+                .footer(
+                    DialogFooter::new().child(
+                        Button::new("about-close")
+                            .label("Close")
+                            .primary()
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    ),
+                )
                 // Give the keyboard back to the app's shortcuts.
                 .on_close(move |_, window, cx| focus.focus(window, cx))
         });
@@ -2235,5 +2244,19 @@ mod tests {
         // Single-key shortcuts work again once it's closed.
         step(cx, &|window, cx| window.press("t", cx));
         app.read_with(cx, |app, _| assert!(app.tree));
+
+        // So does the Close button.
+        step(cx, &|window, cx| {
+            window.dispatch_action(Box::new(crate::actions::About), cx)
+        });
+        step(cx, &|window, cx| window.click("about-close", cx));
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("about").is_none(), "Close closes it");
+        });
+        step(cx, &|window, cx| window.press("t", cx));
+        app.read_with(cx, |app, _| {
+            assert!(!app.tree, "shortcuts work after Close too")
+        });
     }
 }
