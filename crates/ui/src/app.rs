@@ -117,6 +117,8 @@ pub struct AppState {
     filter: Entity<InputState>,
     timeline: Entity<SliderState>,
     scrubbing: bool,
+    /// The replay status last shown; the ticker redraws only when it changes.
+    shown_status: Option<ReplayStatus>,
     scroll: UniformListScrollHandle,
     error: Option<String>,
     _tasks: Vec<Task<()>>,
@@ -161,14 +163,16 @@ impl AppState {
                 }
             }));
         }
-        // Keep the replay position and timeline moving between frames.
+        // Keep the replay position and timeline moving between frames, but
+        // only redraw when something changed: a paused or finished replay
+        // otherwise cost several times the CPU of a live view with data.
         tasks.push(cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(200))
                     .await;
                 let alive = this.update_in(cx, |this, window, cx| {
-                    if this.view == View::Replay {
+                    if this.view == View::Replay && this.replay_status_changed() {
                         this.sync_timeline(window, cx);
                         cx.notify();
                     }
@@ -248,6 +252,7 @@ impl AppState {
             filter,
             timeline,
             scrubbing: false,
+            shown_status: None,
             scroll: UniformListScrollHandle::new(),
             error: None,
             _tasks: tasks,
@@ -346,6 +351,21 @@ impl AppState {
 
     fn status(&self) -> Option<ReplayStatus> {
         self.replay.as_ref().map(|s| s.handle.status())
+    }
+
+    /// Whether the replay's status differs from what was last shown. The
+    /// position is shown to the second, so finer changes don't count.
+    fn replay_status_changed(&mut self) -> bool {
+        let shown = |st: Option<ReplayStatus>| {
+            st.map(|st| ReplayStatus {
+                position_ns: st.position_ns / 1_000_000_000,
+                ..st
+            })
+        };
+        let now = shown(self.status());
+        let changed = now != self.shown_status;
+        self.shown_status = now;
+        changed
     }
 
     fn control(&self, c: Control) {
