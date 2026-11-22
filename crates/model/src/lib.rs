@@ -14,8 +14,8 @@ pub use host::{
     DiskRate, HISTORY_LEN, HISTORY_WINDOW_S, HistoryPoint, HostModel, NetRate, ProcRow, Snapshot,
     ThreadRow,
 };
-pub use logs::{LogKind, LogRow, Logs};
-pub use replay::{Control, Feed, ReplayHandle, ReplayStatus};
+pub use logs::{LogKind, LogMark, LogRow, Logs};
+pub use replay::{Control, Feed, ManualReplay, ReplayHandle, ReplayStatus};
 pub use series::{Metric, SeriesTarget};
 pub use source::ReplaySource;
 pub use tree::TreeLine;

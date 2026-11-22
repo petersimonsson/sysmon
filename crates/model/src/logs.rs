@@ -6,8 +6,9 @@
 //! [`LogKind::Lost`]. A new agent run (or boot) restarts the numbering.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::path::Path;
 
-use sysmon_proto::{LogBatch, LogEntry};
+use sysmon_proto::{LogBatch, LogEntry, Msg};
 
 /// Lines kept per host; older ones are dropped. About 5 MB at typical
 /// line lengths.
@@ -145,6 +146,42 @@ impl Logs {
     }
 }
 
+/// A batch with an error (or worse) in a recording, for the timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogMark {
+    pub host_id: u64,
+    /// The recorded receive time, the timeline's clock.
+    pub received_ns: u64,
+}
+
+/// Where the recording under `path` has errors, in time order. Only log
+/// datagrams are v5 or later, so everything else is skipped by its version
+/// byte without being decoded; this reads the whole recording, so run it in
+/// the background.
+pub fn error_marks(path: &Path) -> std::io::Result<Vec<LogMark>> {
+    let mut marks = Vec::new();
+    for info in sysmon_store::list_segments(path)? {
+        let Ok(reader) = sysmon_store::SegmentReader::open(&info.path) else {
+            continue;
+        };
+        for record in reader.map_while(Result::ok) {
+            if record.datagram.get(2).is_none_or(|&v| v < 5) {
+                continue;
+            }
+            if let Ok((h, Msg::Logs(batch))) = sysmon_proto::decode(&record.datagram)
+                && batch.entries.iter().any(|e| e.priority <= 3)
+            {
+                marks.push(LogMark {
+                    host_id: h.host_id,
+                    received_ns: record.recv_ts_ns,
+                });
+            }
+        }
+    }
+    marks.sort_by_key(|m| m.received_ns);
+    Ok(marks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +283,42 @@ mod tests {
         // A reboot can reuse a run ID only by chance; the boot tells them apart.
         l.apply(2, batch(2, 0, &["c"]), 3 * S);
         assert_eq!(shown(&l), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn error_marks_come_from_the_recordings_log_datagrams() {
+        let dir = std::env::temp_dir().join(format!("sysmon-marks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut rec = sysmon_store::Recorder::new(&dir);
+        let t = 1_700_000_000 * S;
+        let mut put = |host: u64, at: u64, d: Vec<u8>| rec.append(host, 9, at, &d).unwrap();
+        let sample = sysmon_proto::encode_sample(1, 9, 0, &Default::default(), &[], &[]).unwrap();
+        put(1, t, sample[0].clone());
+        let mut warn = batch(1, 0, &["just a warning"]);
+        let logs =
+            |b: &LogBatch, host| sysmon_proto::encode_logs(host, 9, 0, b).unwrap()[0].clone();
+        put(1, t + S, logs(&warn, 1));
+        warn.entries[0].priority = 3;
+        warn.first_seq = 1;
+        put(1, t + 2 * S, logs(&warn, 1));
+        put(2, t + 3 * S, logs(&warn, 2));
+        rec.flush().unwrap();
+        drop(rec);
+        let marks = error_marks(&dir).unwrap();
+        assert_eq!(
+            marks,
+            [
+                LogMark {
+                    host_id: 1,
+                    received_ns: t + 2 * S
+                },
+                LogMark {
+                    host_id: 2,
+                    received_ns: t + 3 * S
+                }
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

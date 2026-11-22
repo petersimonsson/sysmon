@@ -28,7 +28,7 @@ pub enum Feed {
     Reset,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Control {
     SetPaused(bool),
     TogglePause,
@@ -54,6 +54,26 @@ pub struct ReplayHandle {
 }
 
 impl ReplayHandle {
+    /// A handle with no engine behind it: the caller feeds events and sees
+    /// the controls sent, all on its own thread. For driving the UI in
+    /// tests, where an engine thread waking the UI breaks determinism.
+    pub fn manual(status: ReplayStatus) -> (Self, ManualReplay) {
+        let (feed_tx, feed) = flume::unbounded();
+        let (control, controls) = flume::unbounded();
+        let status = Arc::new(Mutex::new(status));
+        let handle = Self {
+            feed,
+            control,
+            status: status.clone(),
+        };
+        let driver = ManualReplay {
+            feed: feed_tx,
+            controls,
+            status,
+        };
+        (handle, driver)
+    }
+
     pub fn send(&self, c: Control) {
         let _ = self.control.send(c);
     }
@@ -61,6 +81,13 @@ impl ReplayHandle {
     pub fn status(&self) -> ReplayStatus {
         *self.status.lock().unwrap()
     }
+}
+
+/// The other side of [`ReplayHandle::manual`].
+pub struct ManualReplay {
+    pub feed: flume::Sender<Feed>,
+    pub controls: flume::Receiver<Control>,
+    pub status: Arc<Mutex<ReplayStatus>>,
 }
 
 /// Start playing `source` from its beginning at `speed`.
