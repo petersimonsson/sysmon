@@ -121,6 +121,9 @@ pub struct AppState {
     /// Last known command of each graphed process, so the legend can still
     /// name processes that have exited.
     graph_names: HashMap<ProcKey, String>,
+    /// Graph lines kept between redraws (the chart redraws on every mouse
+    /// move), by view, host, target and metric.
+    graph_lines: std::cell::RefCell<graph::LineCache<(View, u64, SeriesTarget, Metric)>>,
     /// Height of the graph panel; drag the divider above it to change it.
     graph_height: Pixels,
     /// While dragging the divider: pointer y and panel height at the start.
@@ -290,6 +293,7 @@ impl AppState {
             graph_bounds: Default::default(),
 
             graph_names: HashMap::new(),
+            graph_lines: Default::default(),
             graph_height: px(GRAPH_HEIGHT),
             graph_drag: None,
             show_logs: false,
@@ -414,8 +418,12 @@ impl AppState {
                             Feed::Event(e) => apply(&mut s.hosts, e),
                         }
                     }
-                    if reset && std::mem::take(&mut this.log_reveal_after_reset) {
-                        this.log_reveal.set(true);
+                    if reset {
+                        // The recording's models were rebuilt; so are the lines.
+                        this.graph_lines.borrow_mut().clear();
+                        if std::mem::take(&mut this.log_reveal_after_reset) {
+                            this.log_reveal.set(true);
+                        }
                     }
                     if this.view == View::Replay {
                         this.ensure_selection();
@@ -1556,13 +1564,26 @@ impl AppState {
             .unwrap_or_default();
         let end = host.proc_history.back().map_or(0, |f| f.ts_unix_ns);
         let start = end.saturating_sub(self.graph_window_s * 1_000_000_000);
+        let view = self.view;
+        let mut cache = self.graph_lines.borrow_mut();
         let lines: Vec<graph::Line> = picks
             .iter()
             .map(|p| graph::Line {
                 color: selection::color(p.slot),
-                points: host.series(p.target, metric, start),
+                points: cache.line(
+                    (view, host.host_id, p.target, metric),
+                    &host.proc_history,
+                    p.target,
+                    metric,
+                    start,
+                ),
             })
             .collect();
+        // Only what's on screen now is kept.
+        cache.retain(|&(v, h, t, m)| {
+            v == view && h == host.host_id && m == metric && picks.iter().any(|p| p.target == t)
+        });
+        drop(cache);
         let y_max = graph::y_max(metric, &lines);
         let hover_ns = self
             .graph_hover

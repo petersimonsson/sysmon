@@ -1,10 +1,14 @@
 //! The multi-line chart in the graph panel, and the pure helpers behind it.
 
 use std::cell::Cell;
+use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
 use std::rc::Rc;
 
 use gpui_kit::*;
 use sysmon_model::Metric;
+use sysmon_model::SeriesTarget;
+use sysmon_model::series::ProcFrame;
 
 use crate::format;
 
@@ -15,6 +19,79 @@ pub const WINDOWS_S: [u64; 3] = [60, 300, 600];
 pub struct Line {
     pub color: Hsla,
     pub points: Vec<(u64, Option<f32>)>,
+}
+
+/// Graph lines kept between redraws, extended by the samples added since.
+///
+/// A line only changes when a sample arrives, but the chart redraws on every
+/// mouse move. Recomputing a subtree's line walks every process of every
+/// sample (about 5 ms per line for 490 processes over 10 minutes), so eight
+/// of them made each redraw take 39 ms.
+pub struct LineCache<K> {
+    lines: HashMap<K, Vec<(u64, Option<f32>)>>,
+}
+
+impl<K> Default for LineCache<K> {
+    fn default() -> Self {
+        Self {
+            lines: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Hash + Eq> LineCache<K> {
+    /// The line for `target`'s `metric` over `history`, from `since_ns` on.
+    /// Only samples added since the last call are computed, unless the
+    /// history no longer matches what was cached (cleared after a clock
+    /// step, or rebuilt), when the line is computed afresh.
+    pub fn line(
+        &mut self,
+        key: K,
+        history: &VecDeque<ProcFrame>,
+        target: SeriesTarget,
+        metric: Metric,
+        since_ns: u64,
+    ) -> Vec<(u64, Option<f32>)> {
+        let line = self.lines.entry(key).or_default();
+        // Drop samples that have left the history.
+        match history.front() {
+            Some(front) => {
+                let gone = line.partition_point(|p| p.0 < front.ts_unix_ns);
+                line.drain(..gone);
+            }
+            None => line.clear(),
+        }
+        // The cached part must be exactly the history's first samples.
+        let from = match line.last() {
+            None => 0,
+            Some(&(ts, _)) => {
+                let i = history.partition_point(|f| f.ts_unix_ns <= ts);
+                if i == line.len() && history[i - 1].ts_unix_ns == ts {
+                    i
+                } else {
+                    line.clear();
+                    0
+                }
+            }
+        };
+        line.extend(sysmon_model::series::series(
+            history.range(from..),
+            target,
+            metric,
+        ));
+        let start = line.partition_point(|p| p.0 < since_ns);
+        line[start..].to_vec()
+    }
+
+    /// Forget lines not wanted any more.
+    pub fn retain(&mut self, keep: impl Fn(&K) -> bool) {
+        self.lines.retain(|k, _| keep(k));
+    }
+
+    /// Forget everything (the data behind it was rebuilt).
+    pub fn clear(&mut self) {
+        self.lines.clear();
+    }
 }
 
 /// Round up to 1, 2 or 5 × 10ⁿ so axis labels are readable.
@@ -210,9 +287,86 @@ pub fn chart(spec: ChartSpec, bounds_out: ChartBounds) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     // Explicit imports: the gpui glob would shadow `#[test]`.
-    use super::{Line, nice_ceiling, nice_size_ceiling, segments, value_at, y_max};
+    use super::{Line, LineCache, nice_ceiling, nice_size_ceiling, segments, value_at, y_max};
     use gpui_kit::hsla;
+    use std::collections::VecDeque;
     use sysmon_model::Metric;
+    use sysmon_model::SeriesTarget;
+    use sysmon_model::series::{ProcFrame, ProcPoint, UNKNOWN};
+    use sysmon_proto::ProcKey;
+
+    /// Sample `ts` of a tree 1 ─ 2 ─ 3, with %CPU varying by sample.
+    fn frame(ts: u64) -> ProcFrame {
+        let p = |pid, ppid| ProcPoint {
+            key: ProcKey { pid, starttime: 0 },
+            ppid,
+            cpu_pct: (ts % 7) as f32 + pid as f32,
+            rss_kib: 1,
+            virt_kib: UNKNOWN,
+            shr_kib: UNKNOWN,
+            threads: 1,
+        };
+        ProcFrame {
+            ts_unix_ns: ts,
+            mem_total_kib: 100,
+            procs: vec![p(1, 0), p(2, 1), p(3, 2)],
+            threads: vec![],
+        }
+    }
+
+    #[test]
+    fn cached_lines_match_fresh_ones_as_the_history_moves() {
+        let target = SeriesTarget::Subtree(ProcKey {
+            pid: 1,
+            starttime: 0,
+        });
+        let fresh = |h: &VecDeque<ProcFrame>, since| -> Vec<_> {
+            sysmon_model::series::series(h.iter(), target, Metric::Cpu)
+                .into_iter()
+                .filter(|p| p.0 >= since)
+                .collect()
+        };
+        let mut cache = LineCache::default();
+        let mut h: VecDeque<ProcFrame> = (10..20).map(frame).collect();
+        let mut check = |h: &VecDeque<ProcFrame>, since| {
+            assert_eq!(
+                cache.line(1, h, target, Metric::Cpu, since),
+                fresh(h, since)
+            );
+        };
+        check(&h, 0);
+        check(&h, 15);
+        // New samples arrive and old ones leave, as in the ring buffer.
+        for ts in 20..30 {
+            h.push_back(frame(ts));
+            h.pop_front();
+            check(&h, 0);
+        }
+        // Cleared after a clock step, then filled again.
+        h.clear();
+        check(&h, 0);
+        h.extend((100..105).map(frame));
+        check(&h, 0);
+        // Rebuilt with different samples covering the cached time.
+        h = (98..106).map(frame).collect();
+        check(&h, 0);
+        // A different metric or target is its own line.
+        assert_eq!(
+            cache
+                .line(
+                    2,
+                    &h,
+                    SeriesTarget::Process(ProcKey {
+                        pid: 3,
+                        starttime: 0
+                    }),
+                    Metric::Cpu,
+                    0
+                )
+                .len(),
+            h.len()
+        );
+    }
 
     #[test]
     fn nice_numbers() {
