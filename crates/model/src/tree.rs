@@ -160,6 +160,7 @@ mod tests {
             uid: None,
             user: None,
             stale: false,
+            kernel_thread: false,
         }
     }
 

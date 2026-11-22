@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
-use crate::series::{self, Metric, ProcFrame, ProcPoint, SeriesTarget};
+use crate::series::{self, Metric, ProcFrame, ProcPoint, SeriesTarget, ThreadPoint};
 
 use sysmon_ingest::Event;
 use sysmon_proto::{CpuCounters, Frame, HostInfo, MemInfo, ProcKey, ProcMeta, SystemSample};
@@ -37,6 +37,7 @@ struct Prev {
     /// CPU ticks per process and the sample time they were read at. Kept per
     /// process so rows carried over a lost chunk still get correct rates.
     proc_ticks: HashMap<ProcKey, (u64, u64)>,
+    thread_ticks: HashMap<ProcKey, (u64, u64)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -49,6 +50,23 @@ pub struct Snapshot {
     pub net: Vec<NetRate>,
     pub disks: Vec<DiskRate>,
     pub procs: Vec<ProcRow>,
+    /// Empty unless the agent sends threads.
+    pub threads: Vec<ThreadRow>,
+}
+
+/// A thread other than its process's main thread.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThreadRow {
+    /// `(tid, starttime)`.
+    pub key: ProcKey,
+    /// The owning process's pid.
+    pub tgid: u32,
+    pub state: char,
+    pub cpu_pct: f32,
+    /// The thread's name.
+    pub comm: String,
+    /// Carried over because its chunk was lost.
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +89,9 @@ pub struct ProcRow {
     pub user: Option<String>,
     /// Carried over from the previous sample because its chunk was lost.
     pub stale: bool,
+    /// A kernel thread: the agent's `PF_KTHREAD` flag, or for agents older
+    /// than protocol v3, kthreadd (pid 2) and its children.
+    pub kernel_thread: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +127,11 @@ impl HostModel {
             host_id,
             ..Default::default()
         }
+    }
+
+    /// Whether this host's agent sends threads (`sysmon-agent --threads`).
+    pub fn sends_threads(&self) -> bool {
+        self.info.as_ref().is_some_and(|i| i.sends_threads)
     }
 
     pub fn name(&self) -> String {
@@ -170,6 +196,16 @@ impl HostModel {
             _ => (Vec::new(), Vec::new()),
         };
 
+        // %CPU from the change in ticks since this key was last seen.
+        let rate = |before: Option<&(u64, u64)>, ticks: u64| -> f32 {
+            before.map_or(0.0, |&(before, before_ts)| {
+                let dt = ts.saturating_sub(before_ts) as f64 / 1e9;
+                if dt <= 0.0 {
+                    return 0.0;
+                }
+                (ticks.saturating_sub(before) as f64 / clk_tck / dt * 100.0) as f32
+            })
+        };
         let mut proc_ticks = HashMap::with_capacity(frame.procs.len());
         let mut procs: Vec<ProcRow> = frame
             .procs
@@ -178,16 +214,10 @@ impl HostModel {
                 let key = p.key();
                 let ticks = p.utime + p.stime;
                 proc_ticks.insert(key, (ticks, ts));
-                let cpu = prev
-                    .as_ref()
-                    .and_then(|prev| prev.proc_ticks.get(&key))
-                    .map_or(0.0, |&(before, before_ts)| {
-                        let dt = ts.saturating_sub(before_ts) as f64 / 1e9;
-                        if dt <= 0.0 {
-                            return 0.0;
-                        }
-                        (ticks.saturating_sub(before) as f64 / clk_tck / dt * 100.0) as f32
-                    });
+                let cpu = rate(
+                    prev.as_ref().and_then(|prev| prev.proc_ticks.get(&key)),
+                    ticks,
+                );
                 let meta = self.meta.get(&key);
                 let uid = meta.map(|m| m.uid);
                 ProcRow {
@@ -204,6 +234,7 @@ impl HostModel {
                     uid,
                     user: uid.and_then(|u| self.users.get(&u).cloned()),
                     stale: false,
+                    kernel_thread: p.kernel_thread.unwrap_or(p.pid == 2 || p.ppid == 2),
                 }
             })
             .collect();
@@ -220,6 +251,40 @@ impl HostModel {
                 {
                     proc_ticks.insert(row.key, t);
                     procs.push(ProcRow {
+                        stale: true,
+                        ..row.clone()
+                    });
+                }
+            }
+        }
+
+        let mut thread_ticks = HashMap::with_capacity(frame.threads.len());
+        let mut threads: Vec<ThreadRow> = frame
+            .threads
+            .into_iter()
+            .map(|t| {
+                let key = t.key();
+                let ticks = t.utime + t.stime;
+                thread_ticks.insert(key, (ticks, ts));
+                ThreadRow {
+                    key,
+                    tgid: t.tgid,
+                    state: t.state as char,
+                    cpu_pct: rate(prev.as_ref().and_then(|p| p.thread_ticks.get(&key)), ticks),
+                    comm: t.comm,
+                    stale: false,
+                }
+            })
+            .collect();
+        if !frame.complete
+            && let Some(p) = &prev
+        {
+            for row in &self.snapshot.threads {
+                if !thread_ticks.contains_key(&row.key)
+                    && let Some(&t) = p.thread_ticks.get(&row.key)
+                {
+                    thread_ticks.insert(row.key, t);
+                    threads.push(ThreadRow {
                         stale: true,
                         ..row.clone()
                     });
@@ -252,6 +317,19 @@ impl HostModel {
             ts_unix_ns: ts,
             mem_total_kib: system.mem.total,
             procs: points,
+            threads: {
+                let mut t: Vec<ThreadPoint> = threads
+                    .iter()
+                    .filter(|t| !t.stale)
+                    .map(|t| ThreadPoint {
+                        key: t.key,
+                        tgid: t.tgid,
+                        cpu_pct: t.cpu_pct,
+                    })
+                    .collect();
+                t.sort_by_key(|t| t.key);
+                t
+            },
         });
         while self.proc_history.len() > HISTORY_LEN {
             self.proc_history.pop_front();
@@ -279,11 +357,13 @@ impl HostModel {
             net,
             disks,
             procs,
+            threads,
         };
         self.prev = Some(Prev {
             boot_id: frame.boot_id,
             system,
             proc_ticks,
+            thread_ticks,
         });
     }
 }
@@ -463,6 +543,98 @@ mod tests {
         assert_eq!(m.proc_history.len(), HISTORY_LEN);
         let p10 = SeriesTarget::Process(proc(10, 0).key());
         assert_eq!(m.latest(p10, Metric::Threads), Some((1.0, 1)));
+    }
+
+    fn thread(tgid: u32, tid: u32, ticks: u64) -> sysmon_proto::ThreadSample {
+        sysmon_proto::ThreadSample {
+            tgid,
+            tid,
+            starttime: 7,
+            state: b'R',
+            utime: ticks,
+            stime: 0,
+            comm: format!("t{tid}"),
+        }
+    }
+
+    fn with_threads(e: Event, threads: Vec<sysmon_proto::ThreadSample>) -> Event {
+        let Event::Frame(mut f) = e else {
+            unreachable!()
+        };
+        f.threads = threads;
+        Event::Frame(f)
+    }
+
+    #[test]
+    fn thread_rows_get_their_own_rates_and_survive_lost_chunks() {
+        let mut m = HostModel::new(1);
+        m.apply(with_threads(
+            frame(0, 100, 0, 0, vec![proc(10, 0)], true),
+            vec![thread(10, 11, 0), thread(10, 12, 0)],
+        ));
+        // 2 s later: thread 11 used 100 ticks (1 s), thread 12 none.
+        m.apply(with_threads(
+            frame(1, 102, 0, 0, vec![proc(10, 100)], true),
+            vec![thread(10, 11, 100), thread(10, 12, 0)],
+        ));
+        let t: Vec<_> = m
+            .snapshot
+            .threads
+            .iter()
+            .map(|t| (t.key.pid, t.tgid, t.cpu_pct))
+            .collect();
+        assert_eq!(t, [(11, 10, 50.0), (12, 10, 0.0)]);
+        let s = m.series(
+            SeriesTarget::Thread(m.snapshot.threads[0].key),
+            Metric::Cpu,
+            0,
+        );
+        assert_eq!(s.last().unwrap().1, Some(50.0));
+
+        // Thread 12's chunk is lost: it's carried over, marked stale.
+        m.apply(with_threads(
+            frame(2, 103, 0, 0, vec![proc(10, 150)], false),
+            vec![thread(10, 11, 150)],
+        ));
+        let stale: Vec<_> = m
+            .snapshot
+            .threads
+            .iter()
+            .map(|t| (t.key.pid, t.stale))
+            .collect();
+        assert_eq!(stale, [(11, false), (12, true)]);
+    }
+
+    #[test]
+    fn kernel_threads_from_the_flag_or_the_kthreadd_rule() {
+        let mut p2 = proc(2, 0);
+        p2.ppid = 0;
+        let mut kworker = proc(30, 0);
+        kworker.ppid = 2;
+        let mut flagged = proc(40, 0);
+        flagged.kernel_thread = Some(true);
+        let mut user_under_2 = proc(50, 0);
+        user_under_2.ppid = 2;
+        user_under_2.kernel_thread = Some(false);
+        let mut m = HostModel::new(1);
+        m.apply(frame(
+            0,
+            100,
+            0,
+            0,
+            vec![p2, kworker, flagged, user_under_2, proc(10, 0)],
+            true,
+        ));
+        let k: Vec<_> = m
+            .snapshot
+            .procs
+            .iter()
+            .map(|p| (p.key.pid, p.kernel_thread))
+            .collect();
+        assert_eq!(
+            k,
+            [(2, true), (30, true), (40, true), (50, false), (10, false)]
+        );
     }
 
     #[test]

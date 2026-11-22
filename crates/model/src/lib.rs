@@ -11,6 +11,7 @@ pub mod tree;
 pub use clock::PlaybackClock;
 pub use host::{
     DiskRate, HISTORY_LEN, HISTORY_WINDOW_S, HistoryPoint, HostModel, NetRate, ProcRow, Snapshot,
+    ThreadRow,
 };
 pub use replay::{Control, Feed, ReplayHandle, ReplayStatus};
 pub use series::{Metric, SeriesTarget};

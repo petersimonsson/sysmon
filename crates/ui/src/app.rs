@@ -1234,6 +1234,7 @@ impl AppState {
                     let n = latest.map_or(0, |(_, n)| n);
                     format!("{} {name} + subtree ({n})", key.pid)
                 }
+                SeriesTarget::Thread(_) => format!("{} {name} (thread)", key.pid),
             };
             let value = match hover_ns {
                 Some(t) => graph::value_at(&line.points, t),

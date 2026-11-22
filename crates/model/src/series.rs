@@ -61,12 +61,15 @@ pub enum SeriesTarget {
     Process(ProcKey),
     /// A process plus all of its descendants, summed.
     Subtree(ProcKey),
+    /// One thread, by `(tid, starttime)`. Only %CPU (and a thread count of 1)
+    /// is per thread; the memory metrics are the process's and are gaps here.
+    Thread(ProcKey),
 }
 
 impl SeriesTarget {
     pub fn key(self) -> ProcKey {
         match self {
-            SeriesTarget::Process(k) | SeriesTarget::Subtree(k) => k,
+            SeriesTarget::Process(k) | SeriesTarget::Subtree(k) | SeriesTarget::Thread(k) => k,
         }
     }
 }
@@ -78,6 +81,16 @@ pub struct ProcFrame {
     pub mem_total_kib: u64,
     /// Sorted by key.
     pub procs: Vec<ProcPoint>,
+    /// Sorted by key; empty unless the agent sends threads.
+    pub threads: Vec<ThreadPoint>,
+}
+
+/// A thread in one sample (24 bytes).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThreadPoint {
+    pub key: ProcKey,
+    pub tgid: u32,
+    pub cpu_pct: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -150,6 +163,18 @@ impl ProcFrame {
     /// The target's value in this frame (summed over a subtree), or `None`
     /// if it isn't present.
     pub fn sample(&self, target: SeriesTarget, metric: Metric) -> Option<f32> {
+        if let SeriesTarget::Thread(key) = target {
+            let t = self
+                .threads
+                .binary_search_by(|t| t.key.cmp(&key))
+                .ok()
+                .map(|i| &self.threads[i])?;
+            return match metric {
+                Metric::Cpu => Some(t.cpu_pct),
+                Metric::Threads => Some(1.0),
+                _ => None,
+            };
+        }
         // A subtree sums what's known; it's unknown only if nothing is.
         let values: Vec<f32> = self
             .members_of(target)?
@@ -161,6 +186,9 @@ impl ProcFrame {
 
     /// How many processes the target covers in this frame.
     pub fn members(&self, target: SeriesTarget) -> usize {
+        if let SeriesTarget::Thread(key) = target {
+            return usize::from(self.threads.binary_search_by(|t| t.key.cmp(&key)).is_ok());
+        }
         self.members_of(target).map_or(0, |m| m.len())
     }
 }
@@ -204,6 +232,7 @@ mod tests {
             ts_unix_ns: ts,
             mem_total_kib: mem_total,
             procs,
+            threads: Vec::new(),
         }
     }
 
@@ -288,6 +317,25 @@ mod tests {
         assert_eq!(series(&frames, tree, Metric::Shr), [(1, None)]);
         assert!(Metric::Rss.is_size() && !Metric::MemPct.is_size());
         assert_eq!(Metric::Rss.label(), "RES");
+    }
+
+    #[test]
+    fn thread_series_has_cpu_only() {
+        let mut f = frame(1, 1000, vec![point(10, 1, 50.0, 100)]);
+        let tkey = ProcKey {
+            pid: 11,
+            starttime: 3,
+        };
+        f.threads = vec![ThreadPoint {
+            key: tkey,
+            tgid: 10,
+            cpu_pct: 20.0,
+        }];
+        let t = SeriesTarget::Thread(tkey);
+        assert_eq!(f.sample(t, Metric::Cpu), Some(20.0));
+        assert_eq!(f.sample(t, Metric::Rss), None, "memory is the process's");
+        assert_eq!(f.members(t), 1);
+        assert_eq!(f.sample(SeriesTarget::Thread(key(99)), Metric::Cpu), None);
     }
 
     #[test]
