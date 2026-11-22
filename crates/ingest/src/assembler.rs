@@ -3,6 +3,11 @@ use std::time::{Duration, Instant};
 
 use sysmon_proto::{Frame, Header, HostInfo, Msg, ProcMeta, UserName};
 
+/// A sample this many behind the newest one seen means the agent restarted
+/// (its first samples having been lost), rather than a late packet. UDP
+/// reordering is a few packets at most.
+const RESTART_GAP: u32 = 64;
+
 /// Output of the assembler.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
@@ -96,6 +101,18 @@ impl Assembler {
             // Host rebooted: sequence numbers and counters start over.
             flush(&mut self.out, host, u32::MAX, true);
             host.boot_id = h.boot_id;
+            host.emitted = None;
+        }
+        // The agent restarted: same host and boot, but its numbering starts
+        // again at 0. Seeing sample 0 again says so; a sample far behind the
+        // last one does too, in case the new run's first packets were lost.
+        // Anything else that's behind is a late or duplicated packet.
+        let newest = host.pending.keys().next_back().copied().max(host.emitted);
+        if let Some(newest) = newest
+            && h.seq < newest
+            && (h.seq == 0 || newest - h.seq > RESTART_GAP)
+        {
+            flush(&mut self.out, host, u32::MAX, true);
             host.emitted = None;
         }
         if host.emitted.is_some_and(|e| h.seq <= e) {
@@ -298,6 +315,68 @@ mod tests {
         assert!(frames(&mut a).is_empty());
         a.flush_stale(now + Duration::from_secs(2));
         assert_eq!(frames(&mut a).len(), 1);
+    }
+
+    #[test]
+    fn agent_restart_is_picked_up() {
+        let now = Instant::now();
+        let mut a = Assembler::new(Duration::from_secs(1));
+        for seq in 0..500 {
+            for (h, m) in datagrams(seq, 1) {
+                a.push(h, m, now);
+            }
+        }
+        assert_eq!(frames(&mut a).len(), 500);
+
+        // Same host and boot, numbering starts again at 0.
+        for seq in 0..5 {
+            for (h, m) in datagrams(seq, 1) {
+                a.push(h, m, now);
+            }
+        }
+        let out = frames(&mut a);
+        assert_eq!(
+            out.iter().map(|f| f.seq).collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4]
+        );
+        assert!(out.iter().all(|f| f.complete));
+    }
+
+    #[test]
+    fn restart_is_picked_up_even_if_its_first_samples_are_lost() {
+        let now = Instant::now();
+        let mut a = Assembler::new(Duration::from_secs(1));
+        for seq in 0..500 {
+            for (h, m) in datagrams(seq, 1) {
+                a.push(h, m, now);
+            }
+        }
+        frames(&mut a);
+        // Samples 0-2 of the new run are lost; 3 is far behind 499.
+        for (h, m) in datagrams(3, 1) {
+            a.push(h, m, now);
+        }
+        assert_eq!(
+            frames(&mut a).iter().map(|f| f.seq).collect::<Vec<_>>(),
+            [3]
+        );
+    }
+
+    #[test]
+    fn slightly_late_samples_are_still_dropped() {
+        let now = Instant::now();
+        let mut a = Assembler::new(Duration::from_secs(1));
+        for seq in 0..100 {
+            for (h, m) in datagrams(seq, 1) {
+                a.push(h, m, now);
+            }
+        }
+        frames(&mut a);
+        // A duplicate of sample 98 turning up late is not a restart.
+        for (h, m) in datagrams(98, 1) {
+            a.push(h, m, now);
+        }
+        assert!(frames(&mut a).is_empty());
     }
 
     #[test]

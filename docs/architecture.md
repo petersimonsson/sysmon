@@ -198,6 +198,16 @@ pub struct Frame {
   as soon as all `chunks` have arrived, or with `complete = false` once a
   newer `seq` arrives or the sample times out (~1.5× the interval). A
   `boot_id` change resets that host's state.
+- **Agent restarts:** a restarted agent has the same host and boot but numbers
+  its samples from 0 again. The assembler treats a sample 0 seen after later
+  ones, or a sample more than 64 behind the newest, as a restart and resets
+  that host's sequence state. Anything less far behind is a late or
+  duplicated packet and is dropped. The restarted agent resends `HostInfo`,
+  `Users` and every `ProcMeta` in its first sample, so changed settings (e.g.
+  `--threads`) take effect at once. As a guard against a late duplicate
+  being taken for a restart, `HostModel` ignores samples that aren't newer
+  than the last one from that boot. The first rates after a restart average
+  over the downtime, as after lost samples.
 - Channels are bounded (`flume`). When a consumer falls behind, frames are
   dropped and counted. The socket thread never blocks.
 

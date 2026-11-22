@@ -168,6 +168,15 @@ impl HostModel {
             return;
         };
         let ts = system.ts_unix_ns;
+        // A sample that isn't newer than the last one from this boot is a
+        // late duplicate; applying it would put history out of order.
+        if self
+            .prev
+            .as_ref()
+            .is_some_and(|p| p.boot_id == frame.boot_id && ts <= p.system.ts_unix_ns)
+        {
+            return;
+        }
         self.last_seen_ns = ts;
 
         let clk_tck = self.info.as_ref().map_or(100, |i| i.clk_tck) as f64;
@@ -635,6 +644,23 @@ mod tests {
             k,
             [(2, true), (30, true), (40, true), (50, false), (10, false)]
         );
+    }
+
+    #[test]
+    fn samples_older_than_the_last_are_ignored() {
+        let mut m = HostModel::new(1);
+        m.apply(frame(0, 100, 0, 0, vec![proc(10, 0)], true));
+        m.apply(frame(1, 101, 100, 0, vec![proc(10, 100)], true));
+        let before = (m.snapshot.ts_unix_ns, m.history.len(), m.proc_history.len());
+        // A late duplicate of sample 0 (e.g. mistaken for an agent restart).
+        m.apply(frame(0, 100, 0, 0, vec![proc(10, 0)], true));
+        assert_eq!(
+            (m.snapshot.ts_unix_ns, m.history.len(), m.proc_history.len()),
+            before
+        );
+        // Newer samples still apply, with rates against the last good one.
+        m.apply(frame(2, 102, 200, 0, vec![proc(10, 150)], true));
+        assert_eq!(m.snapshot.procs[0].cpu_pct, 50.0);
     }
 
     #[test]

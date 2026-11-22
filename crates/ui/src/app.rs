@@ -2832,7 +2832,12 @@ mod tests {
     }
 
     /// Give the test host's processes these users.
-    fn set_users(app: &Entity<AppState>, cx: &mut TestAppContext, users: &[(u32, u32, &str)]) {
+    fn set_users(
+        app: &Entity<AppState>,
+        cx: &mut TestAppContext,
+        seq: u32,
+        users: &[(u32, u32, &str)],
+    ) {
         app.update(cx, |app, cx| {
             let meta = users
                 .iter()
@@ -2859,8 +2864,9 @@ mod tests {
             );
             cx.notify();
         });
-        // Names reach the rows with the next sample.
-        add_frame(app, cx, 1);
+        // Names reach the rows with the next sample (a new one: a repeated
+        // sample is ignored as a duplicate).
+        add_frame(app, cx, seq);
     }
 
     #[gpui_kit::test]
@@ -2882,22 +2888,22 @@ mod tests {
             .unwrap()
         };
 
-        set_users(&app, cx, &[(1, 0, "root"), (10, 1000, "anna")]);
+        set_users(&app, cx, 1, &[(1, 0, "root"), (10, 1000, "anna")]);
         let (w, ch) = width(cx);
         assert!(
             (w - (ch * 4.0 + px(4.))).abs() < px(1.),
             "narrow for short names: {w:?}"
         );
 
-        set_users(&app, cx, &[(11, 961, "systemd-journal-remote")]);
+        set_users(&app, cx, 2, &[(11, 961, "systemd-journal-remote")]);
         let (w, ch) = width(cx);
         assert!(
             (w - (ch * 16.0 + px(4.))).abs() < px(1.),
             "capped at 16: {w:?}"
         );
 
-        // Rows sort by CPU (PID order here): 1, 10, 11, 20. Cells line up
-        // with the header.
+        // In PID order (1, 10, 11, 20), cells line up with the header.
+        step(cx, &|window, cx| window.press("shift-n", cx));
         step(cx, &|window, cx| {
             window.render_frame(cx);
             let header = window.find("USER").bounds();
