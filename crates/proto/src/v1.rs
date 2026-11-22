@@ -5,7 +5,32 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Header, ProcMeta, SystemSample, UserName};
+use crate::{CpuCounters, DiskStat, Header, MemInfo, NetIf, ProcMeta, UserName};
+
+/// `SystemSample` as in v1 to v3 (before `boottime_ns`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SystemSample {
+    pub ts_unix_ns: u64,
+    pub cpus: Vec<CpuCounters>,
+    pub mem: MemInfo,
+    pub load: [f32; 3],
+    pub net: Vec<NetIf>,
+    pub disks: Vec<DiskStat>,
+}
+
+impl From<SystemSample> for crate::SystemSample {
+    fn from(s: SystemSample) -> Self {
+        Self {
+            ts_unix_ns: s.ts_unix_ns,
+            cpus: s.cpus,
+            mem: s.mem,
+            load: s.load,
+            net: s.net,
+            disks: s.disks,
+            boottime_ns: None,
+        }
+    }
+}
 
 /// `HostInfo` as in v1 and v2 (before `sends_threads`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,7 +104,7 @@ impl From<Msg> for crate::Msg {
     fn from(m: Msg) -> Self {
         match m {
             Msg::HostInfo(i) => crate::Msg::HostInfo(i.into()),
-            Msg::System(s) => crate::Msg::System(s),
+            Msg::System(s) => crate::Msg::System(s.into()),
             Msg::Procs(p) => crate::Msg::Procs(p.into_iter().map(Into::into).collect()),
             Msg::ProcMeta(m) => crate::Msg::ProcMeta(m),
             Msg::Users(u) => crate::Msg::Users(u),

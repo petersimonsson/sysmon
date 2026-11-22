@@ -5,8 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::v1::HostInfo;
-use crate::{Header, ProcMeta, SystemSample, UserName};
+use crate::v1::{HostInfo, SystemSample};
+use crate::{Header, ProcMeta, UserName};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcSample {
@@ -55,7 +55,7 @@ impl From<Msg> for crate::Msg {
     fn from(m: Msg) -> Self {
         match m {
             Msg::HostInfo(i) => crate::Msg::HostInfo(i.into()),
-            Msg::System(s) => crate::Msg::System(s),
+            Msg::System(s) => crate::Msg::System(s.into()),
             Msg::Procs(p) => crate::Msg::Procs(p.into_iter().map(Into::into).collect()),
             Msg::ProcMeta(m) => crate::Msg::ProcMeta(m),
             Msg::Users(u) => crate::Msg::Users(u),

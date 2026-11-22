@@ -16,13 +16,14 @@ mod frame;
 pub mod seal;
 pub mod v1;
 pub mod v2;
+pub mod v3;
 pub use frame::Frame;
 pub use seal::{Key, Opener, Sealer};
 
 /// Magic bytes at the start of every datagram.
 pub const MAGIC: [u8; 2] = *b"SM";
 /// Current protocol version.
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 4;
 /// Oldest version [`decode`] still reads.
 pub const MIN_VERSION: u8 = 1;
 /// Upper bound on encoded datagram size, chosen to fit common path MTUs.
@@ -99,6 +100,11 @@ pub struct SystemSample {
     pub load: [f32; 3],
     pub net: Vec<NetIf>,
     pub disks: Vec<DiskStat>,
+    /// `CLOCK_BOOTTIME` when the sample was taken: time since boot, counting
+    /// suspend, and never stepped like the wall clock (NTP, date changes, VM
+    /// resume). Monitors order samples and compute rates with it. `None`
+    /// from agents older than v4.
+    pub boottime_ns: Option<u64>,
 }
 
 /// Cumulative jiffies from `/proc/stat`.
@@ -299,6 +305,10 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Msg)> {
         }
         2 => {
             let (h, m): (Header, v2::Msg) = postcard::from_bytes(&payload)?;
+            return Ok((h, m.into()));
+        }
+        3 => {
+            let (h, m): (Header, v3::Msg) = postcard::from_bytes(&payload)?;
             return Ok((h, m.into()));
         }
         _ => {}
@@ -509,8 +519,8 @@ mod tests {
             Err(Error::UnsupportedVersion(0))
         ));
         assert!(matches!(
-            decode(b"SM\x04\x00"),
-            Err(Error::UnsupportedVersion(4))
+            decode(b"SM\x05\x00"),
+            Err(Error::UnsupportedVersion(5))
         ));
     }
 
@@ -560,6 +570,40 @@ mod tests {
             panic!("not HostInfo")
         };
         assert!(!info.sends_threads);
+    }
+
+    #[test]
+    fn v3_datagrams_still_decode() {
+        let header = Header {
+            host_id: 1,
+            boot_id: 2,
+            seq: 3,
+            chunk: 0,
+            chunks: 1,
+        };
+        let old = v1::SystemSample {
+            ts_unix_ns: 42,
+            load: [1.0, 2.0, 3.0],
+            ..Default::default()
+        };
+        let buf = v3::encode(&header, &v3::Msg::System(old)).unwrap();
+        assert_eq!(buf[2], 3);
+        let Msg::System(s) = decode(&buf).unwrap().1 else {
+            panic!("not System")
+        };
+        assert_eq!(
+            (s.ts_unix_ns, s.load, s.boottime_ns),
+            (42, [1.0, 2.0, 3.0], None)
+        );
+
+        // And v4 carries the boot-time clock.
+        let new = SystemSample {
+            ts_unix_ns: 42,
+            boottime_ns: Some(7),
+            ..Default::default()
+        };
+        let buf = encode(&header, &Msg::System(new.clone())).unwrap();
+        assert_eq!(decode(&buf).unwrap().1, Msg::System(new));
     }
 
     #[test]

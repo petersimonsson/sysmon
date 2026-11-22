@@ -139,7 +139,7 @@ mod tests {
                 chunk,
                 chunks: 2,
             };
-            let system = SystemSample {
+            let system = sysmon_proto::v1::SystemSample {
                 ts_unix_ns: base + seq as u64 * SEC,
                 ..Default::default()
             };

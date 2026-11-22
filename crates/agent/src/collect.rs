@@ -77,6 +77,7 @@ pub fn host_info(interval_ms: u32, sends_threads: bool) -> HostInfo {
 pub fn system(ts_unix_ns: u64) -> SystemSample {
     SystemSample {
         ts_unix_ns,
+        boottime_ns: boottime_ns(),
         cpus: read_cpus(),
         mem: read_meminfo(),
         load: read_loadavg(),
@@ -330,6 +331,17 @@ fn parse_diskstats(s: &str, keep: impl Fn(&str) -> bool) -> Vec<DiskStat> {
         .collect()
 }
 
+/// `CLOCK_BOOTTIME`: time since boot, including suspend, never stepped.
+pub fn boottime_ns() -> Option<u64> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid timespec for clock_gettime to fill in.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };
+    (rc == 0).then(|| ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64)
+}
+
 fn hostname() -> String {
     read_trimmed("/proc/sys/kernel/hostname")
 }
@@ -377,6 +389,16 @@ mod tests {
         child.kill().ok();
         child.wait().ok();
         assert_eq!(found.as_deref(), Some("\u{FFFD}hidden"));
+    }
+
+    #[test]
+    fn samples_carry_a_boot_time_clock() {
+        let a = system(0).boottime_ns.expect("CLOCK_BOOTTIME");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let b = system(0).boottime_ns.unwrap();
+        assert!(b - a >= 20_000_000, "{a} -> {b}");
+        // Since boot: well below the wall clock's time since 1970.
+        assert!(b < crate::unix_now_ns());
     }
 
     #[test]
