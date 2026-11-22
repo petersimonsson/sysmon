@@ -54,6 +54,7 @@ actions!(
         About,
         ToggleKernelThreads,
         ToggleThreads,
+        ToggleLogs,
     ]
 );
 
@@ -115,6 +116,13 @@ pub const SHORTCUTS: &[Shortcut] = &[
     shortcut!("View", ["ctrl-2"], ShowRecording, true, "Recording view"),
     shortcut!("View", ["ctrl-down"], NextHost, true, "Next host"),
     shortcut!("View", ["ctrl-up"], PreviousHost, true, "Previous host"),
+    shortcut!(
+        "View",
+        ["l"],
+        ToggleLogs,
+        false,
+        "Show the host's logs, or the graph again"
+    ),
     shortcut!(
         "Processes",
         ["ctrl-f", "/"],
@@ -247,6 +255,8 @@ fn menus() -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Next Host", NextHost),
             MenuItem::action("Previous Host", PreviousHost),
+            MenuItem::separator(),
+            MenuItem::action("Logs", ToggleLogs),
         ]),
         Menu::new("Processes").items([
             MenuItem::action("Filter…", FocusFilter),
