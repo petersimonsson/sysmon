@@ -5,6 +5,10 @@ use crate::series::{self, Metric, ProcFrame, ProcPoint, SeriesTarget, ThreadPoin
 use sysmon_ingest::Event;
 use sysmon_proto::{CpuCounters, Frame, HostInfo, MemInfo, ProcKey, ProcMeta, SystemSample};
 
+/// A wall-clock change this much larger or smaller than the boot-time
+/// clock's means the wall clock was stepped.
+const CLOCK_STEP_NS: i128 = 2_000_000_000;
+
 /// Number of history points kept for sparklines and process graphs.
 pub const HISTORY_LEN: usize = 600;
 /// The time [`HISTORY_LEN`] covers at the default 1 Hz sampling.
@@ -34,6 +38,11 @@ pub struct HostModel {
 struct Prev {
     boot_id: u128,
     system: SystemSample,
+    /// The sample's clock: the agent's boot time when it sends one (v4),
+    /// otherwise its wall clock. Ordering and rates use this.
+    clock: u64,
+    /// Whether `clock` is the boot-time clock.
+    mono: bool,
     /// CPU ticks per process and the sample time they were read at. Kept per
     /// process so rows carried over a lost chunk still get correct rates.
     proc_ticks: HashMap<ProcKey, (u64, u64)>,
@@ -168,24 +177,44 @@ impl HostModel {
             return;
         };
         let ts = system.ts_unix_ns;
-        // A sample that isn't newer than the last one from this boot is a
-        // late duplicate; applying it would put history out of order.
+        // Order and rates go by the agent's boot-time clock, which is never
+        // stepped; the wall clock (`ts`) is only for showing times. Agents
+        // older than v4 don't send it, so their wall clock is used instead.
+        let (clock, mono) = match system.boottime_ns {
+            Some(b) => (b, true),
+            None => (ts, false),
+        };
+        // The previous sample counts only if it's from this boot and on the
+        // same kind of clock (an agent upgraded to v4 mid-boot switches).
+        let comparable = |p: &Prev| p.boot_id == frame.boot_id && p.mono == mono;
+        // A sample that isn't newer than the last one is a late duplicate;
+        // applying it would put history out of order.
         if self
             .prev
             .as_ref()
-            .is_some_and(|p| p.boot_id == frame.boot_id && ts <= p.system.ts_unix_ns)
+            .is_some_and(|p| comparable(p) && clock <= p.clock)
         {
             return;
+        }
+        // The wall clock was stepped (NTP, a date change, a VM resume): the
+        // graphs' time axis no longer lines up, so start their history again.
+        if let Some(p) = self.prev.as_ref().filter(|p| comparable(p) && mono) {
+            let wall = ts as i128 - p.system.ts_unix_ns as i128;
+            let real = clock as i128 - p.clock as i128;
+            if (wall - real).abs() > CLOCK_STEP_NS {
+                self.history.clear();
+                self.proc_history.clear();
+            }
         }
         self.last_seen_ns = ts;
 
         let clk_tck = self.info.as_ref().map_or(100, |i| i.clk_tck) as f64;
         let page_kib = self.info.as_ref().map_or(4, |i| i.page_size / 1024) as u64;
 
-        let prev = self.prev.take().filter(|p| p.boot_id == frame.boot_id);
+        let prev = self.prev.take().filter(comparable);
         let dt_s = prev
             .as_ref()
-            .map(|p| ts.saturating_sub(p.system.ts_unix_ns) as f64 / 1e9)
+            .map(|p| clock.saturating_sub(p.clock) as f64 / 1e9)
             .filter(|&dt| dt > 0.0);
 
         let cpu_pct = match &prev {
@@ -207,8 +236,8 @@ impl HostModel {
 
         // %CPU from the change in ticks since this key was last seen.
         let rate = |before: Option<&(u64, u64)>, ticks: u64| -> f32 {
-            before.map_or(0.0, |&(before, before_ts)| {
-                let dt = ts.saturating_sub(before_ts) as f64 / 1e9;
+            before.map_or(0.0, |&(before, before_clock)| {
+                let dt = clock.saturating_sub(before_clock) as f64 / 1e9;
                 if dt <= 0.0 {
                     return 0.0;
                 }
@@ -222,7 +251,7 @@ impl HostModel {
             .map(|p| {
                 let key = p.key();
                 let ticks = p.utime + p.stime;
-                proc_ticks.insert(key, (ticks, ts));
+                proc_ticks.insert(key, (ticks, clock));
                 let cpu = rate(
                     prev.as_ref().and_then(|prev| prev.proc_ticks.get(&key)),
                     ticks,
@@ -274,7 +303,7 @@ impl HostModel {
             .map(|t| {
                 let key = t.key();
                 let ticks = t.utime + t.stime;
-                thread_ticks.insert(key, (ticks, ts));
+                thread_ticks.insert(key, (ticks, clock));
                 ThreadRow {
                     key,
                     tgid: t.tgid,
@@ -371,6 +400,8 @@ impl HostModel {
         self.prev = Some(Prev {
             boot_id: frame.boot_id,
             system,
+            clock,
+            mono,
             proc_ticks,
             thread_ticks,
         });
@@ -644,6 +675,99 @@ mod tests {
             k,
             [(2, true), (30, true), (40, true), (50, false), (10, false)]
         );
+    }
+
+    /// `e` with the agent's boot-time clock at `secs`.
+    fn at_boottime(e: Event, secs: u64) -> Event {
+        let Event::Frame(mut f) = e else {
+            unreachable!()
+        };
+        f.system.as_mut().unwrap().boottime_ns = Some(secs * 1_000_000_000);
+        Event::Frame(f)
+    }
+
+    #[test]
+    fn a_backward_wall_clock_step_doesnt_freeze_the_host() {
+        let mut m = HostModel::new(1);
+        // 10 s of samples, wall clock 10_000.., boot time 500..
+        for i in 0..10u32 {
+            let e = frame(
+                i,
+                10_000 + i as u64,
+                0,
+                0,
+                vec![proc(10, i as u64 * 50)],
+                true,
+            );
+            m.apply(at_boottime(e, 500 + i as u64));
+        }
+        assert_eq!(m.history.len(), 10);
+        // The wall clock steps back an hour; the boot-time clock carries on.
+        let mut applied = 0;
+        for i in 0..60u32 {
+            let before = m.snapshot.ts_unix_ns;
+            let wall = 10_010 - 3600 + i as u64;
+            let e = frame(
+                10 + i,
+                wall,
+                0,
+                0,
+                vec![proc(10, (10 + i as u64) * 50)],
+                true,
+            );
+            m.apply(at_boottime(e, 510 + i as u64));
+            applied += (m.snapshot.ts_unix_ns != before) as u32;
+        }
+        assert_eq!(applied, 60, "every sample applied");
+        // Rates follow the boot-time clock: 50 ticks per second is 50 %.
+        assert_eq!(m.snapshot.procs[0].cpu_pct, 50.0);
+        // History restarted at the step, so its times are in order.
+        assert_eq!(m.history.len(), 60);
+        assert!(
+            m.history
+                .iter()
+                .zip(m.history.iter().skip(1))
+                .all(|(a, b)| a.ts_unix_ns < b.ts_unix_ns)
+        );
+        assert_eq!(m.proc_history.len(), 60);
+    }
+
+    #[test]
+    fn duplicates_by_boot_time_are_ignored_and_clocks_arent_mixed() {
+        let mut m = HostModel::new(1);
+        m.apply(at_boottime(
+            frame(0, 10_000, 0, 0, vec![proc(10, 0)], true),
+            500,
+        ));
+        m.apply(at_boottime(
+            frame(1, 10_001, 0, 0, vec![proc(10, 100)], true),
+            501,
+        ));
+        let before = m.history.len();
+        // A late duplicate of sample 0, even with a newer-looking wall clock.
+        m.apply(at_boottime(
+            frame(0, 20_000, 0, 0, vec![proc(10, 0)], true),
+            500,
+        ));
+        assert_eq!(m.history.len(), before);
+
+        // An older agent (no boot time) then a v4 one, same boot: the first
+        // v4 sample starts rates afresh instead of mixing the two clocks.
+        let mut m = HostModel::new(1);
+        m.apply(frame(0, 10_000, 0, 0, vec![proc(10, 0)], true));
+        m.apply(at_boottime(
+            frame(0, 10_001, 0, 0, vec![proc(10, 100)], true),
+            500,
+        ));
+        assert_eq!(
+            m.snapshot.procs[0].cpu_pct, 0.0,
+            "no rate across clock kinds"
+        );
+        m.apply(at_boottime(
+            frame(1, 10_002, 0, 0, vec![proc(10, 200)], true),
+            501,
+        ));
+        assert_eq!(m.snapshot.procs[0].cpu_pct, 100.0);
     }
 
     #[test]
