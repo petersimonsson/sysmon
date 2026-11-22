@@ -68,6 +68,28 @@ jobs:
           toolchain: "1.98"
       - run: cargo +1.98 build --locked --workspace --all-targets
 
+  ui-build:
+    name: UI build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the UI's build dependencies
+        if: runner.os == 'Linux'
+        run: ./.github/install-deps.sh
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ui-build
+      # Only the UI: the agent is Linux-only (it reads /proc).
+      # --all-targets also builds and links the test binaries.
+      - run: cargo build --locked -p sysmon-ui --all-targets
+
   agent-musl:
     name: Static agent (musl)
     runs-on: ubuntu-latest
