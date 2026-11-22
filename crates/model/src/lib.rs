@@ -15,7 +15,7 @@ pub use host::{
 };
 pub use replay::{Control, Feed, ReplayHandle, ReplayStatus};
 pub use series::{Metric, SeriesTarget};
-pub use source::{DataSource, LiveSource, ReplaySource, SourceKind};
+pub use source::ReplaySource;
 pub use tree::TreeLine;
 
 #[cfg(test)]
@@ -77,7 +77,7 @@ mod tests {
         assert_eq!(order.len(), 120);
         assert_eq!(&order[..4], &[(0, 1), (0, 2), (1, 1), (1, 2)]);
 
-        src.seek(base + 30 * SEC);
+        src.seek_to(base + 30 * SEC);
         let first = std::iter::from_fn(|| src.next_event()).find_map(|e| match e {
             sysmon_ingest::Event::Frame(f) => Some(f.seq),
             _ => None,

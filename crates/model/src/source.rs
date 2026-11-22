@@ -4,48 +4,6 @@ use std::time::{Duration, Instant};
 use sysmon_ingest::{Assembler, Event};
 use sysmon_store::{Record, SegmentInfo, SegmentReader};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceKind {
-    Live,
-    Replay,
-}
-
-/// Where events come from.
-pub trait DataSource: Send {
-    /// The next event, if one is available now. `None` means "nothing yet"
-    /// for a live source and "end of recording" for a replay source.
-    fn next_event(&mut self) -> Option<Event>;
-    /// Jump to a time. A no-op for live sources.
-    fn seek(&mut self, _ts_unix_ns: u64) {}
-    fn kind(&self) -> SourceKind;
-}
-
-/// Events arriving from [`sysmon_ingest::spawn`].
-pub struct LiveSource {
-    rx: flume::Receiver<Event>,
-}
-
-impl LiveSource {
-    pub fn new(rx: flume::Receiver<Event>) -> Self {
-        Self { rx }
-    }
-
-    /// Access to the channel, for async draining (`recv_async`).
-    pub fn receiver(&self) -> &flume::Receiver<Event> {
-        &self.rx
-    }
-}
-
-impl DataSource for LiveSource {
-    fn next_event(&mut self) -> Option<Event> {
-        self.rx.try_recv().ok()
-    }
-
-    fn kind(&self) -> SourceKind {
-        SourceKind::Live
-    }
-}
-
 /// Events read back from segment files through the same decoder and
 /// assembler as live traffic. Every host's segments are merged by receive
 /// time, so a multi-host recording replays as it happened.
@@ -210,6 +168,21 @@ impl ReplaySource {
         self.pending.clear();
     }
 
+    /// The next event, read as fast as possible (not paced; the replay
+    /// engine in [`crate::replay`] does the pacing). `None` at the end of
+    /// the recording. For headless tools and tests.
+    pub fn next_event(&mut self) -> Option<Event> {
+        loop {
+            if let Some(e) = self.pending.pop_front() {
+                return Some(e);
+            }
+            if self.step().is_none() {
+                self.finish();
+                return self.pending.pop_front();
+            }
+        }
+    }
+
     pub fn host_count(&self) -> usize {
         let mut hosts: Vec<u64> = self
             .streams
@@ -224,27 +197,4 @@ impl ReplaySource {
 
 fn new_assembler() -> Assembler {
     Assembler::new(Duration::from_millis(1500))
-}
-
-impl DataSource for ReplaySource {
-    /// Unpaced: returns events as fast as they can be read.
-    fn next_event(&mut self) -> Option<Event> {
-        loop {
-            if let Some(e) = self.pending.pop_front() {
-                return Some(e);
-            }
-            if self.step().is_none() {
-                self.finish();
-                return self.pending.pop_front();
-            }
-        }
-    }
-
-    fn seek(&mut self, ts_unix_ns: u64) {
-        self.seek_to(ts_unix_ns);
-    }
-
-    fn kind(&self) -> SourceKind {
-        SourceKind::Replay
-    }
 }

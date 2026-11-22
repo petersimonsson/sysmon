@@ -139,7 +139,7 @@ mod tests {
     // Explicit imports: the gpui glob elsewhere would shadow `#[test]`.
     use super::{Recording, start_live};
     use std::time::Duration;
-    use sysmon_model::{DataSource, ReplaySource};
+    use sysmon_model::ReplaySource;
 
     #[test]
     fn stopping_writes_out_everything_received() {

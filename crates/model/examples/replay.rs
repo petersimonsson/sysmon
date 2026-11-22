@@ -5,7 +5,7 @@
 //! With `--tree`, prints only the last sample of each host as a process tree.
 
 use sysmon_ingest::Event;
-use sysmon_model::{DataSource, HostModel, ReplaySource};
+use sysmon_model::{HostModel, ReplaySource};
 
 fn main() -> std::io::Result<()> {
     let path = std::path::PathBuf::from(std::env::args().nth(1).expect("usage: replay <path>"));
