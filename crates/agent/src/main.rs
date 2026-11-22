@@ -55,8 +55,12 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Without RUST_LOG the filter would allow errors only, so the start-up
+    // line and send failures would never reach the terminal or the journal.
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
     let args = Args::parse();
 
