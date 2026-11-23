@@ -217,27 +217,57 @@ pub const SHORTCUTS: &[Shortcut] = &[
         false,
         "Time window: 1 / 5 / 10 min"
     ),
-    shortcut!("Playback", ["space"], TogglePause, false, "Play / pause"),
-    shortcut!("Playback", ["]"], Faster, false, "Faster"),
-    shortcut!("Playback", ["["], Slower, false, "Slower"),
-    shortcut!("Playback", ["left"], SeekBackward, false, "Back 10 s"),
-    shortcut!("Playback", ["right"], SeekForward, false, "Forward 10 s"),
     shortcut!(
-        "Playback",
+        "Playback (recordings)",
+        ["space"],
+        TogglePause,
+        false,
+        "Play / pause"
+    ),
+    shortcut!("Playback (recordings)", ["]"], Faster, false, "Faster"),
+    shortcut!("Playback (recordings)", ["["], Slower, false, "Slower"),
+    shortcut!(
+        "Playback (recordings)",
+        ["left"],
+        SeekBackward,
+        false,
+        "Back 10 s"
+    ),
+    shortcut!(
+        "Playback (recordings)",
+        ["right"],
+        SeekForward,
+        false,
+        "Forward 10 s"
+    ),
+    shortcut!(
+        "Playback (recordings)",
         ["shift-left"],
         SeekBackwardLong,
         false,
         "Back 1 min"
     ),
     shortcut!(
-        "Playback",
+        "Playback (recordings)",
         ["shift-right"],
         SeekForwardLong,
         false,
         "Forward 1 min"
     ),
-    shortcut!("Playback", ["home"], SeekStart, false, "Go to start"),
-    shortcut!("Playback", ["end"], SeekEnd, false, "Go to end"),
+    shortcut!(
+        "Playback (recordings)",
+        ["home"],
+        SeekStart,
+        false,
+        "Go to start"
+    ),
+    shortcut!(
+        "Playback (recordings)",
+        ["end"],
+        SeekEnd,
+        false,
+        "Go to end"
+    ),
 ];
 
 /// Register key bindings and menus. Call once, after `gpui_kit::init`.
