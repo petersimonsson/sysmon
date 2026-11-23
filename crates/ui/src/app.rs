@@ -1294,11 +1294,14 @@ impl AppState {
         let rows = Rc::new(self.table_lines(host, cx));
         let status = self.status_line(host, &rows, cx);
         let this = cx.entity().downgrade();
-        // As wide as the longest name shown (all rows, so it doesn't change
-        // while scrolling), within USER_MIN_CHARS..=USER_MAX_CHARS.
-        let user_chars = rows
+        // As wide as the host's longest name, within USER_MIN_CHARS..=
+        // USER_MAX_CHARS: from all its processes, not just those shown, so
+        // the columns don't move while scrolling or typing a filter.
+        let user_chars = host
+            .snapshot
+            .procs
             .iter()
-            .map(|l| user_name(&l.row).chars().count())
+            .map(|p| user_name(p).chars().count())
             .max()
             .unwrap_or(0)
             .clamp(USER_MIN_CHARS, USER_MAX_CHARS);
@@ -3987,6 +3990,19 @@ mod tests {
             (w - (ch * 16.0 + px(4.))).abs() < px(1.),
             "capped at 16: {w:?}"
         );
+        // Filtering the long name out doesn't narrow the column: the
+        // columns would jump about while typing.
+        step(cx, &|window, cx| {
+            window.press("ctrl-f", cx);
+            window.input("init", cx);
+        });
+        let (w, ch) = width(cx);
+        assert!(
+            (w - (ch * 16.0 + px(4.))).abs() < px(1.),
+            "still 16 while filtering: {w:?}"
+        );
+        step(cx, &|window, cx| window.press("escape", cx));
+        step(cx, &|window, cx| window.press("escape", cx));
 
         // In PID order (1, 10, 11, 20), cells line up with the header.
         step(cx, &|window, cx| window.press("shift-n", cx));
