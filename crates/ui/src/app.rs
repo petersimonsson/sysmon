@@ -49,6 +49,12 @@ const AXIS_LABELS_W: f32 = 64.;
 const USER_MIN_CHARS: usize = 4;
 const USER_MAX_CHARS: usize = 16;
 const MENU_BAR_HEIGHT: f32 = 30.;
+/// A per-core bar with its number and figure (28 + 70 + 36 px and gaps),
+/// and the space between them.
+const CORE_W: f32 = 142.;
+const CORE_GAP: f32 = 12.;
+/// Width of the host list.
+const SIDEBAR_W: f32 = 190.;
 /// Samples shown in the header's sparklines.
 const SPARK_POINTS: usize = 240;
 /// Initial height of the graph panel below the process list.
@@ -765,7 +771,7 @@ impl AppState {
         let mut list = div()
             .flex()
             .flex_col()
-            .w(px(190.))
+            .w(px(SIDEBAR_W))
             .h_full()
             .p_2()
             .gap_1()
@@ -882,7 +888,12 @@ impl AppState {
         (host.last_received_ns == 0 || since > 3 * interval_ns).then_some(since)
     }
 
-    fn render_header(host: &HostModel, cx: &Context<Self>) -> impl IntoElement + use<> {
+    /// The header for `host`, `width` wide.
+    fn render_header(
+        host: &HostModel,
+        width: Pixels,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let s = &host.snapshot;
         // The newest SPARK_POINTS samples of one figure.
@@ -961,10 +972,26 @@ impl AppState {
         let text = |t: String| div().child(t).into_any_element();
 
         let cpu = s.cpu_pct.first().copied().unwrap_or(0.0);
-        let mut cores = div().flex().flex_wrap().gap_x_3().gap_y_1();
+        // Per-core bars in even rows: as many to a row as fit `width`, then
+        // spread evenly (24 cores at 11 a row wrapped as 11, 11 and 2).
+        let core_count = s.cpu_pct.len().saturating_sub(1);
+        let fit = ((f32::from(width) + CORE_GAP) / (CORE_W + CORE_GAP)).max(1.0) as usize;
+        let per_row = cores_per_row(core_count, fit);
+        let mut cores = div().flex().flex_col().gap_y_1();
+        let mut row = div().flex().gap_x(px(CORE_GAP));
         for (i, pct) in s.cpu_pct.iter().enumerate().skip(1) {
-            cores = cores.child(
+            if i > 1 && (i - 1).is_multiple_of(per_row) {
+                cores = cores.child(std::mem::replace(
+                    &mut row,
+                    div().flex().gap_x(px(CORE_GAP)),
+                ));
+            }
+            row = row.child(
                 div()
+                    .id(("core", i - 1))
+                    .test_support()
+                    .flex_none()
+                    .w(px(CORE_W))
                     .flex()
                     .items_center()
                     .gap_1()
@@ -979,6 +1006,7 @@ impl AppState {
                     .child(div().w(px(36.)).child(format!("{pct:.0}%"))),
             );
         }
+        let cores = cores.child(row);
 
         div()
             .flex()
@@ -3059,6 +3087,14 @@ fn command_cell(
     })
 }
 
+/// How many of `cores` per-core bars to put in a row when `fit` fit: as
+/// few rows as fit allows, filled evenly.
+fn cores_per_row(cores: usize, fit: usize) -> usize {
+    let fit = fit.max(1);
+    let rows = cores.div_ceil(fit).max(1);
+    cores.div_ceil(rows).max(1)
+}
+
 /// A command line's directory, program name and arguments, as byte ranges:
 /// `/usr/bin/sshd -D` → `/usr/bin/`, `sshd`, ` -D`. A `[name]` without a
 /// command line (a kernel thread's) is all name, slashes and all.
@@ -3188,7 +3224,11 @@ impl Render for AppState {
                     .flex_1()
                     .min_w_0()
                     .children(self.render_stale_banner(host, cx))
-                    .child(Self::render_header(host, cx))
+                    .child(Self::render_header(
+                        host,
+                        window.viewport_size().width - px(SIDEBAR_W) - px(16.),
+                        cx,
+                    ))
                     .child(
                         div()
                             .id("procs-panel")
@@ -4439,6 +4479,18 @@ mod tests {
     /// Stripes and the cursor highlight span the table, however short the
     /// row's command (they stopped where the text did, leaving boxes).
     #[test]
+    fn cores_fill_rows_evenly() {
+        use super::cores_per_row;
+        assert_eq!(cores_per_row(24, 11), 8, "3 rows of 8, not 11, 11, 2");
+        assert_eq!(cores_per_row(24, 12), 12);
+        assert_eq!(cores_per_row(8, 11), 8);
+        assert_eq!(cores_per_row(64, 11), 11);
+        assert_eq!(cores_per_row(13, 12), 7);
+        assert_eq!(cores_per_row(1, 0), 1);
+        assert_eq!(cores_per_row(0, 5), 1);
+    }
+
+    #[test]
     fn commands_split_into_directory_name_and_arguments() {
         let parts = |c: &str| {
             let (d, n, a) = super::command_parts(c);
@@ -4464,6 +4516,47 @@ mod tests {
             parts("[kworker/0:1]"),
             ("".into(), "[kworker/0:1]".into(), "".into())
         );
+    }
+
+    #[gpui_kit::test]
+    fn per_core_bars_wrap_into_even_rows(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        app.update(cx, |app, cx| {
+            // Two samples of 24 cores (and the aggregate line), so there
+            // are per-core figures.
+            for seq in 0..2u32 {
+                let cpu = sysmon_proto::CpuCounters {
+                    user: seq as u64 * 10,
+                    idle: seq as u64 * 90,
+                    ..Default::default()
+                };
+                let system = sysmon_proto::SystemSample {
+                    cpus: vec![cpu; 25],
+                    ..sampled_at((1 + seq as u64) * 1_000_000_000)
+                };
+                apply(
+                    &mut app.live_hosts,
+                    sysmon_ingest::Event::Frame(test_frame(1, seq, system)),
+                );
+            }
+            app.ensure_selection();
+            cx.notify();
+        });
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let mut per_row: std::collections::BTreeMap<i32, usize> = Default::default();
+            for i in 0..24usize {
+                let y = f32::from(w.find(("core", i)).bounds().origin.y) as i32;
+                *per_row.entry(y).or_default() += 1;
+            }
+            let counts: Vec<usize> = per_row.into_values().collect();
+            assert!(counts.len() > 1, "wraps in a 1200 px window: {counts:?}");
+            assert!(
+                counts.iter().all(|&n| n == counts[0]),
+                "even rows: {counts:?}"
+            );
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
