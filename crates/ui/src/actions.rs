@@ -122,7 +122,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
         "General",
         ["escape"],
         Dismiss,
-        false,
+        true,
         "Close this list, or clear the filter"
     ),
     shortcut!("View", ["ctrl-1"], ShowLive, true, "Live view"),
