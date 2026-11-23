@@ -438,6 +438,11 @@ impl AppState {
         ids.into_iter().map(|(_, id)| id).collect()
     }
 
+    /// The host selected in the sidebar, if it's (still) there.
+    fn current_host(&self) -> Option<&HostModel> {
+        self.selected.and_then(|id| self.hosts().get(&id))
+    }
+
     fn ensure_selection(&mut self) {
         let hosts = self.hosts();
         if self.selected.is_none_or(|id| !hosts.contains_key(&id)) {
@@ -1551,7 +1556,7 @@ impl AppState {
 
     /// Move the cursor by `delta` rows in the table's current order.
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let Some(host) = self.selected.and_then(|id| self.hosts().get(&id)) else {
+        let Some(host) = self.current_host() else {
             return;
         };
         let lines = self.table_lines(host, cx);
@@ -1572,7 +1577,7 @@ impl AppState {
 
     /// Toggle the cursor row in the graph.
     fn toggle_cursor(&mut self, cx: &mut Context<Self>) {
-        let Some(host) = self.selected.and_then(|id| self.hosts().get(&id)) else {
+        let Some(host) = self.current_host() else {
             return;
         };
         let lines = self.table_lines(host, cx);
@@ -1626,7 +1631,7 @@ impl AppState {
     /// Remember the command of each graphed process while it's still
     /// running, and forget those no longer graphed.
     fn refresh_graph_names(&mut self) {
-        let Some(host) = self.selected.and_then(|id| self.hosts().get(&id)) else {
+        let Some(host) = self.current_host() else {
             return;
         };
         let here = (self.view, host.host_id);
@@ -1945,7 +1950,7 @@ impl AppState {
 
     /// Move the process table's cursor to `pid`, if it's in the table.
     fn show_process(&mut self, pid: u32, cx: &mut Context<Self>) {
-        let Some(host) = self.selected.and_then(|id| self.hosts().get(&id)) else {
+        let Some(host) = self.current_host() else {
             return;
         };
         let Some(key) = host
@@ -2569,7 +2574,7 @@ impl AppState {
     /// Collapse every process that has children in the selected host.
     fn collapse_all(&mut self, cx: &mut Context<Self>) {
         cx.notify();
-        let Some(host) = self.selected.and_then(|id| self.hosts().get(&id)) else {
+        let Some(host) = self.current_host() else {
             return;
         };
         let parents: HashSet<u32> = host.snapshot.procs.iter().map(|p| p.ppid).collect();
@@ -2937,7 +2942,7 @@ impl Render for AppState {
         let sidebar = self.render_sidebar(cx);
         let timeline = self.render_timeline(cx);
 
-        let main = match self.selected.and_then(|id| self.hosts().get(&id)) {
+        let main = match self.current_host() {
             Some(host) => {
                 let graph = panel_shown.then(|| {
                     if self.show_logs {
