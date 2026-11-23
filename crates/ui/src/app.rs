@@ -1375,6 +1375,7 @@ impl AppState {
                         .id(("row", i))
                         .test_support()
                         .on_click(on_row)
+                        .w_full()
                         .flex()
                         .gap_2()
                         .px_2()
@@ -4210,6 +4211,28 @@ mod tests {
                 .collect();
             assert_eq!(tids, [12, 11, 10]);
         });
+    }
+
+    /// Stripes and the cursor highlight span the table, however short the
+    /// row's command (they stopped where the text did, leaving boxes).
+    #[gpui_kit::test]
+    fn rows_span_the_table(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let table = w.find("procs-panel").bounds();
+            for i in 0..4usize {
+                let row = w.find(("row", i)).bounds();
+                assert!(
+                    (row.size.width - table.size.width).abs() < px(1.),
+                    "row {i}: {:?} of {:?}",
+                    row.size.width,
+                    table.size.width
+                );
+            }
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
