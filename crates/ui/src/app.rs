@@ -111,7 +111,9 @@ pub struct AppState {
     hide_kernel: bool,
     /// List each process's threads (off by default; needs `agent --threads`).
     show_threads: bool,
-    collapsed: HashSet<ProcKey>,
+    /// Collapsed tree nodes, per view and host: process keys are only
+    /// unique within a host (pid 1 started at the same tick on many).
+    collapsed: HashMap<(View, u64), HashSet<ProcKey>>,
     /// Processes picked for the graph, per view and host.
     selections: HashMap<(View, u64), Selection>,
     /// The highlighted row, moved with ↑/↓ and toggled into the graph with G.
@@ -123,8 +125,8 @@ pub struct AppState {
     graph_hover: Option<f32>,
     graph_bounds: graph::ChartBounds,
     /// Last known command of each graphed process, so the legend can still
-    /// name processes that have exited.
-    graph_names: HashMap<ProcKey, String>,
+    /// name processes that have exited; per view and host, like `selections`.
+    graph_names: HashMap<(View, u64), HashMap<ProcKey, String>>,
     /// Graph lines kept between redraws (the chart redraws on every mouse
     /// move), by view, host, target and metric.
     graph_lines: std::cell::RefCell<graph::LineCache<(View, u64, SeriesTarget, Metric)>>,
@@ -292,7 +294,7 @@ impl AppState {
             tree: false,
             hide_kernel: true,
             show_threads: false,
-            collapsed: HashSet::new(),
+            collapsed: HashMap::new(),
             selections: HashMap::new(),
             cursor: None,
             graph_metric: Metric::Cpu,
@@ -420,6 +422,8 @@ impl AppState {
             self.live_hosts.remove(&id);
             self.live_heard.remove(&id);
             self.selections.remove(&(View::Live, id));
+            self.collapsed.remove(&(View::Live, id));
+            self.graph_names.remove(&(View::Live, id));
         }
     }
 
@@ -1144,7 +1148,12 @@ impl AppState {
         }
         let filter: Option<&dyn Fn(&ProcRow) -> bool> =
             filtering.then_some(&matches as &dyn Fn(&ProcRow) -> bool);
-        for t in sysmon_model::tree::build(&rows, filter, &self.collapsed) {
+        let no_collapsed = HashSet::new();
+        let collapsed = self
+            .selected
+            .and_then(|h| self.collapsed.get(&(self.view, h)))
+            .unwrap_or(&no_collapsed);
+        for t in sysmon_model::tree::build(&rows, filter, collapsed) {
             let row = rows[t.row].clone();
             let threads = if t.collapsed {
                 Vec::new()
@@ -1461,7 +1470,7 @@ impl AppState {
                                 .small()
                                 .ghost()
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.collapsed.clear();
+                                    this.expand_all();
                                     cx.notify();
                                 })),
                         )
@@ -1633,14 +1642,18 @@ impl AppState {
         self.graph_visible && self.selection().is_some_and(|s| !s.is_empty())
     }
 
-    /// Remember the command of each graphed process while it's still running.
+    /// Remember the command of each graphed process while it's still
+    /// running, and forget those no longer graphed.
     fn refresh_graph_names(&mut self) {
         let Some(host) = self.selected.and_then(|id| self.hosts().get(&id)) else {
             return;
         };
+        let here = (self.view, host.host_id);
         let Some(sel) = self.selection() else {
+            self.graph_names.remove(&here);
             return;
         };
+        let picked: HashSet<ProcKey> = sel.iter().map(|p| p.target.key()).collect();
         let names: Vec<(ProcKey, String)> = sel
             .iter()
             .filter_map(|p| {
@@ -1653,7 +1666,9 @@ impl AppState {
                 Some((key, row.comm.clone()))
             })
             .collect();
-        self.graph_names.extend(names);
+        let known = self.graph_names.entry(here).or_default();
+        known.retain(|k, _| picked.contains(k));
+        known.extend(names);
     }
 
     fn render_graph(&self, host: &HostModel, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1848,7 +1863,8 @@ impl AppState {
             let key = p.target.key();
             let name = self
                 .graph_names
-                .get(&key)
+                .get(&(view, host.host_id))
+                .and_then(|n| n.get(&key))
                 .cloned()
                 .unwrap_or_else(|| "?".into());
             let latest = host.latest(p.target, metric);
@@ -2405,7 +2421,7 @@ impl AppState {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ExpandAll, _, cx| {
-                this.collapsed.clear();
+                this.expand_all();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CollapseAll, _, cx| {
@@ -2568,13 +2584,32 @@ impl AppState {
             return;
         };
         let parents: HashSet<u32> = host.snapshot.procs.iter().map(|p| p.ppid).collect();
-        self.collapsed = host
+        let all = host
             .snapshot
             .procs
             .iter()
             .filter(|p| parents.contains(&p.key.pid))
             .map(|p| p.key)
             .collect();
+        self.collapsed.insert((self.view, host.host_id), all);
+    }
+
+    /// Expand every process in the selected host.
+    fn expand_all(&mut self) {
+        if let Some(host) = self.selected {
+            self.collapsed.remove(&(self.view, host));
+        }
+    }
+
+    /// Collapse or expand `key` in the selected host's tree.
+    fn toggle_collapsed(&mut self, key: ProcKey) {
+        let Some(host) = self.selected else {
+            return;
+        };
+        let set = self.collapsed.entry((self.view, host)).or_default();
+        if !set.remove(&key) {
+            set.insert(key);
+        }
     }
 
     /// Red ticks under the timeline where the selected host logged errors.
@@ -2797,9 +2832,7 @@ fn command_cell(
             .child(if t.collapsed { "▸" } else { "▾" })
             .on_click(move |_, _, cx| {
                 let _ = this.update(cx, |this, cx| {
-                    if !this.collapsed.remove(&key) {
-                        this.collapsed.insert(key);
-                    }
+                    this.toggle_collapsed(key);
                     cx.notify();
                 });
             })
@@ -3131,6 +3164,11 @@ mod tests {
 
     /// Sample `seq` of the test host, `seq` seconds in, with CPU ticks growing.
     fn add_frame(app: &Entity<AppState>, cx: &mut TestAppContext, seq: u32) {
+        add_frame_for(app, cx, 1, seq);
+    }
+
+    /// [`add_frame`] for host `host_id`: the same processes, so the same keys.
+    fn add_frame_for(app: &Entity<AppState>, cx: &mut TestAppContext, host_id: u64, seq: u32) {
         app.update(cx, |app, cx| {
             // 1 ─┬─ 10 ── 11      10 also has threads 101 "worker-a" and 102 "io".
             //    └─ 20
@@ -3150,7 +3188,7 @@ mod tests {
                 kernel_thread: None,
             };
             let frame = sysmon_proto::Frame {
-                host_id: 1,
+                host_id,
                 boot_id: 1,
                 seq,
                 system: Some(sysmon_proto::SystemSample {
@@ -3677,7 +3715,10 @@ mod tests {
             );
         });
         app.read_with(cx, |app, _| {
-            assert_eq!(app.graph_names[&key(101)], "worker-a (thread of 10)");
+            assert_eq!(
+                app.graph_names[&(View::Live, 1)][&key(101)],
+                "worker-a (thread of 10)"
+            );
         });
     }
 
@@ -4098,6 +4139,65 @@ mod tests {
                 .map(|l| l.key().pid)
                 .collect();
             assert_eq!(tids, [12, 11, 10]);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn tree_state_and_legend_names_stay_with_their_host(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_frame_for(&app, cx, 1, 0);
+        add_frame_for(&app, cx, 2, 0);
+        let collapsed_rows = |app: &Entity<AppState>, cx: &mut TestAppContext| {
+            app.update(cx, |app, cx| {
+                let host = &app.hosts()[&app.selected.unwrap()];
+                app.table_lines(host, cx)
+                    .iter()
+                    .filter(|l| l.tree.as_ref().is_some_and(|t| t.collapsed))
+                    .map(|l| l.row.key.pid)
+                    .collect::<Vec<_>>()
+            })
+        };
+        app.update(cx, |app, cx| {
+            app.tree = true;
+            app.selected = Some(1);
+            app.toggle_collapsed(key(1));
+            app.selection_mut()
+                .unwrap()
+                .add(SeriesTarget::Process(key(10)))
+                .unwrap();
+            cx.notify();
+        });
+        cx.update_window(window, |_, w, cx| w.render_frame(cx))
+            .unwrap();
+        assert_eq!(collapsed_rows(&app, cx), [1]);
+        app.update(cx, |app, cx| {
+            app.selected = Some(2);
+            cx.notify();
+        });
+        cx.update_window(window, |_, w, cx| w.render_frame(cx))
+            .unwrap();
+        assert!(
+            collapsed_rows(&app, cx).is_empty(),
+            "host 2's pid 1 isn't collapsed"
+        );
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.graph_names[&(View::Live, 1)][&key(10)], "bash");
+            assert!(!app.graph_names.contains_key(&(View::Live, 2)));
+        });
+        // Unpicked, its name goes too.
+        app.update(cx, |app, cx| {
+            app.selected = Some(1);
+            app.selection_mut().unwrap().clear();
+            cx.notify();
+        });
+        cx.update_window(window, |_, w, cx| w.render_frame(cx))
+            .unwrap();
+        app.read_with(cx, |app, _| {
+            assert!(
+                app.graph_names
+                    .get(&(View::Live, 1))
+                    .is_none_or(|n| n.is_empty())
+            );
         });
     }
 
