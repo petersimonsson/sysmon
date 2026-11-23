@@ -1308,9 +1308,11 @@ impl AppState {
                     let line = &rows[i];
                     let p = &line.row;
                     let th = line.thread.as_ref();
+                    // Thread rows are always dim, so only a process's own
+                    // staleness matters here.
                     let dim = th.is_some()
                         || line.context
-                        || th.map_or(p.stale, |t| t.stale)
+                        || p.stale
                         || line.tree.as_ref().is_some_and(|t| !t.matched);
                     let slot = picked.get(&line.key()).copied();
                     // Process-only figures: a thread's memory and thread
