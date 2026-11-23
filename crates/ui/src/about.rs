@@ -4,13 +4,14 @@
 use std::rc::Rc;
 
 use gpui_kit::TestSupportExt as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::notices::{self, CRATES, CrateNotice};
+use crate::widgets::Chosen as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shown {
@@ -194,8 +195,7 @@ impl Render for AboutView {
                                 Button::new("about-mit")
                                     .label("MIT")
                                     .small()
-                                    .when(shown == Shown::Mit, |b| b.primary())
-                                    .when(shown != Shown::Mit, |b| b.ghost())
+                                    .chosen(shown == Shown::Mit)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.shown = Shown::Mit;
                                         cx.notify();
@@ -205,8 +205,7 @@ impl Render for AboutView {
                                 Button::new("about-apache")
                                     .label("Apache-2.0")
                                     .small()
-                                    .when(shown == Shown::Apache, |b| b.primary())
-                                    .when(shown != Shown::Apache, |b| b.ghost())
+                                    .chosen(shown == Shown::Apache)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.shown = Shown::Apache;
                                         cx.notify();
