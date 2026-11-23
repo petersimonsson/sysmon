@@ -1554,6 +1554,15 @@ impl AppState {
         cx.notify();
     }
 
+    /// Take a process (or thread) out of the graph.
+    fn remove_pick(&mut self, key: ProcKey, cx: &mut Context<Self>) {
+        if let Some(s) = self.selection_mut() {
+            s.remove(key);
+        }
+        self.report_full(Ok(()));
+        cx.notify();
+    }
+
     /// Move the cursor by `delta` rows in the table's current order.
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(host) = self.current_host() else {
@@ -1890,13 +1899,7 @@ impl AppState {
                             .cursor_pointer()
                             .text_color(theme.muted_foreground)
                             .child("×")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(s) = this.selection_mut() {
-                                    s.remove(key);
-                                }
-                                this.report_full(Ok(()));
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(move |this, _, _, cx| this.remove_pick(key, cx))),
                     ),
             );
         }
