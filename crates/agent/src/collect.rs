@@ -366,9 +366,10 @@ fn parse_proc_stat(pid: u32, s: &str) -> Option<ProcSample> {
     // `comm` is in parentheses and may itself contain spaces or ')'.
     let open = s.find('(')?;
     let close = s.rfind(')')?;
-    let comm = s[open + 1..close].to_string();
+    // Checked slices: whatever the file holds mustn't panic the agent.
+    let comm = s.get(open + 1..close)?.to_string();
     // Fields after comm, numbered from 3 as in proc(5).
-    let f: Vec<&str> = s[close + 2..].split_ascii_whitespace().collect();
+    let f: Vec<&str> = s.get(close + 2..)?.split_ascii_whitespace().collect();
     let field = |n: usize| f.get(n - 3).copied();
     let num = |n: usize| field(n).and_then(|v| v.parse::<u64>().ok());
     Some(ProcSample {
@@ -662,6 +663,9 @@ mod tests {
             (t.tgid, t.tid, t.utime, &t.comm[..]),
             (1234, 1240, 250, "my (weird) proc")
         );
+        // Cut short, or out of order: no sample, and no panic.
+        assert!(parse_proc_stat(1, "1 (sh)").is_none());
+        assert!(parse_proc_stat(1, "1 ) (").is_none());
         assert_eq!(parse_statm_shared("5000 2048 512 100 0 900 0\n"), Some(512));
         assert_eq!(parse_statm_shared("5000 2048"), None);
     }
