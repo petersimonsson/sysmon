@@ -668,11 +668,7 @@ impl AppState {
                     .label("Live")
                     .small()
                     .when(self.view == View::Live, |b| b.primary())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.view = View::Live;
-                        this.ensure_selection();
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, _, cx| this.show(View::Live, cx))),
             );
         }
         if let Some(s) = &self.replay {
@@ -682,11 +678,7 @@ impl AppState {
                         .label("Recording")
                         .small()
                         .when(self.view == View::Replay, |b| b.primary())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.view = View::Replay;
-                            this.ensure_selection();
-                            cx.notify();
-                        })),
+                        .on_click(cx.listener(|this, _, _, cx| this.show(View::Replay, cx))),
                 )
                 .child(
                     div()
@@ -1442,30 +1434,21 @@ impl AppState {
                             .label("Tree")
                             .small()
                             .chosen(self.tree)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.tree = !this.tree;
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_tree(cx))),
                     )
                     .child(
                         Button::new("kernel-toggle")
                             .label("Hide kernel threads")
                             .small()
                             .chosen(self.hide_kernel)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.hide_kernel = !this.hide_kernel;
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_kernel_threads(cx))),
                     )
                     .child(
                         Button::new("threads-toggle")
                             .label("Show threads")
                             .small()
                             .chosen(self.show_threads)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_threads = !this.show_threads;
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_threads(cx))),
                     )
                     .when(self.tree, |d| {
                         d.child(
@@ -1473,20 +1456,14 @@ impl AppState {
                                 .label("Expand all")
                                 .small()
                                 .ghost()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.expand_all();
-                                    cx.notify();
-                                })),
+                                .on_click(cx.listener(|this, _, _, cx| this.expand_all(cx))),
                         )
                         .child(
                             Button::new("collapse-all")
                                 .label("Collapse all")
                                 .small()
                                 .ghost()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.collapse_all();
-                                    cx.notify();
-                                })),
+                                .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
                         )
                     })
                     .child(
@@ -2417,26 +2394,13 @@ impl AppState {
                 this.show_shortcuts = !this.show_shortcuts;
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ToggleKernelThreads, _, cx| {
-                this.hide_kernel = !this.hide_kernel;
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ToggleThreads, _, cx| {
-                this.show_threads = !this.show_threads;
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ToggleTree, _, cx| {
-                this.tree = !this.tree;
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ExpandAll, _, cx| {
-                this.expand_all();
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &CollapseAll, _, cx| {
-                this.collapse_all();
-                cx.notify();
-            }))
+            .on_action(
+                cx.listener(|this, _: &ToggleKernelThreads, _, cx| this.toggle_kernel_threads(cx)),
+            )
+            .on_action(cx.listener(|this, _: &ToggleThreads, _, cx| this.toggle_threads(cx)))
+            .on_action(cx.listener(|this, _: &ToggleTree, _, cx| this.toggle_tree(cx)))
+            .on_action(cx.listener(|this, _: &ExpandAll, _, cx| this.expand_all(cx)))
+            .on_action(cx.listener(|this, _: &CollapseAll, _, cx| this.collapse_all(cx)))
             .on_action(cx.listener(|this, _: &SortByCpu, _, cx| this.sort_by(SortKey::Cpu, cx)))
             .on_action(cx.listener(|this, _: &SortByMemory, _, cx| this.sort_by(SortKey::Res, cx)))
             .on_action(cx.listener(|this, _: &SortByVirt, _, cx| this.sort_by(SortKey::Virt, cx)))
@@ -2587,8 +2551,24 @@ impl AppState {
             )
     }
 
+    fn toggle_tree(&mut self, cx: &mut Context<Self>) {
+        self.tree = !self.tree;
+        cx.notify();
+    }
+
+    fn toggle_kernel_threads(&mut self, cx: &mut Context<Self>) {
+        self.hide_kernel = !self.hide_kernel;
+        cx.notify();
+    }
+
+    fn toggle_threads(&mut self, cx: &mut Context<Self>) {
+        self.show_threads = !self.show_threads;
+        cx.notify();
+    }
+
     /// Collapse every process that has children in the selected host.
-    fn collapse_all(&mut self) {
+    fn collapse_all(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
         let Some(host) = self.selected.and_then(|id| self.hosts().get(&id)) else {
             return;
         };
@@ -2604,7 +2584,8 @@ impl AppState {
     }
 
     /// Expand every process in the selected host.
-    fn expand_all(&mut self) {
+    fn expand_all(&mut self, cx: &mut Context<Self>) {
+        cx.notify();
         if let Some(host) = self.selected {
             self.collapsed.remove(&(self.view, host));
         }
