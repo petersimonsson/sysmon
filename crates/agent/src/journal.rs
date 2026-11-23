@@ -183,7 +183,7 @@ fn follow(config: Config, shared: Arc<Mutex<Shared>>) {
         let _ = child.kill();
         let status = child.wait();
         let failed = !status.as_ref().is_ok_and(|s| s.success());
-        tracing::warn!(?status, "journalctl stopped; starting it again in 10 s");
+        tracing::warn!(?status, restart_in = ?RESTART_AFTER, "journalctl stopped; starting it again");
         // A saved position the journal no longer has (vacuumed, or from
         // another machine's image) makes journalctl fail at once: start
         // from new lines instead.
