@@ -2649,9 +2649,10 @@ impl AppState {
                         .gap_3()
                         .text_xs()
                         .child(
+                            // The UI font: the monospace one drew ← → ↑ ↓ tiny.
                             div()
                                 .w(px(110.))
-                                .font_family(theme.mono_font_family.clone())
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.primary)
                                 .child(keys),
                         )
