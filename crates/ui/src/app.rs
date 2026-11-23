@@ -5872,6 +5872,130 @@ mod tests {
         .unwrap();
     }
 
+    /// In the shortest panel, the details lists scroll: their rows keep
+    /// their height rather than being squeezed together to fit.
+    #[gpui_kit::test]
+    fn details_rows_stay_whole_in_a_short_panel(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        send_threads(&app, cx);
+        app.update(cx, |app, cx| {
+            let proc = |pid: u32, ppid: u32, comm: String| sysmon_proto::ProcSample {
+                pid,
+                ppid,
+                starttime: 0,
+                state: b'S',
+                utime: 0,
+                stime: 0,
+                rss_pages: 1,
+                threads: 1,
+                comm,
+                vsize_bytes: None,
+                shared_pages: None,
+                kernel_thread: Some(false),
+            };
+            // pid 10 with 20 children, 40 threads and 20 log lines.
+            let frame = sysmon_proto::Frame {
+                procs: std::iter::once(proc(10, 1, "server".into()))
+                    .chain((0..20).map(|i| proc(1000 + i, 10, format!("child-{i}"))))
+                    .collect(),
+                threads: (0..40)
+                    .map(|i| sysmon_proto::ThreadSample {
+                        tgid: 10,
+                        tid: 100 + i,
+                        starttime: 0,
+                        state: b'S',
+                        utime: 0,
+                        stime: 0,
+                        comm: format!("worker-{i}"),
+                    })
+                    .collect(),
+                ..test_frame(1, 0, sampled_at(1_000_000_000))
+            };
+            apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+            let entries = (0..20)
+                .map(|i| sysmon_proto::LogEntry {
+                    ts_unix_ns: 1_000_000_000 + i,
+                    priority: 6,
+                    unit: Some("server.service".into()),
+                    ident: "server".into(),
+                    pid: Some(10),
+                    message: format!("line {i}"),
+                    truncated: false,
+                })
+                .collect();
+            apply(
+                &mut app.live_hosts,
+                sysmon_ingest::Event::Logs {
+                    host_id: 1,
+                    boot_id: 1,
+                    batch: sysmon_proto::LogBatch {
+                        run: 1,
+                        first_seq: 0,
+                        dropped: 0,
+                        entries,
+                    },
+                    received_ns: 1_000_000_000,
+                },
+            );
+            app.ensure_selection();
+            app.cursor = Some(key(10));
+            app.panel = Panel::Details;
+            app.graph_height = px(super::GRAPH_MIN);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let panel = w.find("details-lists").bounds();
+            let list = |id: &'static str, n: usize| -> Vec<_> {
+                (0..n).map(|i| w.find((id, i)).bounds()).collect()
+            };
+            let children = list("details-child", 20);
+            let threads = list("details-thread", 40);
+            let logs = list("details-log", 20);
+            // One column: children, then threads, then log lines.
+            let column: Vec<_> = [&children, &threads, &logs]
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect();
+            assert!(
+                column.last().unwrap().bottom() > panel.bottom(),
+                "80 rows don't fit {panel:?}: the list scrolls"
+            );
+            // The facts beside them too.
+            let facts: Vec<_> = [
+                "details-pid",
+                "details-parent",
+                "details-user",
+                "details-state",
+                "details-started",
+                "details-running",
+                "details-threads",
+                "details-cmdline",
+            ]
+            .into_iter()
+            .map(|id| w.find(id).bounds())
+            .collect();
+            for (rows, what) in [
+                (&children, "child"),
+                (&threads, "thread"),
+                (&logs, "log line"),
+                (&column, "list row"),
+                (&facts, "fact"),
+            ] {
+                for pair in rows.windows(2) {
+                    assert!(pair[0].size.height >= px(12.), "{what} squeezed: {pair:?}");
+                    assert!(
+                        pair[1].top() >= pair[0].bottom(),
+                        "{what}s overlap: {pair:?}"
+                    );
+                }
+            }
+        })
+        .unwrap();
+    }
+
     #[gpui_kit::test]
     fn replay_catch_up_is_applied_in_slices_and_skips_superseded_work(cx: &mut TestAppContext) {
         let (_window, app) = open(cx);
