@@ -90,6 +90,11 @@ fn check_syntax(target: &str) -> anyhow::Result<()> {
     if host.is_empty() || port.parse::<u16>().is_err() {
         bail!("{target}: expected host:port");
     }
+    // An IPv6 address that didn't parse above lacks brackets (`::1:9876`),
+    // and would never resolve.
+    if host.contains(':') {
+        bail!("{target}: put an IPv6 address in brackets, as [::1]:9876");
+    }
     Ok(())
 }
 
@@ -162,6 +167,8 @@ mod tests {
             ":9876",
             "monitor:port",
             "monitor:99999",
+            "::1:9876",
+            "2001:db8::7:1",
         ] {
             assert!(check_syntax(bad).is_err(), "{bad}");
         }
