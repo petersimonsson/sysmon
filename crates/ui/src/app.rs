@@ -27,7 +27,7 @@ use crate::actions::{self, *};
 use crate::format;
 use crate::graph;
 use crate::selection::{self, Selection};
-use crate::widgets::{bar, sparkline};
+use crate::widgets::{Chosen as _, bar, sparkline};
 
 const ROW_HEIGHT: f32 = 20.;
 /// Width of the VIRT, RES and SHR columns; fits "1023.9 MiB".
@@ -1441,8 +1441,7 @@ impl AppState {
                         Button::new("tree")
                             .label("Tree")
                             .small()
-                            .when(self.tree, |b| b.primary())
-                            .when(!self.tree, |b| b.ghost())
+                            .chosen(self.tree)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.tree = !this.tree;
                                 cx.notify();
@@ -1452,8 +1451,7 @@ impl AppState {
                         Button::new("kernel-toggle")
                             .label("Hide kernel threads")
                             .small()
-                            .when(self.hide_kernel, |b| b.primary())
-                            .when(!self.hide_kernel, |b| b.ghost())
+                            .chosen(self.hide_kernel)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.hide_kernel = !this.hide_kernel;
                                 cx.notify();
@@ -1463,8 +1461,7 @@ impl AppState {
                         Button::new("threads-toggle")
                             .label("Show threads")
                             .small()
-                            .when(self.show_threads, |b| b.primary())
-                            .when(!self.show_threads, |b| b.ghost())
+                            .chosen(self.show_threads)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.show_threads = !this.show_threads;
                                 cx.notify();
@@ -1727,8 +1724,7 @@ impl AppState {
                 Button::new(("metric", i))
                     .label(m.label())
                     .small()
-                    .when(m == metric, |b| b.primary())
-                    .when(m != metric, |b| b.ghost())
+                    .chosen(m == metric)
                     .on_click(cx.listener(move |this, _, _, cx| this.set_metric(m, cx))),
             );
         }
@@ -1738,8 +1734,7 @@ impl AppState {
                 Button::new(("window", i))
                     .label(format!("{} min", w / 60))
                     .small()
-                    .when(w == self.graph_window_s, |b| b.primary())
-                    .when(w != self.graph_window_s, |b| b.ghost())
+                    .chosen(w == self.graph_window_s)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.graph_window_s = w;
                         cx.notify();
@@ -2026,8 +2021,7 @@ impl AppState {
                 Button::new("tab-graph")
                     .label("Graph")
                     .small()
-                    .when(!self.show_logs, |b| b.primary())
-                    .when(self.show_logs, |b| b.ghost())
+                    .chosen(!self.show_logs)
                     // There's nothing to graph until processes are picked.
                     .disabled(!picked)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2040,8 +2034,7 @@ impl AppState {
                 Button::new("tab-logs")
                     .label("Logs")
                     .small()
-                    .when(self.show_logs, |b| b.primary())
-                    .when(!self.show_logs, |b| b.ghost())
+                    .chosen(self.show_logs)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_logs = true;
                         cx.notify();
@@ -2094,8 +2087,7 @@ impl AppState {
                     Button::new(("logs-priority", p as usize))
                         .label(label)
                         .small()
-                        .when(self.log_min_priority == p, |b| b.primary())
-                        .when(self.log_min_priority != p, |b| b.ghost())
+                        .chosen(self.log_min_priority == p)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.log_min_priority = p;
                             cx.notify();
@@ -2678,8 +2670,7 @@ impl AppState {
                 Button::new(("speed", i))
                     .label(format!("{speed}×"))
                     .small()
-                    .when((st.speed - speed).abs() < f64::EPSILON, |b| b.primary())
-                    .when((st.speed - speed).abs() >= f64::EPSILON, |b| b.ghost())
+                    .chosen((st.speed - speed).abs() < f64::EPSILON)
                     .on_click(
                         cx.listener(move |this, _, _, _| this.control(Control::SetSpeed(speed))),
                     ),

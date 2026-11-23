@@ -1,6 +1,20 @@
-//! Small drawing helpers: usage bars and sparklines.
+//! Small drawing helpers: usage bars, sparklines, and the look of buttons
+//! that pick one of several options or switch something on.
 
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::*;
+
+/// A button drawn as chosen (primary) or not (ghost). Not `toggled`:
+/// gpui-kit's `Button::toggled` only sets the accessible pressed state.
+pub trait Chosen {
+    fn chosen(self, on: bool) -> Self;
+}
+
+impl Chosen for Button {
+    fn chosen(self, on: bool) -> Self {
+        if on { self.primary() } else { self.ghost() }
+    }
+}
 
 /// A horizontal bar filled to `pct` (0..=100).
 pub fn bar(pct: f32, width: Pixels, track: Hsla, fill: Hsla) -> impl IntoElement {
