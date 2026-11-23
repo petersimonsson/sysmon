@@ -6,7 +6,7 @@ pub use assembler::{Assembler, Event};
 
 use std::net::{SocketAddr, UdpSocket};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// A datagram exactly as received, for the recorder.
 #[derive(Debug, Clone)]
@@ -104,9 +104,4 @@ fn run(socket: UdpSocket, opener: sysmon_proto::Opener, sinks: Sinks) {
     }
 }
 
-pub fn unix_now_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-}
+pub use sysmon_proto::unix_now_ns;

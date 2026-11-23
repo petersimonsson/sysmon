@@ -12,7 +12,7 @@ static NOTICES: sysmon_notices::Notices = sysmon_notices::embed!();
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Parser;
@@ -164,7 +164,7 @@ fn main() -> anyhow::Result<()> {
         let mut datagrams = Vec::new();
         let host_tick = seq.is_multiple_of(host_info_every);
 
-        let system = collect::system(unix_now_ns());
+        let system = collect::system(sysmon_proto::unix_now_ns());
         collector.procs(&mut procs, args.threads.then_some(&mut threads));
 
         // Metadata for new processes, or for all of them on a refresh tick.
@@ -387,13 +387,6 @@ fn host_info_datagram(
         chunks: 1,
     };
     sysmon_proto::encode(&header, &Msg::HostInfo(info.clone()))
-}
-
-fn unix_now_ns() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
