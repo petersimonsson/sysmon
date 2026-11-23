@@ -270,6 +270,23 @@ pub const SHORTCUTS: &[Shortcut] = &[
     ),
 ];
 
+/// What the mouse does, for the shortcuts overlay: gestures there are no
+/// keys for, or that do more than their key.
+pub const MOUSE: &[(&str, &str)] = &[
+    ("Click a row", "Move the cursor to it"),
+    ("Ctrl+click", "Graph the row, or stop"),
+    ("Shift+click", "Graph the rows from the last one picked"),
+    ("Click a column", "Sort by it, again to reverse"),
+    (
+        "Click a log line",
+        "Highlight it (in a recording, go there)",
+    ),
+    ("Click a unit", "Show only its log lines"),
+    ("Click a log's PID", "Find the process in the table"),
+    ("Click a timeline mark", "Go to the error, logs open"),
+    ("Drag the divider", "Resize the graph or log panel"),
+];
+
 /// Register key bindings and menus. Call once, after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
     cx.bind_keys(SHORTCUTS.iter().flat_map(|s| {
