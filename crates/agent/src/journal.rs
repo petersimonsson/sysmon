@@ -176,6 +176,11 @@ fn follow(config: Config, shared: Arc<Mutex<Shared>>) {
                 s.dropped = s.dropped.saturating_add(1);
             }
         }
+        // Reading also stops on output that can't be parsed, with
+        // journalctl still running: waiting on it then would never return
+        // once the unread pipe filled. (Killing one that has exited is a
+        // no-op.)
+        let _ = child.kill();
         let status = child.wait();
         let failed = !status.as_ref().is_ok_and(|s| s.success());
         tracing::warn!(?status, "journalctl stopped; starting it again in 10 s");
@@ -545,6 +550,54 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         script
+    }
+
+    #[test]
+    fn journalctl_is_stopped_when_its_output_cant_be_parsed() {
+        let dir = std::env::temp_dir().join(format!("sysmon-garbage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A binary field claiming 2^60 bytes, then journalctl carries on.
+        let mut garbage = b"MESSAGE\n".to_vec();
+        garbage.extend_from_slice(&(1u64 << 60).to_le_bytes());
+        std::fs::write(dir.join("records"), garbage).unwrap();
+        let script = dir.join("journalctl");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho $$ > {pid}\ncat {records}\nexec sleep 60\n",
+                pid = dir.join("pid").display(),
+                records = dir.join("records").display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let _j = Journal::spawn(Config {
+            program: script,
+            priority: 4,
+            units: vec![],
+            cursor_file: None,
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pid: u32 = loop {
+            if let Some(p) = std::fs::read_to_string(dir.join("pid"))
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                break p;
+            }
+            assert!(Instant::now() < deadline, "journalctl never started");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Gone (and reaped, so not even a zombie) rather than left blocking.
+        while Path::new(&format!("/proc/{pid}")).exists() {
+            assert!(Instant::now() < deadline, "journalctl left running");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn take_until(j: &mut Journal, n: usize) -> Vec<LogBatch> {
