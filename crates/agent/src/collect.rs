@@ -122,14 +122,13 @@ pub fn system(ts_unix_ns: u64) -> SystemSample {
 /// file kept open fails to read rather than showing another process, so a
 /// reused pid is never mixed up: the file is just opened again.
 ///
-/// At most [`Collector::max_open`] files are kept (the rest are opened per
+/// At most [`Budget::max`] files are kept (the rest are opened per
 /// read as before), under the open-file limit, which [`Collector::new`]
 /// raises to its hard maximum.
 pub struct Collector {
     procs: HashMap<u32, ProcFiles>,
     threads: HashMap<u32, fs::File>,
-    open: usize,
-    max_open: usize,
+    budget: Budget,
 }
 
 #[derive(Default)]
@@ -151,8 +150,10 @@ impl Collector {
         Self {
             procs: HashMap::new(),
             threads: HashMap::new(),
-            open: 0,
-            max_open,
+            budget: Budget {
+                open: 0,
+                max: max_open,
+            },
         }
     }
 
@@ -180,13 +181,9 @@ impl Collector {
             };
             seen.insert(pid);
             let files = self.procs.entry(pid).or_default();
-            let budget = Budget {
-                open: &mut self.open,
-                max: self.max_open,
-            };
             let Some(mut p) = read_kept(
                 &mut files.stat,
-                budget,
+                &mut self.budget,
                 || format!("/proc/{pid}/stat"),
                 |s| parse_proc_stat(pid, s),
             )
@@ -195,13 +192,9 @@ impl Collector {
             };
             // SHR is only in statm. If the process exits in between, it's
             // simply unknown for this sample.
-            let budget = Budget {
-                open: &mut self.open,
-                max: self.max_open,
-            };
             p.shared_pages = read_kept(
                 &mut files.statm,
-                budget,
+                &mut self.budget,
                 || format!("/proc/{pid}/statm"),
                 parse_statm_shared,
             )
@@ -230,7 +223,7 @@ impl Collector {
             closed += !keep as usize;
             keep
         });
-        self.open -= closed;
+        self.budget.open -= closed;
     }
 
     fn read_threads(&mut self, tgid: u32, out: &mut Vec<ThreadSample>, seen: &mut HashSet<u32>) {
@@ -249,13 +242,9 @@ impl Collector {
                 continue;
             }
             let mut slot = self.threads.remove(&tid);
-            let budget = Budget {
-                open: &mut self.open,
-                max: self.max_open,
-            };
             let t = read_kept(
                 &mut slot,
-                budget,
+                &mut self.budget,
                 || format!("/proc/{tgid}/task/{tid}/stat"),
                 |s| parse_thread_stat(tgid, tid, s),
             )
@@ -273,13 +262,13 @@ impl Collector {
     /// Files kept open now.
     #[cfg(test)]
     fn open_files(&self) -> usize {
-        self.open
+        self.budget.open
     }
 }
 
 /// The count of kept files, and the most allowed.
-struct Budget<'a> {
-    open: &'a mut usize,
+struct Budget {
+    open: usize,
     max: usize,
 }
 
@@ -288,7 +277,7 @@ struct Budget<'a> {
 /// under the budget.
 fn read_kept<T>(
     slot: &mut Option<fs::File>,
-    budget: Budget,
+    budget: &mut Budget,
     path: impl FnOnce() -> String,
     f: impl FnOnce(&str) -> T,
 ) -> Option<T> {
@@ -298,13 +287,13 @@ fn read_kept<T>(
             .is_some_and(|file| read_all(buf, file).is_ok());
         if !reread {
             if slot.take().is_some() {
-                *budget.open -= 1;
+                budget.open -= 1;
             }
             let file = fs::File::open(path()).ok()?;
             read_all(buf, &file).ok()?;
-            if *budget.open < budget.max {
+            if budget.open < budget.max {
                 *slot = Some(file);
-                *budget.open += 1;
+                budget.open += 1;
             }
         }
         Some(f(&String::from_utf8_lossy(buf)))
