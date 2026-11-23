@@ -31,26 +31,23 @@ impl Targets {
         for t in &targets {
             check_syntax(t)?;
         }
-        let resolve_all = {
-            let lookup = lookup.clone();
-            move |targets: &[String], current: &Mutex<Vec<Option<SocketAddr>>>| {
-                for (i, t) in targets.iter().enumerate() {
-                    let found = lookup(t).ok().and_then(|a| a.into_iter().next());
-                    let mut cur = current.lock().unwrap();
-                    match (found, cur[i]) {
-                        (Some(new), Some(old)) if new != old => {
-                            tracing::info!(target = %t, %old, %new, "monitor address changed")
-                        }
-                        (Some(new), None) => tracing::info!(target = %t, addr = %new, "sending"),
-                        (None, None) => {
-                            tracing::warn!(target = %t, "can't resolve yet; will retry")
-                        }
-                        _ => {}
+        let resolve_all = move |targets: &[String], current: &Mutex<Vec<Option<SocketAddr>>>| {
+            for (i, t) in targets.iter().enumerate() {
+                let found = lookup(t).ok().and_then(|a| a.into_iter().next());
+                let mut cur = current.lock().unwrap();
+                match (found, cur[i]) {
+                    (Some(new), Some(old)) if new != old => {
+                        tracing::info!(target = %t, %old, %new, "monitor address changed")
                     }
-                    // Keep the last good address while a lookup fails.
-                    if found.is_some() {
-                        cur[i] = found;
+                    (Some(new), None) => tracing::info!(target = %t, addr = %new, "sending"),
+                    (None, None) => {
+                        tracing::warn!(target = %t, "can't resolve yet; will retry")
                     }
+                    _ => {}
+                }
+                // Keep the last good address while a lookup fails.
+                if found.is_some() {
+                    cur[i] = found;
                 }
             }
         };
