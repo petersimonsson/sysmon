@@ -1364,6 +1364,11 @@ impl AppState {
             .child(header_cell(SortKey::Command, "COMMAND", None, cx));
 
         let count = rows.len();
+        // An empty table says why, rather than showing nothing.
+        let needle = self.filter.read(cx).value().to_string();
+        let empty_note = (count == 0 && !needle.is_empty()).then(|| {
+            format!("No processes match \u{201c}{needle}\u{201d}. Esc clears the filter.")
+        });
         let list = uniform_list("procs", count, move |range, _, _| {
             range
                 .map(|i| {
@@ -1543,6 +1548,16 @@ impl AppState {
                     ),
             )
             .child(header)
+            .children(empty_note.map(|note| {
+                div()
+                    .id("procs-empty")
+                    .test_support()
+                    .p_4()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .aria_description(note.clone())
+                    .child(note)
+            }))
             .child(list)
     }
 
@@ -4388,6 +4403,27 @@ mod tests {
             let host = &app.live_hosts[&1];
             assert_eq!(app.graph_span(host), (3 * s, 5 * s));
         });
+    }
+
+    #[gpui_kit::test]
+    fn a_filter_that_matches_nothing_says_so(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("procs-empty").is_none());
+            w.press("ctrl-f", cx);
+            w.input("nothing-like-it", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let note = w.find("procs-empty");
+            let text = note.description().unwrap_or_default();
+            assert!(text.contains("nothing-like-it"), "{text}");
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
