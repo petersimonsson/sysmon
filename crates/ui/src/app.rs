@@ -2427,8 +2427,12 @@ impl AppState {
             )
             .on_action(cx.listener(|this, _: &CursorUp, _, cx| this.move_cursor(-1, cx)))
             .on_action(cx.listener(|this, _: &CursorDown, _, cx| this.move_cursor(1, cx)))
-            .on_action(cx.listener(|this, _: &CursorPageUp, _, cx| this.move_cursor(-20, cx)))
-            .on_action(cx.listener(|this, _: &CursorPageDown, _, cx| this.move_cursor(20, cx)))
+            .on_action(cx.listener(|this, _: &CursorPageUp, _, cx| {
+                this.move_cursor(-actions::PAGE_ROWS, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CursorPageDown, _, cx| {
+                this.move_cursor(actions::PAGE_ROWS, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleGraph, _, cx| this.toggle_cursor(cx)))
             .on_action(cx.listener(|this, _: &ClearGraph, _, cx| this.clear_graph(cx)))
             .on_action(cx.listener(|this, _: &About, window, cx| this.open_about(window, cx)))
