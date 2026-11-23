@@ -5,7 +5,6 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Read;
 use std::os::unix::fs::{FileExt, MetadataExt};
 
 use sysmon_proto::{
@@ -33,25 +32,19 @@ thread_local! {
 /// strictly would skip the whole file, hiding that process (or every
 /// interface) from the monitor. Invalid bytes become U+FFFD instead.
 fn with_file<T>(path: &str, f: impl FnOnce(&str) -> T) -> Option<T> {
-    BUF.with_borrow_mut(|buf| {
-        let mut file = fs::File::open(path).ok()?;
-        read_all(buf, |chunk, _| file.read(chunk)).ok()?;
-        Some(f(&String::from_utf8_lossy(buf)))
-    })
+    with_open_file(&fs::File::open(path).ok()?, f)
 }
 
-/// Fill `buf` with a whole file through `read(chunk, offset)`. Not
+/// Fill `buf` with the whole of `file`, read from its start. Not
 /// `read_to_end`, which first asks for the file's size and position: two
 /// wasted system calls per file, as `/proc` files report a size of 0.
-fn read_all(
-    buf: &mut Vec<u8>,
-    mut read: impl FnMut(&mut [u8], u64) -> std::io::Result<usize>,
-) -> std::io::Result<()> {
+/// Positioned reads, so a kept-open file reads afresh each time.
+fn read_all(buf: &mut Vec<u8>, file: &fs::File) -> std::io::Result<()> {
     buf.clear();
     loop {
         let start = buf.len();
         buf.resize(start + 4096, 0);
-        let n = read(&mut buf[start..], start as u64)?;
+        let n = file.read_at(&mut buf[start..], start as u64)?;
         buf.truncate(start + n);
         // A /proc file is produced whole on the first read when it fits, so
         // a short read is the end; a full one may have more after it.
@@ -64,7 +57,7 @@ fn read_all(
 /// Read a kept-open file from its start, as [`with_file`] does a path.
 fn with_open_file<T>(file: &fs::File, f: impl FnOnce(&str) -> T) -> Option<T> {
     BUF.with_borrow_mut(|buf| {
-        read_all(buf, |chunk, offset| file.read_at(chunk, offset)).ok()?;
+        read_all(buf, file).ok()?;
         Some(f(&String::from_utf8_lossy(buf)))
     })
 }
@@ -299,38 +292,23 @@ fn read_kept<T>(
     path: impl FnOnce() -> String,
     f: impl FnOnce(&str) -> T,
 ) -> Option<T> {
-    if let Some(file) = slot {
-        // Can't hand `f` to two reads: on failure, fall through with it unused.
-        let mut f = Some(f);
-        let r = BUF.with_borrow_mut(|buf| {
-            read_all(buf, |chunk, offset| file.read_at(chunk, offset))
-                .ok()
-                .map(|()| (f.take().unwrap())(&String::from_utf8_lossy(buf)))
-        });
-        if r.is_some() {
-            return r;
+    BUF.with_borrow_mut(|buf| {
+        let reread = slot
+            .as_ref()
+            .is_some_and(|file| read_all(buf, file).is_ok());
+        if !reread {
+            if slot.take().is_some() {
+                *budget.open -= 1;
+            }
+            let file = fs::File::open(path()).ok()?;
+            read_all(buf, &file).ok()?;
+            if *budget.open < budget.max {
+                *slot = Some(file);
+                *budget.open += 1;
+            }
         }
-        *slot = None;
-        *budget.open -= 1;
-        let f = f.unwrap();
-        return open_and_read(slot, budget, path, f);
-    }
-    open_and_read(slot, budget, path, f)
-}
-
-fn open_and_read<T>(
-    slot: &mut Option<fs::File>,
-    budget: Budget,
-    path: impl FnOnce() -> String,
-    f: impl FnOnce(&str) -> T,
-) -> Option<T> {
-    let file = fs::File::open(path()).ok()?;
-    let r = with_open_file(&file, f)?;
-    if *budget.open < budget.max {
-        *slot = Some(file);
-        *budget.open += 1;
-    }
-    Some(r)
+        Some(f(&String::from_utf8_lossy(buf)))
+    })
 }
 
 /// Raise the soft open-file limit to the hard one (systemd's default soft
