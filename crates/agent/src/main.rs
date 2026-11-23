@@ -323,8 +323,11 @@ fn users_datagrams(
     )
 }
 
-/// Encoding problems are logged once each and the affected part of the
-/// sample skipped: one record that can't be sent mustn't stop the agent.
+/// Encoding problems are logged once per kind of record and the affected
+/// part of the sample skipped: one record that can't be sent mustn't stop
+/// the agent. Keyed by `what` rather than the error text, which can differ
+/// every tick (it holds the encoded size), so a lasting problem can neither
+/// flood the log nor grow the set.
 #[derive(Default)]
 struct Warnings {
     seen: HashSet<String>,
@@ -333,9 +336,9 @@ struct Warnings {
 impl Warnings {
     fn or_skip(&mut self, what: &str, r: anyhow::Result<Vec<Vec<u8>>>) -> Vec<Vec<u8>> {
         r.unwrap_or_else(|e| {
-            let msg = format!("{what}: {e:#}");
-            if self.seen.insert(msg.clone()) {
-                tracing::warn!("skipping {msg}");
+            if !self.seen.contains(what) {
+                self.seen.insert(what.to_string());
+                tracing::warn!("skipping {what}: {e:#}");
             }
             Vec::new()
         })
@@ -457,6 +460,8 @@ mod tests {
         let failed = warnings.or_skip("test", Err(anyhow::anyhow!("boom")));
         assert!(failed.is_empty());
         warnings.or_skip("test", Err(anyhow::anyhow!("boom")));
+        // Even when the error text changes, as a growing size does.
+        warnings.or_skip("test", Err(anyhow::anyhow!("boom, bigger")));
         assert_eq!(warnings.seen.len(), 1);
     }
 
