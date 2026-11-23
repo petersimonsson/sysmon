@@ -1849,12 +1849,13 @@ impl AppState {
                 .unwrap_or_else(|| "?".into());
             let latest = host.latest(p.target, metric);
             let label = match p.target {
-                SeriesTarget::Process(_) => format!("{} {name}", key.pid),
                 SeriesTarget::Subtree(_) => {
                     let n = latest.map_or(0, |(_, n)| n);
                     format!("{} {name} + subtree ({n})", key.pid)
                 }
-                SeriesTarget::Thread(_) => format!("{} {name}", key.pid),
+                SeriesTarget::Process(_) | SeriesTarget::Thread(_) => {
+                    format!("{} {name}", key.pid)
+                }
             };
             let value = match hover_ns {
                 Some(t) => graph::value_at(&line.points, t),
