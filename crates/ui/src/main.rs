@@ -45,7 +45,7 @@ struct Args {
     #[arg(long)]
     replay: Option<PathBuf>,
     /// Replay speed multiplier.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = 1.0, value_parser = parse_speed)]
     speed: f64,
     /// Print sysmon's license and the license notices of all third-party
     /// software in this binary, then exit.
@@ -167,6 +167,16 @@ fn parse_gib(s: &str) -> Result<f64, String> {
     Ok(gib)
 }
 
+/// A replay speed: a positive number (the player would quietly use 1×
+/// for anything else).
+fn parse_speed(s: &str) -> Result<f64, String> {
+    let speed: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if !speed.is_finite() || speed <= 0.0 {
+        return Err(format!("{s} isn't a positive speed"));
+    }
+    Ok(speed)
+}
+
 fn opener(args: &Args) -> anyhow::Result<sysmon_proto::Opener> {
     let key = args
         .key_file
@@ -199,6 +209,16 @@ mod window_tests {
             Some("sysmon")
         );
         assert_eq!(o.app_id.as_deref(), Some(APP_ID));
+    }
+
+    #[core::prelude::v1::test]
+    fn speed_must_be_positive() {
+        let parse = |v: &str| Args::try_parse_from(["sysmon-ui", "--speed", v]);
+        for bad in ["0", "-2", "nan", "inf", "fast"] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        assert_eq!(parse("0.5").unwrap().speed, 0.5);
+        assert_eq!(Args::try_parse_from(["sysmon-ui"]).unwrap().speed, 1.0);
     }
 
     #[core::prelude::v1::test]
