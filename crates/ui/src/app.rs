@@ -48,6 +48,8 @@ const AXIS_LABELS_W: f32 = 64.;
 const USER_MIN_CHARS: usize = 4;
 const USER_MAX_CHARS: usize = 16;
 const MENU_BAR_HEIGHT: f32 = 30.;
+/// Samples shown in the header's sparklines.
+const SPARK_POINTS: usize = 240;
 /// Initial height of the graph panel below the process list.
 const GRAPH_HEIGHT: f32 = 260.;
 /// Smallest graph panel, and room always left for the rest of the window.
@@ -830,13 +832,16 @@ impl AppState {
     fn render_header(host: &HostModel, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let s = &host.snapshot;
-        let history = |f: fn(&sysmon_model::HistoryPoint) -> f32| -> Vec<f32> {
-            host.history.iter().map(f).collect()
+        // The newest SPARK_POINTS samples of one figure.
+        let recent = |f: fn(&sysmon_model::HistoryPoint) -> f32| -> Vec<f32> {
+            let skip = host.history.len().saturating_sub(SPARK_POINTS);
+            host.history.iter().skip(skip).map(f).collect()
         };
         let mem = s.mem;
+        // From the network: available can be bogus (above total).
+        let mem_used = mem.total.saturating_sub(mem.available);
         let mem_pct = if mem.total > 0 {
-            // From the network: available can be bogus (above total).
-            mem.total.saturating_sub(mem.available) as f32 / mem.total as f32 * 100.0
+            mem_used as f32 / mem.total as f32 * 100.0
         } else {
             0.0
         };
@@ -897,14 +902,10 @@ impl AppState {
                 .into_any_element()
         };
         let spark = |series: Vec<(Vec<f32>, Hsla)>, max: Option<f32>| {
-            sparkline(series, max, HISTORY_LEN.min(240), theme.secondary).into_any_element()
+            sparkline(series, max, HISTORY_LEN.min(SPARK_POINTS), theme.secondary)
+                .into_any_element()
         };
         let text = |t: String| div().child(t).into_any_element();
-        let tail = |mut v: Vec<f32>| {
-            let skip = v.len().saturating_sub(240);
-            v.drain(..skip);
-            v
-        };
 
         let cpu = s.cpu_pct.first().copied().unwrap_or(0.0);
         let mut cores = div().flex().flex_wrap().gap_x_3().gap_y_1();
@@ -945,22 +946,19 @@ impl AppState {
                             "load {:.2} {:.2} {:.2}",
                             s.load[0], s.load[1], s.load[2]
                         ))),
-                        spark(
-                            vec![(tail(history(|p| p.cpu_pct)), theme.primary)],
-                            Some(100.0),
-                        ),
+                        spark(vec![(recent(|p| p.cpu_pct), theme.primary)], Some(100.0)),
                     ))
                     .child(metric(
                         "Memory",
                         text(format!("{mem_pct:.1}%")),
                         Some(text(format!(
                             "{} / {}  swap {}",
-                            format::bytes(mem.total.saturating_sub(mem.available) as f64 * 1024.0),
+                            format::bytes(mem_used as f64 * 1024.0),
                             format::bytes(mem.total as f64 * 1024.0),
                             format::bytes(swap_used as f64 * 1024.0)
                         ))),
                         spark(
-                            vec![(tail(history(|p| p.mem_used_kib as f32)), theme.success)],
+                            vec![(recent(|p| p.mem_used_kib as f32), theme.success)],
                             Some(mem.total.max(1) as f32),
                         ),
                     ))
@@ -983,8 +981,8 @@ impl AppState {
                         )),
                         spark(
                             vec![
-                                (tail(history(|p| p.net_rx_bytes_per_s as f32)), in_color),
-                                (tail(history(|p| p.net_tx_bytes_per_s as f32)), out_color),
+                                (recent(|p| p.net_rx_bytes_per_s as f32), in_color),
+                                (recent(|p| p.net_tx_bytes_per_s as f32), out_color),
                             ],
                             None,
                         ),
@@ -1008,11 +1006,8 @@ impl AppState {
                         )),
                         spark(
                             vec![
-                                (tail(history(|p| p.disk_read_bytes_per_s as f32)), in_color),
-                                (
-                                    tail(history(|p| p.disk_write_bytes_per_s as f32)),
-                                    out_color,
-                                ),
+                                (recent(|p| p.disk_read_bytes_per_s as f32), in_color),
+                                (recent(|p| p.disk_write_bytes_per_s as f32), out_color),
                             ],
                             None,
                         ),
