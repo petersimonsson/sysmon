@@ -38,7 +38,7 @@ struct Args {
     #[arg(long, value_name = "HOURS")]
     keep_hours: Option<u64>,
     /// Delete the oldest recordings once they take more than this many GiB.
-    #[arg(long, value_name = "GIB")]
+    #[arg(long, value_name = "GIB", value_parser = parse_gib)]
     max_gib: Option<f64>,
     /// Open a recording (a data dir, host dir, boot dir, or a single .seg
     /// file) instead of listening for agents.
@@ -96,7 +96,9 @@ fn main() -> anyhow::Result<()> {
             let recording = (!args.no_record).then(|| pipeline::Recording {
                 dir: data_dir.clone(),
                 retention: sysmon_store::Retention {
-                    max_age: args.keep_hours.map(|h| Duration::from_secs(h * 3600)),
+                    max_age: args
+                        .keep_hours
+                        .map(|h| Duration::from_secs(h.saturating_mul(3600))),
                     max_bytes: args.max_gib.map(|g| (g * (1u64 << 30) as f64) as u64),
                 },
             });
@@ -156,6 +158,17 @@ fn stop_recording_on_signals(recorder: pipeline::RecorderHandle) -> anyhow::Resu
     Ok(())
 }
 
+/// A size limit in GiB: a positive number. Anything else (a negative or
+/// NaN typo, or one too small for a byte) would become a limit of 0 bytes,
+/// and pruning would delete every recording.
+fn parse_gib(s: &str) -> Result<f64, String> {
+    let gib: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if !gib.is_finite() || gib * ((1u64 << 30) as f64) < 1.0 {
+        return Err(format!("{s} isn't a positive size in GiB"));
+    }
+    Ok(gib)
+}
+
 fn opener(args: &Args) -> anyhow::Result<sysmon_proto::Opener> {
     let key = args
         .key_file
@@ -188,5 +201,15 @@ mod window_tests {
             Some("sysmon")
         );
         assert_eq!(o.app_id.as_deref(), Some(APP_ID));
+    }
+
+    #[core::prelude::v1::test]
+    fn max_gib_must_be_a_positive_size() {
+        let parse = |v: &str| Args::try_parse_from(["sysmon-ui", "--max-gib", v]);
+        for bad in ["-5", "0", "nan", "inf", "1e-12", "lots"] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+        assert_eq!(parse("0.5").unwrap().max_gib, Some(0.5));
+        assert_eq!(parse("20").unwrap().max_gib, Some(20.0));
     }
 }
