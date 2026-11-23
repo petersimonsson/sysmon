@@ -4651,43 +4651,55 @@ mod tests {
 
     #[gpui_kit::test]
     fn per_core_bars_wrap_into_even_rows(cx: &mut TestAppContext) {
-        let (window, app) = open(cx);
-        app.update(cx, |app, cx| {
-            // Two samples of 24 cores (and the aggregate line), so there
-            // are per-core figures.
-            for seq in 0..2u32 {
-                let cpu = sysmon_proto::CpuCounters {
-                    user: seq as u64 * 10,
-                    idle: seq as u64 * 90,
-                    ..Default::default()
-                };
-                let system = sysmon_proto::SystemSample {
-                    cpus: vec![cpu; 25],
-                    ..sampled_at((1 + seq as u64) * 1_000_000_000)
-                };
-                apply(
-                    &mut app.live_hosts,
-                    sysmon_ingest::Event::Frame(test_frame(1, seq, system)),
+        // Machines of many sizes, in the 1200 px test window.
+        for cores in [1usize, 2, 4, 6, 8, 12, 13, 16, 24, 32, 64, 128] {
+            let (window, app) = open(cx);
+            app.update(cx, |app, cx| {
+                // Two samples (cores plus the aggregate line), so there are
+                // per-core figures.
+                for seq in 0..2u32 {
+                    let cpu = sysmon_proto::CpuCounters {
+                        user: seq as u64 * 10,
+                        idle: seq as u64 * 90,
+                        ..Default::default()
+                    };
+                    let system = sysmon_proto::SystemSample {
+                        cpus: vec![cpu; cores + 1],
+                        ..sampled_at((1 + seq as u64) * 1_000_000_000)
+                    };
+                    apply(
+                        &mut app.live_hosts,
+                        sysmon_ingest::Event::Frame(test_frame(1, seq, system)),
+                    );
+                }
+                app.ensure_selection();
+                cx.notify();
+            });
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                // The bars share the table's width; none may run past it.
+                let panel = w.find("procs-panel").bounds();
+                let right = panel.origin.x + panel.size.width;
+                let mut per_row: std::collections::BTreeMap<i32, usize> = Default::default();
+                for i in 0..cores {
+                    let bar = w.find(("core", i)).bounds();
+                    assert!(
+                        bar.origin.x + bar.size.width <= right,
+                        "{cores} cores: core {i} ends at {:?}, past {right:?}",
+                        bar.origin.x + bar.size.width
+                    );
+                    *per_row.entry(f32::from(bar.origin.y) as i32).or_default() += 1;
+                }
+                let counts: Vec<usize> = per_row.into_values().collect();
+                // Full rows of the same length; only the last may be short.
+                let (last, full) = counts.split_last().unwrap();
+                assert!(
+                    full.iter().all(|&n| n == counts[0]) && *last <= counts[0],
+                    "{cores} cores: rows of {counts:?}"
                 );
-            }
-            app.ensure_selection();
-            cx.notify();
-        });
-        cx.update_window(window, |_, w, cx| {
-            w.render_frame(cx);
-            let mut per_row: std::collections::BTreeMap<i32, usize> = Default::default();
-            for i in 0..24usize {
-                let y = f32::from(w.find(("core", i)).bounds().origin.y) as i32;
-                *per_row.entry(y).or_default() += 1;
-            }
-            let counts: Vec<usize> = per_row.into_values().collect();
-            assert!(counts.len() > 1, "wraps in a 1200 px window: {counts:?}");
-            assert!(
-                counts.iter().all(|&n| n == counts[0]),
-                "even rows: {counts:?}"
-            );
-        })
-        .unwrap();
+            })
+            .unwrap();
+        }
     }
 
     #[gpui_kit::test]
