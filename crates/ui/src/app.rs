@@ -1044,6 +1044,11 @@ impl AppState {
     fn table_lines(&self, host: &HostModel, cx: &App) -> Vec<Line> {
         let needle = self.filter.read(cx).value().to_lowercase();
         let filtering = !needle.is_empty();
+        // Exactly a pid, as typed ("010" or "+10" isn't pid 10).
+        let needle_pid = needle
+            .parse::<u32>()
+            .ok()
+            .filter(|p| p.to_string() == needle);
         let proc_matches = |p: &ProcRow| {
             !filtering
                 || p.comm.to_lowercase().contains(&needle)
@@ -1053,10 +1058,10 @@ impl AppState {
                 || p.user
                     .as_ref()
                     .is_some_and(|u| u.to_lowercase().contains(&needle))
-                || p.key.pid.to_string() == needle
+                || needle_pid == Some(p.key.pid)
         };
         let thread_matches = |t: &ThreadRow| {
-            !filtering || t.comm.to_lowercase().contains(&needle) || t.key.pid.to_string() == needle
+            !filtering || t.comm.to_lowercase().contains(&needle) || needle_pid == Some(t.key.pid)
         };
         let (key, desc) = self.sort;
 
@@ -1133,6 +1138,8 @@ impl AppState {
         if !self.tree {
             for row in rows {
                 let threads = shown_threads(&row);
+                // One copy, shared by the process's line and its threads'.
+                let row = Rc::new(row);
                 out.push(Line::process(
                     row.clone(),
                     None,
@@ -1154,7 +1161,7 @@ impl AppState {
             .and_then(|h| self.collapsed.get(&(self.view, h)))
             .unwrap_or(&no_collapsed);
         for t in sysmon_model::tree::build(&rows, filter, collapsed) {
-            let row = rows[t.row].clone();
+            let row = Rc::new(rows[t.row].clone());
             let threads = if t.collapsed {
                 Vec::new()
             } else {
@@ -2731,8 +2738,9 @@ fn apply(hosts: &mut BTreeMap<u64, HostModel>, event: Event) {
 
 /// One row of the process table: a process, or one of its threads.
 struct Line {
-    /// The process (for a thread line, the thread's process).
-    row: ProcRow,
+    /// The process (for a thread line, the thread's process), shared
+    /// between a process's line and its threads'.
+    row: Rc<ProcRow>,
     tree: Option<TreeLine>,
     thread: Option<ThreadRow>,
     /// Shown only because something under it matched the filter.
@@ -2740,7 +2748,7 @@ struct Line {
 }
 
 impl Line {
-    fn process(row: ProcRow, tree: Option<TreeLine>, context: bool) -> Self {
+    fn process(row: Rc<ProcRow>, tree: Option<TreeLine>, context: bool) -> Self {
         Self {
             row,
             tree,
@@ -2749,7 +2757,7 @@ impl Line {
         }
     }
 
-    fn thread(row: ProcRow, thread: ThreadRow, tree: Option<TreeLine>) -> Self {
+    fn thread(row: Rc<ProcRow>, thread: ThreadRow, tree: Option<TreeLine>) -> Self {
         Self {
             row,
             tree,
