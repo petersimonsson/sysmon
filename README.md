@@ -213,6 +213,18 @@ application menu: copy it to `~/.local/share/applications/` (with
   - Click a PID to find the process in the table. Click a line to select it:
     its time is marked on the graph.
   - Lines lost on the network, or dropped by the agent, are shown as such.
+- **Process details:** press `D` or Enter, or choose the **Details** tab in
+  the bottom panel, to see everything about the process under the row
+  cursor. The tab follows the cursor as it moves.
+  - It shows the PID, parent, user, state, when the process started and how
+    long it has run, the full command line, and a small graph of each
+    metric.
+  - It also lists the process's children, its threads (from agents started
+    with `--threads`) and its log lines (`--logs`).
+  - Click the parent or a child to move to it, click a log line to open it
+    in the Logs tab, and use **Graph** to add the process to the graph.
+  - A process that exits stays on show, marked *exited*, until you move the
+    cursor.
 - **Times** are shown in your local time zone.
 - **Help → About sysmon** shows the version, sysmon's licenses, and the
   license of every third-party crate built into the UI, with the full texts.
@@ -250,6 +262,7 @@ Press **F1** or **?** in the app for the full list. The most useful ones:
 | Ctrl+1, Ctrl+2 | Live view, Recording view |
 | Ctrl+↑ / Ctrl+↓ | Previous / next host |
 | `l` | Logs, or back to the graph |
+| `d` or Enter | Details of the cursor row's process, or back to the graph |
 | Ctrl+F or `/` | Filter (Enter goes back to the list, Esc clears) |
 | ↑/↓ or `j`/`k` | Move the row cursor |
 | `g`, Ctrl+G | Graph the cursor row, clear the graph |

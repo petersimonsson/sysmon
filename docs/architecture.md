@@ -430,6 +430,15 @@ agent or the monitor was offline) are skipped rather than waited out.
   marked `stale` (a complete frame drops processes that really exited);
 - a ring buffer of derived system metrics (10 minutes at 1 Hz) for sparklines;
 - the process table, joined with `ProcMeta` (cmdline, uid) and `Users`;
+- the host's boot time by its wall clock (`Snapshot::boot_unix_ns`: the
+  sample time less `boottime_ns`, so v4 agents and newer), which turns a
+  process's `starttime` ticks into a start time
+  (`ProcRow::started_unix_ns`);
+- `details(key)` (`details.rs`): one process of the latest sample (or, for
+  a thread's key, its process) with its parent, children, threads, start
+  time and %MEM, for the Details tab. `Logs::for_pid(pid, started)` lists
+  its journal lines, leaving out those logged before it started, which
+  came from an earlier process with the same pid;
 - `proc_history`: every process of the last 600 samples, frame-major
   (`series::ProcFrame`: timestamp, memory total, and each process's key,
   ppid, %CPU, VIRT, RES, SHR and threads). Rows carried over lost chunks are left out,
@@ -572,6 +581,18 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
     the line was received, and the line is brought back into view once the
     seek's reset has rebuilt the list. The Graph tab is disabled until
     something is picked;
+  - a **Details** tab in the same panel (`D` or Enter; `app/details.rs`)
+    for the process under the table's cursor, following it as it moves
+    (on a thread's row, the thread's process). It shows PID, parent, user,
+    state, start time and how long it has run (`–` for agents older than
+    v4, which don't send the boot time), the command line, a sparkline per
+    metric over the history kept, its children, its threads (`--threads`)
+    and its log lines, newest first (`--logs`). Lists stop at 100 entries
+    and count the rest. Clicking the parent or a child moves the cursor
+    to it; clicking a log line opens it in the Logs tab (in a recording,
+    seeking to it); **Graph** adds the process to the graph. A process
+    that exits stays shown, marked *exited*, from its last row, until the
+    cursor moves;
   - in the Recording view, a replay bar: play/pause, 1× to 256× speed, a
     timeline `Slider` that seeks on release, and start, position and end
     times. Red ticks under it mark where the selected host logged errors
@@ -620,6 +641,7 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   | Ctrl+1, Ctrl+2 | Live view, Recording view |
   | Ctrl+↓, Ctrl+↑ | Next / previous host |
   | `l` | Logs tab, or back to the graph |
+  | `d` or Enter | Details tab for the cursor row, or back to the graph |
   | Ctrl+F or `/` | Filter processes (Enter returns, Esc clears) |
   | ↑/↓ or `j`/`k`, PgUp/PgDn | Move the row cursor |
   | `t`, `e`, `c` | Tree view, expand all, collapse all |
@@ -637,7 +659,9 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   filter), the menu bar's position, picking rows, and the graph panel's
   placement, divider drag, legend and subtree values; and the Logs tab's
   list, following, filters, PID links, graph mark, and seeking from a line
-  in a recording (driven by `ReplayHandle::manual`).
+  in a recording (driven by `ReplayHandle::manual`); and the Details tab
+  following the cursor, keeping an exited process, and leading to the
+  parent, children, graph and Logs tab.
 - **Opening recordings:** Open recording…, or
   `sysmon-ui --replay <data_dir>/<host>/…` (which doesn't listen).
 
