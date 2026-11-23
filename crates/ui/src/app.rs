@@ -3077,6 +3077,33 @@ mod tests {
     fn key(pid: u32) -> ProcKey {
         ProcKey { pid, starttime: 0 }
     }
+
+    /// A complete sample from `host_id`, with no processes or threads,
+    /// received at 0 (tests override what they need).
+    fn test_frame(
+        host_id: u64,
+        seq: u32,
+        system: sysmon_proto::SystemSample,
+    ) -> sysmon_proto::Frame {
+        sysmon_proto::Frame {
+            host_id,
+            boot_id: 1,
+            seq,
+            system: Some(system),
+            procs: vec![],
+            threads: vec![],
+            complete: true,
+            received_ns: 0,
+        }
+    }
+
+    /// A system sample taken at `ts_unix_ns`, otherwise empty.
+    fn sampled_at(ts_unix_ns: u64) -> sysmon_proto::SystemSample {
+        sysmon_proto::SystemSample {
+            ts_unix_ns,
+            ..Default::default()
+        }
+    }
     use crate::format;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{
@@ -3189,13 +3216,6 @@ mod tests {
                 kernel_thread: None,
             };
             let frame = sysmon_proto::Frame {
-                host_id,
-                boot_id: 1,
-                seq,
-                system: Some(sysmon_proto::SystemSample {
-                    ts_unix_ns: 1_000_000_000 * (1 + seq as u64),
-                    ..Default::default()
-                }),
                 procs: vec![
                     proc(1, 0, "init"),
                     proc(10, 1, "bash"),
@@ -3222,8 +3242,7 @@ mod tests {
                         comm: comm.into(),
                     })
                     .collect(),
-                complete: true,
-                received_ns: 0,
+                ..test_frame(host_id, seq, sampled_at(1_000_000_000 * (1 + seq as u64)))
             };
             apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
             app.ensure_selection();
@@ -3885,11 +3904,10 @@ mod tests {
     fn bogus_memory_figures_dont_crash_the_header(cx: &mut TestAppContext) {
         let (window, app) = open(cx);
         app.update(cx, |app, cx| {
-            let frame = sysmon_proto::Frame {
-                host_id: 1,
-                boot_id: 1,
-                seq: 0,
-                system: Some(sysmon_proto::SystemSample {
+            let frame = test_frame(
+                1,
+                0,
+                sysmon_proto::SystemSample {
                     ts_unix_ns: 1_000_000_000,
                     // Available above total, as a buggy or hostile agent might send.
                     mem: sysmon_proto::MemInfo {
@@ -3898,12 +3916,8 @@ mod tests {
                         ..Default::default()
                     },
                     ..Default::default()
-                }),
-                procs: vec![],
-                threads: vec![],
-                complete: true,
-                received_ns: 0,
-            };
+                },
+            );
             apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
             app.ensure_selection();
             cx.notify();
@@ -3917,17 +3931,8 @@ mod tests {
         let (_window, app) = open(cx);
         let now = sysmon_ingest::unix_now_ns();
         let sample = |agent_ts: u64, received: u64| sysmon_proto::Frame {
-            host_id: 1,
-            boot_id: 1,
-            seq: 0,
-            system: Some(sysmon_proto::SystemSample {
-                ts_unix_ns: agent_ts,
-                ..Default::default()
-            }),
-            procs: vec![],
-            threads: vec![],
-            complete: true,
             received_ns: received,
+            ..test_frame(1, 0, sampled_at(agent_ts))
         };
         // The agent's clock is 10 s behind, but the sample just arrived.
         app.update(cx, |app, _| {
@@ -3975,17 +3980,8 @@ mod tests {
                 })
                 .collect();
             let frame = sysmon_proto::Frame {
-                host_id: 1,
-                boot_id: 1,
-                seq: 0,
-                system: Some(sysmon_proto::SystemSample {
-                    ts_unix_ns: 1_000_000_000,
-                    ..Default::default()
-                }),
                 procs,
-                threads: vec![],
-                complete: true,
-                received_ns: 0,
+                ..test_frame(1, 0, sampled_at(1_000_000_000))
             };
             apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
             app.ensure_selection();
@@ -4116,17 +4112,9 @@ mod tests {
                 })
                 .to_vec();
             let frame = sysmon_proto::Frame {
-                host_id: 1,
-                boot_id: 1,
-                seq: 0,
-                system: Some(sysmon_proto::SystemSample {
-                    ts_unix_ns: 1_000_000_000,
-                    ..Default::default()
-                }),
                 procs: vec![proc],
                 threads,
-                complete: true,
-                received_ns: 0,
+                ..test_frame(1, 0, sampled_at(1_000_000_000))
             };
             apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
             app.ensure_selection();
@@ -4296,11 +4284,10 @@ mod tests {
         app.update(cx, |app, cx| {
             for seq in 0..2u32 {
                 let k = seq as u64;
-                let frame = sysmon_proto::Frame {
-                    host_id: 1,
-                    boot_id: 1,
+                let frame = test_frame(
+                    1,
                     seq,
-                    system: Some(sysmon_proto::SystemSample {
+                    sysmon_proto::SystemSample {
                         ts_unix_ns: (1 + k) * 1_000_000_000,
                         net: vec![sysmon_proto::NetIf {
                             name: "eth0".into(),
@@ -4316,12 +4303,8 @@ mod tests {
                             io_ms: 0,
                         }],
                         ..Default::default()
-                    }),
-                    procs: vec![],
-                    threads: vec![],
-                    complete: true,
-                    received_ns: 0,
-                };
+                    },
+                );
                 apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
             }
             app.ensure_selection();
@@ -4377,17 +4360,8 @@ mod tests {
     fn host_with_logs(app: &Entity<AppState>, cx: &mut TestAppContext, lines: &[&str]) {
         app.update(cx, |app, cx| {
             let frame = sysmon_proto::Frame {
-                host_id: 1,
-                boot_id: 1,
-                seq: 0,
-                system: Some(sysmon_proto::SystemSample {
-                    ts_unix_ns: 1_000_000_000,
-                    ..Default::default()
-                }),
-                procs: vec![],
-                threads: vec![],
-                complete: true,
                 received_ns: 1,
+                ..test_frame(1, 0, sampled_at(1_000_000_000))
             };
             apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
             let entry = |msg: &str| sysmon_proto::LogEntry {
@@ -4676,17 +4650,6 @@ mod tests {
             for seq in 0..2u32 {
                 let at = (1 + seq as u64) * s;
                 let frame = sysmon_proto::Frame {
-                    host_id: 1,
-                    boot_id: 1,
-                    seq,
-                    system: Some(sysmon_proto::SystemSample {
-                        ts_unix_ns: at,
-                        mem: sysmon_proto::MemInfo {
-                            total: 1 << 20,
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
                     procs: vec![sysmon_proto::ProcSample {
                         pid: 42,
                         ppid: 1,
@@ -4701,9 +4664,19 @@ mod tests {
                         shared_pages: None,
                         kernel_thread: Some(false),
                     }],
-                    threads: vec![],
-                    complete: true,
                     received_ns: at,
+                    ..test_frame(
+                        1,
+                        seq,
+                        sysmon_proto::SystemSample {
+                            ts_unix_ns: at,
+                            mem: sysmon_proto::MemInfo {
+                                total: 1 << 20,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    )
                 };
                 apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
             }
@@ -4874,19 +4847,11 @@ mod tests {
             app.replay_slice = std::time::Duration::ZERO;
         });
         let frame = |seq: u32| {
-            Feed::Event(sysmon_ingest::Event::Frame(sysmon_proto::Frame {
-                host_id: 1,
-                boot_id: 1,
+            Feed::Event(sysmon_ingest::Event::Frame(test_frame(
+                1,
                 seq,
-                system: Some(sysmon_proto::SystemSample {
-                    ts_unix_ns: (1 + seq as u64) * 1_000_000_000,
-                    ..Default::default()
-                }),
-                procs: vec![],
-                threads: vec![],
-                complete: true,
-                received_ns: 0,
-            }))
+                sampled_at((1 + seq as u64) * 1_000_000_000),
+            )))
         };
         for seq in 0..5 {
             driver.feed.send(frame(seq)).unwrap();
@@ -4920,17 +4885,8 @@ mod tests {
         let s = 1_000_000_000u64;
         let sample = |host_id: u64, seq: u32, received_ns: u64| {
             sysmon_ingest::Event::Frame(sysmon_proto::Frame {
-                host_id,
-                boot_id: 1,
-                seq,
-                system: Some(sysmon_proto::SystemSample {
-                    ts_unix_ns: (1 + seq as u64) * s,
-                    ..Default::default()
-                }),
-                procs: vec![],
-                threads: vec![],
-                complete: true,
                 received_ns,
+                ..test_frame(host_id, seq, sampled_at((1 + seq as u64) * s))
             })
         };
         let t0 = std::time::Instant::now();
