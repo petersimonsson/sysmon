@@ -66,6 +66,19 @@ const NOT_TYPING: &str = "SysmonApp && !Input";
 /// Seek step for ←/→ and ⇧←/⇧→, in seconds.
 pub const SEEK_SHORT_S: u64 = 10;
 pub const SEEK_LONG_S: u64 = 60;
+/// Rows moved by Page Up / Page Down.
+pub const PAGE_ROWS: isize = 20;
+
+/// "Back 10 s", "Forward 1 min": a seek step as the menus show it. The
+/// shortcuts list says the same in literals (a `const` table can't format);
+/// a test keeps the two in step.
+fn seek_label(direction: &str, s: u64) -> String {
+    if s.is_multiple_of(60) {
+        format!("{direction} {} min", s / 60)
+    } else {
+        format!("{direction} {s} s")
+    }
+}
 
 pub struct Shortcut {
     pub group: &'static str,
@@ -297,10 +310,10 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Faster", Faster),
             MenuItem::action("Slower", Slower),
             MenuItem::separator(),
-            MenuItem::action("Back 10 s", SeekBackward),
-            MenuItem::action("Forward 10 s", SeekForward),
-            MenuItem::action("Back 1 min", SeekBackwardLong),
-            MenuItem::action("Forward 1 min", SeekForwardLong),
+            MenuItem::action(seek_label("Back", SEEK_SHORT_S), SeekBackward),
+            MenuItem::action(seek_label("Forward", SEEK_SHORT_S), SeekForward),
+            MenuItem::action(seek_label("Back", SEEK_LONG_S), SeekBackwardLong),
+            MenuItem::action(seek_label("Forward", SEEK_LONG_S), SeekForwardLong),
             MenuItem::separator(),
             MenuItem::action("Go to Start", SeekStart),
             MenuItem::action("Go to End", SeekEnd),
@@ -344,7 +357,7 @@ pub fn display_key(k: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob would shadow `#[test]`.
-    use super::{SHORTCUTS, display_key};
+    use super::{PAGE_ROWS, SEEK_LONG_S, SEEK_SHORT_S, SHORTCUTS, display_key, seek_label};
 
     #[test]
     fn displays_keys() {
@@ -364,6 +377,32 @@ mod tests {
                 seen.push(s.group);
             }
         }
+    }
+
+    /// The descriptions that state a number say the one in use.
+    #[test]
+    fn descriptions_match_the_constants() {
+        let desc = |key: &str| {
+            SHORTCUTS
+                .iter()
+                .find(|s| s.keys[0] == key)
+                .unwrap()
+                .description
+        };
+        assert_eq!(desc("left"), seek_label("Back", SEEK_SHORT_S));
+        assert_eq!(desc("right"), seek_label("Forward", SEEK_SHORT_S));
+        assert_eq!(desc("shift-left"), seek_label("Back", SEEK_LONG_S));
+        assert_eq!(desc("shift-right"), seek_label("Forward", SEEK_LONG_S));
+        assert_eq!(desc("pageup"), format!("Up {PAGE_ROWS} rows"));
+        assert_eq!(desc("pagedown"), format!("Down {PAGE_ROWS} rows"));
+        let windows: Vec<String> = crate::graph::WINDOWS_S
+            .iter()
+            .map(|w| (w / 60).to_string())
+            .collect();
+        assert_eq!(
+            desc("w"),
+            format!("Time window: {} min", windows.join(" / "))
+        );
     }
 
     #[test]
