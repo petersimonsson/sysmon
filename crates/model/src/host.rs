@@ -66,6 +66,9 @@ pub struct Snapshot {
     pub procs: Vec<ProcRow>,
     /// Empty unless the agent sends threads.
     pub threads: Vec<ThreadRow>,
+    /// When the host booted, by its wall clock: the sample time less the
+    /// time since boot. `None` from agents older than v4.
+    pub boot_unix_ns: Option<u64>,
 }
 
 /// A thread other than its process's main thread.
@@ -106,6 +109,17 @@ pub struct ProcRow {
     /// A kernel thread: the agent's `PF_KTHREAD` flag, or for agents older
     /// than protocol v3, kthreadd (pid 2) and its children.
     pub kernel_thread: bool,
+}
+
+impl ProcRow {
+    /// When the process started, by the host's wall clock: `starttime` is
+    /// in clock ticks since boot. `None` without the boot time (agents
+    /// older than v4).
+    pub fn started_unix_ns(&self, clk_tck: u32, boot_unix_ns: Option<u64>) -> Option<u64> {
+        let since_boot = self.key.starttime as u128 * 1_000_000_000 / clk_tck.max(1) as u128;
+        let at = boot_unix_ns? as u128 + since_boot;
+        u64::try_from(at).ok()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -414,6 +428,7 @@ impl HostModel {
             disks,
             procs,
             threads,
+            boot_unix_ns: system.boottime_ns.map(|b| ts.saturating_sub(b)),
         };
         self.prev = Some(Prev {
             boot_id: frame.boot_id,
@@ -919,5 +934,26 @@ mod tests {
         // A complete frame without it means it exited.
         m.apply(frame(3, 103, 0, 0, vec![proc(10, 150)], true));
         assert_eq!(m.snapshot.procs.len(), 1);
+    }
+
+    #[test]
+    fn start_time_comes_from_the_boot_time() {
+        let mut m = HostModel::new(1);
+        // Wall clock 10_000 s, 500 s after boot: booted at 9_500 s.
+        let e = frame(0, 10_000, 0, 0, vec![proc(10, 0)], true);
+        m.apply(at_boottime(e, 500));
+        assert_eq!(m.snapshot.boot_unix_ns, Some(9_500 * 1_000_000_000));
+        // starttime 5 ticks at 100 Hz: 50 ms after boot.
+        let row = &m.snapshot.procs[0];
+        assert_eq!(
+            row.started_unix_ns(100, m.snapshot.boot_unix_ns),
+            Some(9_500 * 1_000_000_000 + 50_000_000)
+        );
+
+        // Agents older than v4 don't send the boot time.
+        let mut old = HostModel::new(1);
+        old.apply(frame(0, 10_000, 0, 0, vec![proc(10, 0)], true));
+        assert_eq!(old.snapshot.boot_unix_ns, None);
+        assert_eq!(old.snapshot.procs[0].started_unix_ns(100, None), None);
     }
 }
