@@ -18,8 +18,8 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use sysmon_ingest::Event;
 use sysmon_model::{
-    Control, Feed, HISTORY_LEN, HostModel, LogKind, LogRow, Metric, ProcRow, ReplayHandle,
-    ReplayStatus, SeriesTarget, ThreadRow, TreeLine,
+    Control, Feed, HISTORY_LEN, HostModel, LogKind, Metric, ProcRow, ReplayHandle, ReplayStatus,
+    SeriesTarget, ThreadRow, TreeLine,
 };
 use sysmon_proto::ProcKey;
 
@@ -1944,15 +1944,18 @@ impl AppState {
             )
     }
 
-    /// The selected host's log rows that pass the filters. Lost and dropped
-    /// rows only show unfiltered, where they say something about what's around.
-    fn log_rows(&self, host: &HostModel, cx: &App) -> Vec<LogRow> {
+    /// Where in `host`'s log rows those that pass the filters are. Lost and
+    /// dropped rows only show unfiltered, where they say something about
+    /// what's around. Positions rather than rows: a host keeps up to
+    /// 20 000 lines, too many to copy on every redraw.
+    fn log_rows(&self, host: &HostModel, cx: &App) -> Vec<usize> {
         let needle = self.log_filter.read(cx).value().to_lowercase();
         let narrowed = !needle.is_empty() || self.log_source.is_some();
         host.logs
             .rows()
             .iter()
-            .filter(|r| match &r.kind {
+            .enumerate()
+            .filter(|(_, r)| match &r.kind {
                 LogKind::Line(e) => {
                     let source = e.unit.as_deref().unwrap_or(&e.ident);
                     e.priority <= self.log_min_priority
@@ -1964,7 +1967,7 @@ impl AppState {
                 }
                 LogKind::Lost(_) | LogKind::Dropped(_) => !narrowed && self.log_min_priority == 7,
             })
-            .cloned()
+            .map(|(i, _)| i)
             .collect()
     }
 
@@ -2051,15 +2054,18 @@ impl AppState {
         let mono = theme.mono_font_family.clone();
         let border = theme.border;
         let total = host.logs.rows().len();
-        let rows: Rc<Vec<LogRow>> = Rc::new(self.log_rows(host, cx));
-        let count = rows.len();
+        let shown: Rc<Vec<usize>> = Rc::new(self.log_rows(host, cx));
+        let count = shown.len();
         if self.log_follow && count > 0 {
             self.log_scroll
                 .scroll_to_item(count - 1, ScrollStrategy::Bottom);
         } else if self.log_reveal.get()
-            && let Some(i) = self
-                .log_cursor
-                .and_then(|c| rows.iter().position(|r| (r.received_ns, r.ts_unix_ns) == c))
+            && let Some(i) = self.log_cursor.and_then(|c| {
+                let all = host.logs.rows();
+                shown
+                    .iter()
+                    .position(|&j| (all[j].received_ns, all[j].ts_unix_ns) == c)
+            })
         {
             self.log_reveal.set(false);
             self.log_scroll.scroll_to_item(i, ScrollStrategy::Center);
@@ -2158,10 +2164,18 @@ impl AppState {
 
         let this = cx.entity().downgrade();
         let cursor = self.log_cursor;
-        let list = uniform_list("logs", count, move |range, _, _| {
+        let host_id = host.host_id;
+        let list = uniform_list("logs", count, move |range, _, cx| {
+            // The rows are read from the model as they're drawn.
+            let Some(entity) = this.upgrade() else {
+                return Vec::new();
+            };
+            let Some(all) = entity.read(cx).hosts().get(&host_id).map(|h| h.logs.rows()) else {
+                return Vec::new();
+            };
             range
-                .map(|i| {
-                    let row = &rows[i];
+                .filter_map(|i| Some((i, all.get(*shown.get(i)?)?)))
+                .map(|(i, row)| {
                     let key = (row.received_ns, row.ts_unix_ns);
                     let on_click = {
                         let this = this.clone();
@@ -4751,9 +4765,10 @@ mod tests {
 
     fn shown_messages(app: &Entity<AppState>, cx: &mut TestAppContext) -> Vec<String> {
         app.read_with(cx, |a, cx| {
-            a.log_rows(&a.live_hosts[&1], cx)
-                .iter()
-                .map(|r| match &r.kind {
+            let host = &a.live_hosts[&1];
+            a.log_rows(host, cx)
+                .into_iter()
+                .map(|i| match &host.logs.rows()[i].kind {
                     sysmon_model::LogKind::Line(e) => e.message.clone(),
                     sysmon_model::LogKind::Lost(n) => format!("lost {n}"),
                     sysmon_model::LogKind::Dropped(n) => format!("dropped {n}"),
