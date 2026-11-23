@@ -2617,32 +2617,52 @@ impl AppState {
             .on_action(cx.listener(|this, _: &SeekEnd, _, _| this.seek_to(|st| st.end_ns)))
     }
 
-    /// Overlay listing every shortcut, grouped as in [`actions::SHORTCUTS`].
+    /// Overlay listing every shortcut, grouped as in [`actions::SHORTCUTS`],
+    /// then what the mouse does ([`actions::MOUSE`]).
     fn render_shortcuts(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let mut groups: Vec<(&str, Vec<&actions::Shortcut>)> = Vec::new();
+        let mut groups: Vec<(&str, Vec<(String, &str)>)> = Vec::new();
         for s in actions::SHORTCUTS {
+            let keys = s
+                .keys
+                .iter()
+                .map(|k| actions::display_key(k))
+                .collect::<Vec<_>>()
+                .join("  ");
             match groups.last_mut() {
-                Some((g, list)) if *g == s.group => list.push(s),
-                _ => groups.push((s.group, vec![s])),
+                Some((g, list)) if *g == s.group => list.push((keys, s.description)),
+                _ => groups.push((s.group, vec![(keys, s.description)])),
             }
         }
-        let mut columns = div().flex().gap_8();
-        for (group, list) in groups {
-            let mut col = div().flex().flex_col().gap_1().child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .pb_1()
-                    .child(group),
-            );
-            for s in list {
-                let keys = s
-                    .keys
-                    .iter()
-                    .map(|k| actions::display_key(k))
-                    .collect::<Vec<_>>()
-                    .join("  ");
+        groups.push((
+            "Mouse",
+            actions::MOUSE
+                .iter()
+                .map(|&(what, does)| (what.to_string(), does))
+                .collect(),
+        ));
+        let mut columns = div()
+            .id("shortcuts-columns")
+            .test_support()
+            .flex()
+            .flex_wrap()
+            .gap_x_8()
+            .gap_y_6();
+        for (k, (group, list)) in groups.into_iter().enumerate() {
+            let mut col = div()
+                .id(("shortcuts-group", k))
+                .test_support()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .pb_1()
+                        .child(group),
+                );
+            for (keys, description) in list {
                 col = col.child(
                     div()
                         .flex()
@@ -2656,13 +2676,14 @@ impl AppState {
                                 .text_color(theme.primary)
                                 .child(keys),
                         )
-                        .child(s.description),
+                        .child(description),
                 );
             }
             columns = columns.child(col);
         }
         div()
             .id("shortcuts-overlay")
+            .test_support()
             .absolute()
             .inset_0()
             .flex()
@@ -2675,6 +2696,12 @@ impl AppState {
             }))
             .child(
                 div()
+                    // Within the window: the columns wrap to its width, and
+                    // a short window scrolls them.
+                    .id("shortcuts-panel")
+                    .max_w(relative(0.95))
+                    .max_h(relative(0.95))
+                    .overflow_y_scroll()
                     .p_6()
                     .rounded_lg()
                     .border_1()
@@ -4507,6 +4534,40 @@ mod tests {
             cx.notify();
         });
         assert_eq!(detail(cx).as_deref(), Some("25.0% of samples incomplete"));
+    }
+
+    #[gpui_kit::test]
+    fn the_shortcuts_overlay_lists_the_mouse_and_fits_the_window(cx: &mut TestAppContext) {
+        let (window, _app) = open(cx);
+        cx.update_window(window, |_, w, cx| w.press("f1", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let screen = w.find("shortcuts-overlay").bounds();
+            // Every group, the mouse's last, is within the width: they wrap
+            // (and the panel scrolls if the window is short).
+            let groups = crate::actions::SHORTCUTS
+                .iter()
+                .map(|s| s.group)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                + 1;
+            for k in 0..groups {
+                let col = w.find(("shortcuts-group", k)).bounds();
+                assert!(
+                    col.origin.x >= screen.origin.x
+                        && col.origin.x + col.size.width <= screen.origin.x + screen.size.width,
+                    "group {k}: {col:?} within {screen:?}"
+                );
+            }
+        })
+        .unwrap();
+        assert!(
+            crate::actions::MOUSE
+                .iter()
+                .any(|(what, _)| *what == "Ctrl+click")
+        );
     }
 
     #[gpui_kit::test]
