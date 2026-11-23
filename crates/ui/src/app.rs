@@ -27,6 +27,7 @@ use sysmon_proto::ProcKey;
 use crate::actions::{self, *};
 use crate::format;
 use crate::graph;
+use crate::icons::{IconName, icon};
 use crate::selection::{self, Selection};
 use crate::widgets::{Chosen as _, Highlighted as _, bar, sparkline};
 
@@ -757,7 +758,9 @@ impl AppState {
                             .cursor_pointer()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child("×")
+                            .aria_description("Dismiss")
+                            .tooltip(|window, cx| Tooltip::new("Dismiss (Esc)").build(window, cx))
+                            .child(icon(IconName::X))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.error = None;
                                 cx.notify();
@@ -838,11 +841,27 @@ impl AppState {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(div().size(px(7.)).rounded_full().bg(if stale {
-                                theme.danger
+                            // Live: a green dot. Silent: a red "no signal"
+                            // icon, which reads without telling the colours apart.
+                            .child(if stale {
+                                div()
+                                    .id(("host-silent", id as usize))
+                                    .test_support()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .aria_description("silent")
+                                    .child(icon(IconName::WifiOff).text_color(theme.danger))
+                                    .into_any_element()
                             } else {
-                                theme.success
-                            }))
+                                div()
+                                    .flex_none()
+                                    .size(px(7.))
+                                    .mx(px(2.5))
+                                    .rounded_full()
+                                    .bg(theme.success)
+                                    .into_any_element()
+                            })
                             .child(clipped(
                                 ("host-name", id as usize),
                                 host.name(),
@@ -2073,7 +2092,11 @@ impl AppState {
                             .px_1()
                             .cursor_pointer()
                             .text_color(theme.muted_foreground)
-                            .child("×")
+                            .aria_description("Remove from the graph")
+                            .tooltip(|window, cx| {
+                                Tooltip::new("Remove from the graph").build(window, cx)
+                            })
+                            .child(icon(IconName::X))
                             .on_click(cx.listener(move |this, _, _, cx| this.remove_pick(key, cx))),
                     ),
             );
@@ -2180,6 +2203,7 @@ impl AppState {
             .mr_2()
             .child(
                 Button::new("tab-graph")
+                    .icon(icon(IconName::ChartLine))
                     .label("Graph")
                     .small()
                     .chosen(self.panel == Panel::Graph)
@@ -2193,6 +2217,7 @@ impl AppState {
             )
             .child(
                 Button::new("tab-logs")
+                    .icon(icon(IconName::ScrollText))
                     .label("Logs")
                     .small()
                     .chosen(self.panel == Panel::Logs)
@@ -2203,6 +2228,7 @@ impl AppState {
             )
             .child(
                 Button::new("tab-details")
+                    .icon(icon(IconName::Info))
                     .label("Details")
                     .small()
                     .chosen(self.panel == Panel::Details)
@@ -2280,7 +2306,8 @@ impl AppState {
             .when_some(self.log_source.clone(), |d, source| {
                 d.child(
                     Button::new("logs-source")
-                        .label(format!("{source} ×"))
+                        .label(source)
+                        .icon(icon(IconName::X))
                         .small()
                         .ghost()
                         .tooltip("Show every unit again")
@@ -2388,7 +2415,6 @@ impl AppState {
                         });
                     match &row.kind {
                         LogKind::Line(e) => {
-                            let (label, color) = priority_style(e.priority, &theme);
                             let source = e.unit.clone().unwrap_or_else(|| e.ident.clone());
                             let source_tip = match &e.unit {
                                 Some(u) => format!("{u} · {}", e.ident),
@@ -2406,56 +2432,46 @@ impl AppState {
                             } else {
                                 e.message.clone()
                             };
-                            base.child(
-                                div()
-                                    .flex_none()
-                                    .w(px(LOG_PRI_COL))
-                                    .text_color(color)
-                                    .child(label),
-                            )
-                            .child({
-                                // Click: show only this unit's lines.
-                                let (this, picked) = (this.clone(), source.clone());
-                                div()
-                                    .id(("log-source-cell", i))
-                                    .test_support()
-                                    .flex_none()
-                                    .w(px(LOG_SOURCE_COL))
-                                    .flex()
-                                    .cursor_pointer()
-                                    .on_click(move |_, _, cx| {
-                                        cx.stop_propagation();
-                                        let _ = this.update(cx, |app, cx| {
-                                            app.log_source = Some(picked.clone());
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(clipped(("log-source", i), source, source_tip))
-                            })
-                            .child({
-                                // Click: find the process in the table.
-                                let (this, pid) = (this.clone(), e.pid);
-                                div()
-                                    .id(("log-pid", i))
-                                    .test_support()
-                                    .flex_none()
-                                    .w(px(LOG_PID_COL))
-                                    .when(pid.is_some(), |d| d.cursor_pointer())
-                                    .on_click(move |_, _, cx| {
-                                        let Some(pid) = pid else {
-                                            return;
-                                        };
-                                        cx.stop_propagation();
-                                        let _ =
-                                            this.update(cx, |app, cx| app.show_process(pid, cx));
-                                    })
-                                    .child(pid.map_or_else(|| "–".into(), |p| p.to_string()))
-                            })
-                            .child(clipped(
-                                ("log-message", i),
-                                text,
-                                tip,
-                            ))
+                            base.child(priority_cell(e.priority, &theme))
+                                .child({
+                                    // Click: show only this unit's lines.
+                                    let (this, picked) = (this.clone(), source.clone());
+                                    div()
+                                        .id(("log-source-cell", i))
+                                        .test_support()
+                                        .flex_none()
+                                        .w(px(LOG_SOURCE_COL))
+                                        .flex()
+                                        .cursor_pointer()
+                                        .on_click(move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            let _ = this.update(cx, |app, cx| {
+                                                app.log_source = Some(picked.clone());
+                                                cx.notify();
+                                            });
+                                        })
+                                        .child(clipped(("log-source", i), source, source_tip))
+                                })
+                                .child({
+                                    // Click: find the process in the table.
+                                    let (this, pid) = (this.clone(), e.pid);
+                                    div()
+                                        .id(("log-pid", i))
+                                        .test_support()
+                                        .flex_none()
+                                        .w(px(LOG_PID_COL))
+                                        .when(pid.is_some(), |d| d.cursor_pointer())
+                                        .on_click(move |_, _, cx| {
+                                            let Some(pid) = pid else {
+                                                return;
+                                            };
+                                            cx.stop_propagation();
+                                            let _ = this
+                                                .update(cx, |app, cx| app.show_process(pid, cx));
+                                        })
+                                        .child(pid.map_or_else(|| "–".into(), |p| p.to_string()))
+                                })
+                                .child(clipped(("log-message", i), text, tip))
                         }
                         LogKind::Lost(n) | LogKind::Dropped(n) => {
                             let what = match row.kind {
@@ -2952,12 +2968,12 @@ impl AppState {
                     ),
             );
         }
-        let play_label = if st.finished && st.paused {
-            "Replay"
+        let (play_label, play_icon) = if st.finished && st.paused {
+            ("Replay", IconName::RotateCcw)
         } else if st.paused {
-            "Play"
+            ("Play", IconName::Play)
         } else {
-            "Pause"
+            ("Pause", IconName::Pause)
         };
         Some(
             div()
@@ -2969,8 +2985,10 @@ impl AppState {
                 .border_t_1()
                 .border_color(theme.border)
                 .child(
+                    // Icon only, so the bar doesn't shift as it changes.
                     Button::new("play")
-                        .label(play_label)
+                        .icon(icon(play_icon))
+                        .tooltip(format!("{play_label} (Space)"))
                         .small()
                         .primary()
                         .on_click(cx.listener(|this, _, _, _| this.control(Control::TogglePause))),
@@ -3244,12 +3262,32 @@ fn mono_char_width(window: &Window, cx: &App) -> Pixels {
 const LOG_TIME_COL: f32 = 64.;
 /// The time column when it shows the date too.
 const LOG_DAY_TIME_COL: f32 = 104.;
-const LOG_PRI_COL: f32 = 52.;
+const LOG_PRI_COL: f32 = 68.;
 const LOG_SOURCE_COL: f32 = 160.;
 const LOG_PID_COL: f32 = 56.;
 
 /// A syslog priority's label and colour: errors and worse red, warnings
 /// orange, notices plain, info and debug muted.
+/// A log line's priority as its PRI cell: the label in its colour, after
+/// an icon for warnings and worse, so they stand out in a long list.
+fn priority_cell(p: u8, theme: &gpui_kit::component::Theme) -> Div {
+    let (label, color) = priority_style(p, theme);
+    let mark = match p {
+        0..=3 => Some(IconName::CircleAlert),
+        4 => Some(IconName::TriangleAlert),
+        _ => None,
+    };
+    div()
+        .flex_none()
+        .w(px(LOG_PRI_COL))
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_color(color)
+        .children(mark.map(|m| icon(m).text_color(color)))
+        .child(label)
+}
+
 fn priority_style(p: u8, theme: &gpui_kit::component::Theme) -> (&'static str, Hsla) {
     const LABELS: [&str; 8] = [
         "EMERG", "ALERT", "CRIT", "ERR", "WARN", "NOTICE", "INFO", "DEBUG",
@@ -4359,6 +4397,7 @@ mod tests {
         cx.update_window(window, |_, w, cx| {
             w.render_frame(cx);
             assert!(w.try_find("stale-banner").is_none(), "live data: no notice");
+            assert!(w.try_find(("host-silent", 1usize)).is_none(), "a green dot");
         })
         .unwrap();
 
@@ -4380,6 +4419,8 @@ mod tests {
             let banner = w.find("stale-banner");
             let notice = banner.description().unwrap_or_default();
             assert!(notice.starts_with("No data from"), "{notice}");
+            // The sidebar marks it with an icon, not just a red dot.
+            assert!(w.try_find(("host-silent", 1usize)).is_some());
         })
         .unwrap();
     }
