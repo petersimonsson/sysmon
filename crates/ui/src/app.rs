@@ -2428,8 +2428,18 @@ impl AppState {
                 this.filter.update(cx, |f, cx| f.focus(window, cx));
             }))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
+                // In a filter box: clear it, or once empty, leave it.
+                let typing_in = [this.filter.clone(), this.log_filter.clone()]
+                    .into_iter()
+                    .find(|f| f.focus_handle(cx).is_focused(window));
                 if this.show_shortcuts {
                     this.show_shortcuts = false;
+                } else if let Some(input) = typing_in {
+                    if input.read(cx).value().is_empty() {
+                        this.focus.focus(window, cx);
+                    } else {
+                        input.update(cx, |f, cx| f.set_value("", window, cx));
+                    }
                 } else if this.error.is_some() {
                     this.error = None;
                 } else {
@@ -3314,6 +3324,28 @@ mod tests {
         step(cx, &|window, cx| window.press("escape", cx));
         app.read_with(cx, |app, cx| {
             assert_eq!(app.filter.read(cx).value().as_ref(), "")
+        });
+
+        // In the filter, as in most search boxes, Escape clears what was
+        // typed, and once it's empty hands the keyboard back.
+        step(cx, &|window, cx| {
+            window.press("ctrl-f", cx);
+            window.input("vim", cx);
+        });
+        step(cx, &|window, cx| window.press("escape", cx));
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.filter.read(cx).value().as_ref(), "", "cleared");
+        });
+        step(cx, &|window, cx| window.press("t", cx));
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.filter.read(cx).value().as_ref(), "t", "still typing");
+        });
+        step(cx, &|window, cx| window.press("escape", cx));
+        step(cx, &|window, cx| window.press("escape", cx));
+        step(cx, &|window, cx| window.press("t", cx));
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.filter.read(cx).value().as_ref(), "");
+            assert!(!app.tree, "t is a shortcut again: tree toggled back off");
         });
     }
 
