@@ -3,6 +3,7 @@
 //! that has exited (its last row, marked "exited") until the cursor moves.
 
 use gpui_kit::component::Theme;
+use sysmon_model::LogRow;
 use sysmon_proto::LogEntry;
 
 use super::*;
@@ -96,6 +97,14 @@ impl AppState {
         })
     }
 
+    /// Switch to the Logs tab with the line `key` (receive time, log time)
+    /// selected and in view.
+    fn open_log_line(&mut self, key: (u64, u64), cx: &mut Context<Self>) {
+        self.panel = Panel::Logs;
+        self.log_clicked(key, cx);
+        self.log_reveal.set(true);
+    }
+
     pub(super) fn render_details(
         &self,
         host: &HostModel,
@@ -133,6 +142,20 @@ impl AppState {
                 )
             })
             .child(div().flex_1())
+            .when_some(shown.as_ref().filter(|s| s.live.is_some()), |d, s| {
+                let target = SeriesTarget::Process(s.row.key);
+                let picked = self
+                    .selection()
+                    .is_some_and(|sel| sel.iter().any(|p| p.target == target));
+                d.child(
+                    Button::new("details-graph")
+                        .label(if picked { "Ungraph" } else { "Graph" })
+                        .small()
+                        .ghost()
+                        .tooltip("Add the process to the graph, or take it out")
+                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_pick(target, cx))),
+                )
+            })
             .child(
                 Button::new("details-hide")
                     .label("Hide")
@@ -163,9 +186,9 @@ impl AppState {
                 .gap_4()
                 .px_2()
                 .pb_2()
-                .child(Self::details_facts(host, &s, &theme))
+                .child(Self::details_facts(host, &s, &theme, cx))
                 .child(Self::details_metrics(host, &s, &theme))
-                .child(Self::details_lists(host, &s, &theme))
+                .child(Self::details_lists(host, &s, &theme, cx))
                 .into_any_element(),
         };
 
@@ -182,7 +205,12 @@ impl AppState {
     }
 
     /// PID, parent, user, state, times and the command line.
-    fn details_facts(host: &HostModel, s: &Shown, theme: &Theme) -> impl IntoElement + use<> {
+    fn details_facts(
+        host: &HostModel,
+        s: &Shown,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let row = s.row;
         let fact = |id: &'static str, label: &'static str, value: String| {
             div()
@@ -205,11 +233,38 @@ impl AppState {
                         .child(value),
                 )
         };
-        let parent = match s.live.as_ref().and_then(|d| d.parent) {
+        let parent_row = s.live.as_ref().and_then(|d| d.parent);
+        let parent = match parent_row {
             Some(p) => format!("{} {}", p.key.pid, p.comm),
             None if row.ppid == 0 => "–".into(),
             None => row.ppid.to_string(),
         };
+        // Click the parent to move the cursor to it.
+        let hover = theme.muted;
+        let parent_fact = div()
+            .flex()
+            .gap_2()
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(FACT_LABEL_W))
+                    .text_color(theme.muted_foreground)
+                    .child("Parent"),
+            )
+            .child(
+                div()
+                    .id("details-parent")
+                    .test_support()
+                    .flex_1()
+                    .min_w_0()
+                    .aria_description(format!("Parent {parent}"))
+                    .child(parent)
+                    .when_some(parent_row.map(|p| p.key.pid), |d, pid| {
+                        d.cursor_pointer()
+                            .hover(move |st| st.bg(hover))
+                            .on_click(cx.listener(move |this, _, _, cx| this.show_process(pid, cx)))
+                    }),
+            );
         let user = match (&row.user, row.uid) {
             (Some(name), Some(uid)) => format!("{name} ({uid})"),
             (None, Some(uid)) => uid.to_string(),
@@ -247,7 +302,7 @@ impl AppState {
             .overflow_y_scroll()
             .text_xs()
             .child(fact("details-pid", "PID", row.key.pid.to_string()))
-            .child(fact("details-parent", "Parent", parent))
+            .child(parent_fact)
             .child(fact("details-user", "User", user))
             .child(fact("details-state", "State", state))
             .child(fact("details-started", "Started", started))
@@ -324,7 +379,13 @@ impl AppState {
     }
 
     /// Children, threads and the process's log lines.
-    fn details_lists(host: &HostModel, s: &Shown, theme: &Theme) -> impl IntoElement + use<> {
+    fn details_lists(
+        host: &HostModel,
+        s: &Shown,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let hover = theme.muted;
         let mono = theme.mono_font_family.clone();
         let heading = |text: String| div().mt_1().text_color(theme.muted_foreground).child(text);
         let item = |id: (&'static str, usize), text: String| {
@@ -357,10 +418,17 @@ impl AppState {
         if let Some(d) = &s.live {
             col = col.child(heading(format!("Children ({})", d.children.len())));
             for (i, c) in d.children.iter().take(DETAILS_LIST_MAX).enumerate() {
-                col = col.child(item(
-                    ("details-child", i),
-                    format!("{:>7}  {:>5.1}%  {}", c.key.pid, c.cpu_pct, command(c)),
-                ));
+                // Click a child to move the cursor to it.
+                let pid = c.key.pid;
+                col = col.child(
+                    item(
+                        ("details-child", i),
+                        format!("{:>7}  {:>5.1}%  {}", pid, c.cpu_pct, command(c)),
+                    )
+                    .cursor_pointer()
+                    .hover(move |st| st.bg(hover))
+                    .on_click(cx.listener(move |this, _, _, cx| this.show_process(pid, cx))),
+                );
             }
             col = col.children(more(d.children.len()));
             if host.sends_threads() {
@@ -379,12 +447,12 @@ impl AppState {
         }
 
         if host.logs.enabled() {
-            let lines: Vec<&LogEntry> = host
+            let lines: Vec<(&LogRow, &LogEntry)> = host
                 .logs
                 .for_pid(s.row.key.pid, s.started_unix_ns)
                 .rev()
                 .filter_map(|r| match &r.kind {
-                    LogKind::Line(e) => Some(e),
+                    LogKind::Line(e) => Some((r, e)),
                     _ => None,
                 })
                 .collect();
@@ -392,13 +460,18 @@ impl AppState {
                 "Log lines, newest first ({})",
                 lines.len()
             )));
-            for (i, e) in lines.iter().take(DETAILS_LIST_MAX).enumerate() {
+            for (i, &(r, e)) in lines.iter().take(DETAILS_LIST_MAX).enumerate() {
+                // Click a line to find it in the Logs tab.
+                let key = (r.received_ns, r.ts_unix_ns);
                 let (label, color) = priority_style(e.priority, theme);
                 let first = e.message.lines().next().unwrap_or("");
                 col = col.child(
                     div()
                         .id(("details-log", i))
                         .test_support()
+                        .cursor_pointer()
+                        .hover(move |st| st.bg(hover))
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_log_line(key, cx)))
                         .flex()
                         .gap_2()
                         .font_family(mono.clone())
