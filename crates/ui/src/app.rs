@@ -1319,7 +1319,15 @@ impl AppState {
                         || th.map_or(p.stale, |t| t.stale)
                         || line.tree.as_ref().is_some_and(|t| !t.matched);
                     let slot = picked.get(&line.key()).copied();
-                    let dash = || "–".to_string();
+                    // Process-only figures: a thread's memory and thread
+                    // count are its process's, shown on that row.
+                    let proc_cell = |w: f32, text: &dyn Fn() -> String| {
+                        div().w(px(w)).child(if th.is_some() {
+                            "–".to_string()
+                        } else {
+                            text()
+                        })
+                    };
                     let on_row = {
                         let (this, rows) = (this.clone(), rows.clone());
                         move |ev: &ClickEvent, _: &mut Window, cx: &mut App| {
@@ -1401,27 +1409,13 @@ impl AppState {
                                 .w(px(CPU_COL))
                                 .child(format!("{:.1}", th.map_or(p.cpu_pct, |t| t.cpu_pct))),
                         )
-                        // A thread's memory is its process's, shown on that row.
-                        .child(div().w(px(SIZE_COL)).child(match th {
-                            Some(_) => dash(),
-                            None => size_cell(p.virt_kib),
+                        .child(proc_cell(SIZE_COL, &|| size_cell(p.virt_kib)))
+                        .child(proc_cell(SIZE_COL, &|| size_cell(Some(p.rss_kib))))
+                        .child(proc_cell(SIZE_COL, &|| size_cell(p.shr_kib)))
+                        .child(proc_cell(MEM_PCT_COL, &|| {
+                            format!("{:.1}", p.rss_kib as f32 / mem_total * 100.0)
                         }))
-                        .child(div().w(px(SIZE_COL)).child(match th {
-                            Some(_) => dash(),
-                            None => size_cell(Some(p.rss_kib)),
-                        }))
-                        .child(div().w(px(SIZE_COL)).child(match th {
-                            Some(_) => dash(),
-                            None => size_cell(p.shr_kib),
-                        }))
-                        .child(div().w(px(MEM_PCT_COL)).child(match th {
-                            Some(_) => dash(),
-                            None => format!("{:.1}", p.rss_kib as f32 / mem_total * 100.0),
-                        }))
-                        .child(div().w(px(THREADS_COL)).child(match th {
-                            Some(_) => dash(),
-                            None => p.threads.to_string(),
-                        }))
+                        .child(proc_cell(THREADS_COL, &|| p.threads.to_string()))
                         .child(command_cell(line, i, &this, &theme))
                 })
                 .collect()
