@@ -151,72 +151,99 @@ pub fn open_replay(path: &Path, speed: f64) -> anyhow::Result<ReplayHandle> {
 #[cfg(test)]
 mod tests {
     // Explicit imports: the gpui glob elsewhere would shadow `#[test]`.
-    use super::{Recording, start_live};
+    use super::{RecorderHandle, Recording, start_live};
+    use std::net::{SocketAddr, UdpSocket};
+    use std::path::PathBuf;
     use std::time::Duration;
+    use sysmon_ingest::Event;
     use sysmon_model::ReplaySource;
+
+    /// A receiver recording to its own directory, and an agent's socket to
+    /// send it datagrams. The directory goes when it's dropped.
+    struct Rig {
+        dir: PathBuf,
+        addr: SocketAddr,
+        agent: UdpSocket,
+        recorder: RecorderHandle,
+        _events: flume::Receiver<Event>,
+    }
+
+    impl Rig {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("sysmon-ui-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            // A free port for the receiver.
+            let addr = UdpSocket::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap();
+            let (events, recorder) = start_live(
+                addr,
+                sysmon_proto::Opener::new(None),
+                Some(Recording {
+                    dir: dir.clone(),
+                    retention: Default::default(),
+                }),
+            )
+            .unwrap();
+            Self {
+                dir,
+                addr,
+                agent: UdpSocket::bind("127.0.0.1:0").unwrap(),
+                recorder: recorder.unwrap(),
+                _events: events,
+            }
+        }
+
+        fn send<D: AsRef<[u8]>>(&self, datagrams: impl IntoIterator<Item = D>) {
+            for d in datagrams {
+                self.agent.send_to(d.as_ref(), self.addr).unwrap();
+            }
+        }
+
+        /// Give the receiver time to take what was sent, then stop recording.
+        fn stop(&self) {
+            std::thread::sleep(Duration::from_millis(300));
+            self.recorder.stop(Duration::from_secs(2));
+        }
+
+        fn first_segment(&self) -> PathBuf {
+            sysmon_store::list_segments(&self.dir).unwrap()[0]
+                .path
+                .clone()
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
 
     #[test]
     fn stopping_writes_out_everything_received() {
-        let dir = std::env::temp_dir().join(format!("sysmon-ui-stop-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        // A free port for the receiver.
-        let addr = std::net::UdpSocket::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        let (_events, recorder) = start_live(
-            addr,
-            sysmon_proto::Opener::new(None),
-            Some(Recording {
-                dir: dir.clone(),
-                retention: Default::default(),
-            }),
-        )
-        .unwrap();
-        let recorder = recorder.unwrap();
-
+        let rig = Rig::new("stop");
         // Three small samples: far less than a block, so nothing is written
         // until the recorder is stopped.
-        let agent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let now = sysmon_ingest::unix_now_ns();
         for seq in 0..3u32 {
             let system = sysmon_proto::SystemSample {
                 ts_unix_ns: now + seq as u64 * 1_000_000_000,
                 ..Default::default()
             };
-            for d in sysmon_proto::encode_sample(1, 2, seq, &system, &[], &[]).unwrap() {
-                agent.send_to(&d, addr).unwrap();
-            }
+            rig.send(sysmon_proto::encode_sample(1, 2, seq, &system, &[], &[]).unwrap());
         }
-        std::thread::sleep(Duration::from_millis(300));
-
-        recorder.stop(Duration::from_secs(2));
-        let mut src = ReplaySource::open(&dir).unwrap();
+        rig.stop();
+        let mut src = ReplaySource::open(&rig.dir).unwrap();
         let frames = std::iter::from_fn(|| src.next_event())
-            .filter(|e| matches!(e, sysmon_ingest::Event::Frame(_)))
+            .filter(|e| matches!(e, Event::Frame(_)))
             .count();
         assert_eq!(frames, 3, "all samples on disk right after stop()");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn compressed_datagrams_are_recorded_decompressed() {
-        let dir = std::env::temp_dir().join(format!("sysmon-ui-plain-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let addr = std::net::UdpSocket::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        let (_events, recorder) = start_live(
-            addr,
-            sysmon_proto::Opener::new(None),
-            Some(Recording {
-                dir: dir.clone(),
-                retention: Default::default(),
-            }),
-        )
-        .unwrap();
-        let agent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let rig = Rig::new("plain");
         let sealer = sysmon_proto::Sealer::new(None, true);
         let system = sysmon_proto::SystemSample {
             ts_unix_ns: 1,
@@ -232,14 +259,10 @@ mod tests {
             sent.iter()
                 .all(|d| d[3] & sysmon_proto::flags::COMPRESSED != 0)
         );
-        for d in &sent {
-            agent.send_to(d, addr).unwrap();
-        }
-        std::thread::sleep(Duration::from_millis(300));
-        recorder.unwrap().stop(Duration::from_secs(2));
+        rig.send(&sent);
+        rig.stop();
 
-        let seg = &sysmon_store::list_segments(&dir).unwrap()[0].path;
-        let stored: Vec<_> = sysmon_store::SegmentReader::open(seg)
+        let stored: Vec<_> = sysmon_store::SegmentReader::open(&rig.first_segment())
             .unwrap()
             .map(|r| r.unwrap().datagram)
             .collect();
@@ -251,27 +274,11 @@ mod tests {
                 sysmon_proto::decode(d).unwrap()
             );
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn error_log_lines_are_marked_as_they_are_recorded() {
-        let dir = std::env::temp_dir().join(format!("sysmon-ui-marks-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let addr = std::net::UdpSocket::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        let (_events, recorder) = start_live(
-            addr,
-            sysmon_proto::Opener::new(None),
-            Some(Recording {
-                dir: dir.clone(),
-                retention: Default::default(),
-            }),
-        )
-        .unwrap();
-        let agent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let rig = Rig::new("marks");
         let line = |first_seq, priority| sysmon_proto::LogBatch {
             run: 1,
             first_seq,
@@ -287,19 +294,15 @@ mod tests {
             }],
         };
         for (seq, priority) in [(0, 4), (1, 3)] {
-            for d in sysmon_proto::encode_logs(1, 2, 0, &line(seq, priority)).unwrap() {
-                agent.send_to(&d, addr).unwrap();
-            }
+            rig.send(sysmon_proto::encode_logs(1, 2, 0, &line(seq, priority)).unwrap());
         }
-        std::thread::sleep(Duration::from_millis(300));
-        recorder.unwrap().stop(Duration::from_secs(2));
-        let seg = &sysmon_store::list_segments(&dir).unwrap()[0].path;
-        assert_eq!(sysmon_store::marks::load(seg).map(|m| m.len()), Some(1));
+        rig.stop();
+        let seg = rig.first_segment();
+        assert_eq!(sysmon_store::marks::load(&seg).map(|m| m.len()), Some(1));
         assert_eq!(
-            sysmon_model::logs::error_marks(&dir).unwrap().len(),
+            sysmon_model::logs::error_marks(&rig.dir).unwrap().len(),
             1,
             "the err line"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
