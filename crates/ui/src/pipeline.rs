@@ -103,10 +103,7 @@ fn record(
             for raw in rx.try_iter() {
                 append(&mut recorder, raw);
             }
-            match recorder.flush() {
-                Ok(()) => tracing::info!("recording written"),
-                Err(e) => tracing::error!(error = %e, "writing the recording failed"),
-            }
+            write_out(&mut recorder);
             let _ = done.send(());
             return;
         }
@@ -136,7 +133,15 @@ fn record(
             last_prune = Some(Instant::now());
         }
     }
-    let _ = recorder.flush();
+    write_out(&mut recorder);
+}
+
+/// Write out what the recorder still holds, saying whether that worked.
+fn write_out(recorder: &mut Recorder) {
+    match recorder.flush() {
+        Ok(()) => tracing::info!("recording written"),
+        Err(e) => tracing::error!(error = %e, "writing the recording failed"),
+    }
 }
 
 /// Open a recording and start playing it.
