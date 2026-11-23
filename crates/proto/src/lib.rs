@@ -35,6 +35,16 @@ pub const MAX_DATAGRAM: usize = 1200;
 /// Size of the fixed preamble (magic, version, flags).
 pub const PREAMBLE_LEN: usize = 4;
 
+/// The wall clock in nanoseconds since 1970, as timestamps on the wire are
+/// (0 if the clock is set before 1970).
+pub fn unix_now_ns() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
 /// Bits in the preamble `flags` byte; see [`crate::seal`].
 pub mod flags {
     /// Payload is zstd-compressed.

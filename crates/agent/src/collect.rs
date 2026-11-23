@@ -608,7 +608,7 @@ mod tests {
         let b = system(0).boottime_ns.unwrap();
         assert!(b - a >= 20_000_000, "{a} -> {b}");
         // Since boot: well below the wall clock's time since 1970.
-        assert!(b < crate::unix_now_ns());
+        assert!(b < sysmon_proto::unix_now_ns());
     }
 
     #[test]
