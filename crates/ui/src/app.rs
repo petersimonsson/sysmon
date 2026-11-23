@@ -72,9 +72,8 @@ const MAX_LIVE_HOSTS: usize = 256;
 /// What the app starts with; built in `main` before the window opens.
 pub struct Start {
     pub live: Option<flume::Receiver<Event>>,
-    pub replay: Option<ReplayHandle>,
-    /// The recording `replay` plays.
-    pub replay_path: PathBuf,
+    /// A recording to play, and where it is.
+    pub replay: Option<(ReplayHandle, PathBuf)>,
     pub data_dir: PathBuf,
 }
 
@@ -345,8 +344,8 @@ impl AppState {
             _tasks: tasks,
             _subscriptions: subscriptions,
         };
-        if let Some(handle) = start.replay {
-            this.start_session(handle, start.replay_path, cx);
+        if let Some((handle, path)) = start.replay {
+            this.start_session(handle, path, cx);
         }
         this
     }
@@ -3125,7 +3124,6 @@ mod tests {
             let start = Start {
                 live: None,
                 replay: None,
-                replay_path: std::path::PathBuf::new(),
                 data_dir: std::env::temp_dir(),
             };
             gpui_kit::open_window(options, cx, |window, cx| {
