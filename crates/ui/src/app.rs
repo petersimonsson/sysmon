@@ -1689,19 +1689,21 @@ impl AppState {
         let start = end.saturating_sub(self.graph_window_s * 1_000_000_000);
         let view = self.view;
         let mut cache = self.graph_lines.borrow_mut();
-        let lines: Vec<graph::Line> = picks
-            .iter()
-            .map(|p| graph::Line {
-                color: selection::color(p.slot),
-                points: cache.line(
-                    (view, host.host_id, p.target, metric),
-                    &host.proc_history,
-                    p.target,
-                    metric,
-                    start,
-                ),
-            })
-            .collect();
+        let lines: Rc<Vec<graph::Line>> = Rc::new(
+            picks
+                .iter()
+                .map(|p| graph::Line {
+                    color: selection::color(p.slot),
+                    points: cache.line(
+                        (view, host.host_id, p.target, metric),
+                        &host.proc_history,
+                        p.target,
+                        metric,
+                        start,
+                    ),
+                })
+                .collect(),
+        );
         // Only what's on screen now is kept.
         cache.retain(|&(v, h, t, m)| {
             v == view && h == host.host_id && m == metric && picks.iter().any(|p| p.target == t)
@@ -1800,13 +1802,7 @@ impl AppState {
             }))
             .child(graph::chart(
                 graph::ChartSpec {
-                    lines: lines
-                        .iter()
-                        .map(|l| graph::Line {
-                            color: l.color,
-                            points: l.points.clone(),
-                        })
-                        .collect(),
+                    lines: lines.clone(),
                     start_ns: start,
                     end_ns: end,
                     y_max,
@@ -1866,7 +1862,7 @@ impl AppState {
                         None => format!("{} now", metric.label()),
                     }),
             );
-        for (p, line) in picks.iter().zip(&lines) {
+        for (p, line) in picks.iter().zip(lines.iter()) {
             let key = p.target.key();
             let name = self
                 .graph_names

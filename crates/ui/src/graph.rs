@@ -185,7 +185,8 @@ pub type ChartBounds = Rc<Cell<Option<Bounds<Pixels>>>>;
 /// What to draw: `lines` over `[start_ns, end_ns]` scaled to `[0, y_max]`,
 /// with an optional crosshair at `hover_ns`.
 pub struct ChartSpec {
-    pub lines: Vec<Line>,
+    /// Shared with the legend, which reads the same lines.
+    pub lines: Rc<Vec<Line>>,
     pub start_ns: u64,
     pub end_ns: u64,
     pub y_max: f32,
@@ -229,7 +230,7 @@ pub fn chart(spec: ChartSpec, bounds_out: ChartBounds) -> impl IntoElement {
                 }
             }
 
-            for line in &lines {
+            for line in lines.iter() {
                 for seg in segments(&line.points) {
                     if let [(ts, v)] = seg[..] {
                         // A lone sample between gaps: draw a dot.
@@ -270,7 +271,7 @@ pub fn chart(spec: ChartSpec, bounds_out: ChartBounds) -> impl IntoElement {
                 if let Ok(p) = p.build() {
                     window.paint_path(p, crosshair);
                 }
-                for line in &lines {
+                for line in lines.iter() {
                     if let Some(v) = value_at(&line.points, h) {
                         window.paint_quad(fill(
                             Bounds::centered_at(point(hx, y(v)), size(px(6.), px(6.))),
