@@ -396,6 +396,7 @@ mod tests {
         Args, NOTICES, Warnings, check_log_encryption, effective_interval_ms, users_datagrams,
     };
     use clap::Parser as _;
+    use sysmon_proto::{Msg, UserName};
 
     #[test]
     fn logs_need_a_key_unless_explicitly_unencrypted() {
@@ -428,7 +429,6 @@ mod tests {
         assert_eq!(crate::collect::host_info(used, false).interval_ms, 10);
         assert_eq!(effective_interval_ms(1000), 1000);
     }
-    use sysmon_proto::{Msg, UserName};
 
     #[test]
     fn an_over_long_user_name_doesnt_stop_the_agent() {
