@@ -5700,6 +5700,73 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn the_details_tab_leads_to_relatives_the_graph_and_log_lines(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                f(window, cx)
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        // pid 10 (bash), by PID rows 1, 10, 11, 20.
+        step(cx, &|w, cx| {
+            w.press("shift-n", cx);
+            w.press("down", cx);
+            w.press("down", cx);
+            w.press("l", cx);
+        });
+        step(cx, &|w, cx| w.click("tab-details", cx));
+        // Its child, then that one's parent.
+        step(cx, &|w, cx| w.click(("details-child", 0usize), cx));
+        app.read_with(cx, |a, _| assert_eq!(a.cursor, Some(key(11))));
+        step(cx, &|w, cx| w.click("details-parent", cx));
+        app.read_with(cx, |a, _| assert_eq!(a.cursor, Some(key(10))));
+        // Graph it, and take it out again.
+        step(cx, &|w, cx| w.click("details-graph", cx));
+        app.read_with(cx, |a, _| {
+            assert_eq!(picked(a), [SeriesTarget::Process(key(10))]);
+            assert_eq!(a.panel, Panel::Details, "stays on Details");
+        });
+        step(cx, &|w, cx| w.click("details-graph", cx));
+        app.read_with(cx, |a, _| assert!(picked(a).is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn a_details_log_line_opens_in_the_logs_tab(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        host_with_mixed_logs(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                f(window, cx)
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        // The helper opens the Logs tab.
+        step(cx, &|w, cx| w.click(("log-pid", 0usize), cx)); // cursor on PID 42
+        step(cx, &|w, cx| w.click("tab-details", cx));
+        let logged = cx
+            .update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.try_find(("details-log", 0usize)).is_some()
+            })
+            .unwrap();
+        assert!(logged, "PID 42's line is listed");
+        step(cx, &|w, cx| w.click(("details-log", 0usize), cx));
+        app.read_with(cx, |a, _| {
+            assert_eq!(a.panel, Panel::Logs);
+            assert!(a.log_cursor.is_some());
+            assert!(!a.log_follow);
+        });
+    }
+
+    #[gpui_kit::test]
     fn replay_catch_up_is_applied_in_slices_and_skips_superseded_work(cx: &mut TestAppContext) {
         let (_window, app) = open(cx);
         let (handle, driver) = ReplayHandle::manual(ReplayStatus::default());
