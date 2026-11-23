@@ -2349,6 +2349,10 @@ impl AppState {
     }
 
     fn change_speed(&self, faster: bool) {
+        // Like pausing and seeking: only for the recording on screen.
+        if self.view != View::Replay {
+            return;
+        }
         let Some(st) = self.status() else {
             return;
         };
@@ -4095,6 +4099,33 @@ mod tests {
                 .collect();
             assert_eq!(tids, [12, 11, 10]);
         });
+    }
+
+    #[gpui_kit::test]
+    fn speed_keys_only_act_on_a_recording_on_screen(cx: &mut TestAppContext) {
+        let (handle, driver) = ReplayHandle::manual(ReplayStatus {
+            speed: 1.,
+            ..Default::default()
+        });
+        let (window, app) = open(cx);
+        app.update(cx, |app, cx| {
+            app.start_session(handle, "rec".into(), cx);
+            app.live_enabled = true;
+            app.show(View::Live, cx);
+        });
+        cx.update_window(window, |_, w, cx| w.press("]", cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            driver.controls.try_recv().ok(),
+            None,
+            "not in the Live view"
+        );
+        app.update(cx, |app, cx| app.show(View::Replay, cx));
+        cx.update_window(window, |_, w, cx| w.press("]", cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(driver.controls.try_recv().ok(), Some(Control::SetSpeed(4.)));
     }
 
     #[gpui_kit::test]
