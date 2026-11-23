@@ -75,7 +75,8 @@ pub struct Start {
     pub live: Option<flume::Receiver<Event>>,
     /// A recording to play, and where it is.
     pub replay: Option<(ReplayHandle, PathBuf)>,
-    pub data_dir: PathBuf,
+    /// Where live data is recorded, if it is.
+    pub recording_to: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -115,7 +116,8 @@ pub struct AppState {
     live_heard: HashMap<u64, u64>,
     replay: Option<ReplaySession>,
     next_session: u64,
-    data_dir: PathBuf,
+    /// Where live data is recorded, if it is.
+    recording_to: Option<PathBuf>,
     selected: Option<u64>,
     sort: (SortKey, bool),
     /// Show processes as a tree grouped by parent.
@@ -301,7 +303,7 @@ impl AppState {
             live_heard: HashMap::new(),
             replay: None,
             next_session: 0,
-            data_dir: start.data_dir,
+            recording_to: start.recording_to,
             selected: None,
             sort: (SortKey::Cpu, true),
             tree: false,
@@ -738,12 +740,24 @@ impl AppState {
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| this.open_recording(cx))),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(self.data_dir.display().to_string()),
-            )
+            // Where live data goes; nothing in a recording, whose own path
+            // is beside the Recording button (the data directory beside it
+            // read as a second, different recording).
+            .when(self.view == View::Live && self.live_enabled, |b| {
+                let text = match &self.recording_to {
+                    Some(dir) => format!("Recording to {}", dir.display()),
+                    None => "Not recording".into(),
+                };
+                b.child(
+                    div()
+                        .id("recording-to")
+                        .test_support()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .aria_description(text.clone())
+                        .child(text),
+                )
+            })
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -3282,7 +3296,7 @@ mod tests {
             let start = Start {
                 live: None,
                 replay: None,
-                data_dir: std::env::temp_dir(),
+                recording_to: Some(std::env::temp_dir()),
             };
             gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| AppState::new(start, window, cx))
@@ -4413,6 +4427,32 @@ mod tests {
             let host = &app.live_hosts[&1];
             assert_eq!(app.graph_span(host), (3 * s, 5 * s));
         });
+    }
+
+    #[gpui_kit::test]
+    fn the_toolbar_says_where_live_data_is_recorded_only_when_live(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        app.update(cx, |app, cx| {
+            app.live_enabled = true;
+            cx.notify();
+        });
+        let label = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.try_find("recording-to")
+                    .and_then(|e| e.description().map(str::to_string))
+            })
+            .unwrap()
+        };
+        assert!(label(cx).unwrap().starts_with("Recording to "));
+        app.update(cx, |app, cx| {
+            app.recording_to = None;
+            cx.notify();
+        });
+        assert_eq!(label(cx).as_deref(), Some("Not recording"));
+        let (handle, _driver) = ReplayHandle::manual(ReplayStatus::default());
+        app.update(cx, |app, cx| app.start_session(handle, "rec".into(), cx));
+        assert_eq!(label(cx), None, "not beside a recording");
     }
 
     #[gpui_kit::test]
