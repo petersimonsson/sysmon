@@ -504,6 +504,12 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   graph selection with them), and at most 256 are kept, the longest silent
   going first: each can hold tens of MB of history, and without a key anyone
   can send under made-up host IDs.
+- **Icons** are Lucide's, from gpui-kit's catalog (`icons.rs`): only those
+  listed there are embedded, alongside gpui-kit's default set, which its
+  own components draw. `icons::icon` checks in debug builds that an icon is
+  embedded, so a missing one fails the tests rather than drawing nothing.
+  Toggles and tabs keep their labels; buttons drawn as an icon alone (play,
+  hide, expand / collapse all) have a tooltip and an accessible name.
 - **Window:** titled "sysmon", with app ID / WM_CLASS `sysmon` to match
   `crates/ui/dist/sysmon.desktop`.
 - **Views** (built from `gpui_kit::component`):

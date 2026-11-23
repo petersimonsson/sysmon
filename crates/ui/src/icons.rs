@@ -39,6 +39,25 @@ icon_set!(
     ChartLine,
     ScrollText,
     Info,
+    // Toolbars.
+    RadioTower,
+    FileClock,
+    FolderOpen,
+    ListTree,
+    Cpu,
+    CornerDownRight,
+    ChevronsUpDown,
+    ChevronsDownUp,
+    Search,
+    ChevronDown,
+    ChevronRight,
+    ArrowDownToLine,
+    Eraser,
+    PanelBottomClose,
+    // Details, banners, dialogs.
+    CircleX,
+    Link2Off,
+    Download,
 );
 
 /// sysmon's icons, then gpui-kit's own.

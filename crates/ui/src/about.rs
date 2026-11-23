@@ -10,6 +10,7 @@ use gpui_kit::component::{ActiveTheme as _, Sizable as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::icons::{IconName, icon};
 use crate::notices::{self, CRATES, CrateNotice};
 use crate::widgets::{Chosen as _, Highlighted as _};
 
@@ -222,6 +223,7 @@ impl Render for AboutView {
                     .gap_1()
                     .child(
                         Button::new("about-save")
+                            .icon(icon(IconName::Download))
                             .label("Save all notices…")
                             .small()
                             .on_click(cx.listener(|this, _, _, cx| this.save_all(cx))),
@@ -292,7 +294,12 @@ impl Render for AboutView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(format!("Third-party software ({} crates)", CRATES.len())),
             )
-            .child(Input::new(&self.filter).small().cleanable(true))
+            .child(
+                Input::new(&self.filter)
+                    .small()
+                    .prefix(icon(IconName::Search))
+                    .cleanable(true),
+            )
             .child(
                 div()
                     .flex()
