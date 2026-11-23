@@ -821,6 +821,37 @@ impl AppState {
         Self::silence_at(host, now)
     }
 
+    /// A notice above the header while the host is silent: the figures
+    /// below are its last sample, not current ones (only the sidebar said
+    /// so before, and a stopped agent still showed as running).
+    fn render_stale_banner(&self, host: &HostModel, cx: &App) -> Option<impl IntoElement + use<>> {
+        if host.last_received_ns == 0 {
+            return None;
+        }
+        let silent = self.silence(host)?;
+        let theme = cx.theme();
+        let text = format!(
+            "No data from {} for {}: showing its last sample, received {}",
+            host.name(),
+            format::duration(silent),
+            format::time(host.last_received_ns)
+        );
+        Some(
+            div()
+                .id("stale-banner")
+                .test_support()
+                .flex_none()
+                .px_2()
+                .py_1()
+                .text_sm()
+                .bg(theme.warning.opacity(0.15))
+                .border_b_1()
+                .border_color(theme.warning)
+                .aria_description(text.clone())
+                .child(text),
+        )
+    }
+
     /// [`Self::silence`] at monitor time `now`.
     fn silence_at(host: &HostModel, now: u64) -> Option<u64> {
         let interval_ns = host.info.as_ref().map_or(1000, |i| i.interval_ms) as u64 * 1_000_000;
@@ -2963,6 +2994,7 @@ impl Render for AppState {
                     .flex_col()
                     .flex_1()
                     .min_w_0()
+                    .children(self.render_stale_banner(host, cx))
                     .child(Self::render_header(host, cx))
                     .child(
                         div()
@@ -3928,7 +3960,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn silence_is_judged_by_the_monitors_clock_not_the_agents(cx: &mut TestAppContext) {
-        let (_window, app) = open(cx);
+        let (window, app) = open(cx);
         let now = sysmon_ingest::unix_now_ns();
         let sample = |agent_ts: u64, received: u64| sysmon_proto::Frame {
             received_ns: received,
@@ -3944,6 +3976,15 @@ mod tests {
         app.read_with(cx, |app, _| {
             assert_eq!(app.silence(&app.live_hosts[&1]), None)
         });
+        app.update(cx, |app, cx| {
+            app.ensure_selection();
+            cx.notify();
+        });
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("stale-banner").is_none(), "live data: no notice");
+        })
+        .unwrap();
 
         // A host whose last sample arrived 10 s ago is silent, whatever its clock says.
         app.update(cx, |app, _| {
@@ -3957,6 +3998,14 @@ mod tests {
             let s = app.silence(&app.live_hosts[&1]).expect("silent");
             assert!(s >= 10_000_000_000);
         });
+        // And the main view says its figures are old, not just the sidebar.
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let banner = w.find("stale-banner");
+            let notice = banner.description().unwrap_or_default();
+            assert!(notice.starts_with("No data from"), "{notice}");
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
