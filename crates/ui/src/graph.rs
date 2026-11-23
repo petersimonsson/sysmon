@@ -121,10 +121,10 @@ pub fn y_max(metric: Metric, lines: &[Line]) -> f32 {
         .flat_map(|l| l.points.iter().filter_map(|(_, v)| *v))
         .fold(0.0f32, f32::max);
     match metric {
-        // Keep 0-100 % as the frame unless something is above it (a busy
-        // multi-threaded process can use several cores).
-        Metric::Cpu => nice_ceiling(max.max(100.0)),
-        Metric::MemPct => nice_ceiling(max.max(1.0)),
+        // Scaled to the lines, like the rest: a 0-100 % frame left typical
+        // processes (a few %) flat along the bottom. At least 1 %, so an
+        // idle process's noise doesn't fill the chart.
+        Metric::Cpu | Metric::MemPct => nice_ceiling(max.max(1.0)),
         Metric::Threads => nice_ceiling(max.max(4.0)),
         Metric::Virt | Metric::Rss | Metric::Shr => nice_size_ceiling(max.max(1024.0)),
     }
@@ -376,13 +376,15 @@ mod tests {
     }
 
     #[test]
-    fn cpu_axis_is_at_least_100() {
+    fn cpu_axis_fits_the_lines() {
         let line = |v: f32| Line {
             color: hsla(0., 0., 0., 1.),
             points: vec![(0, Some(v))],
         };
-        assert_eq!(y_max(Metric::Cpu, &[line(12.0)]), 100.0);
+        assert_eq!(y_max(Metric::Cpu, &[line(3.2)]), 5.0);
+        assert_eq!(y_max(Metric::Cpu, &[line(12.0)]), 20.0);
         assert_eq!(y_max(Metric::Cpu, &[line(350.0)]), 500.0);
+        assert_eq!(y_max(Metric::Cpu, &[line(0.1)]), 1.0, "at least 1 %");
     }
 
     #[test]
