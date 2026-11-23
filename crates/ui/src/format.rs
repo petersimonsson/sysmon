@@ -40,6 +40,16 @@ pub fn time(ts_ns: u64) -> String {
     local(ts_ns).strftime("%H:%M:%S").to_string()
 }
 
+/// `YYYY-MM-DD` in local time.
+pub fn day(ts_ns: u64) -> String {
+    local(ts_ns).strftime("%Y-%m-%d").to_string()
+}
+
+/// `MM-DD HH:MM:SS` in local time.
+pub fn day_time(ts_ns: u64) -> String {
+    local(ts_ns).strftime("%m-%d %H:%M:%S").to_string()
+}
+
 /// `YYYY-MM-DD HH:MM:SS` in local time.
 pub fn datetime(ts_ns: u64) -> String {
     local(ts_ns).strftime("%Y-%m-%d %H:%M:%S").to_string()

@@ -2184,6 +2184,18 @@ impl AppState {
         let border = theme.border;
         let total = host.logs.rows().len();
         let shown: Rc<Vec<usize>> = Rc::new(self.log_rows(host, cx));
+        // Lines from more than one day show the date: a time alone was
+        // ambiguous in a recording spanning days.
+        let times = host.logs.rows().iter().map(|r| r.ts_unix_ns);
+        let spans_days = match (times.clone().min(), times.max()) {
+            (Some(first), Some(last)) => format::day(first) != format::day(last),
+            _ => false,
+        };
+        let time_w = if spans_days {
+            LOG_DAY_TIME_COL
+        } else {
+            LOG_TIME_COL
+        };
         let count = shown.len();
         if self.log_follow && count > 0 {
             self.log_scroll
@@ -2284,7 +2296,7 @@ impl AppState {
             .text_color(theme.muted_foreground)
             .border_b_1()
             .border_color(theme.border)
-            .child(div().w(px(LOG_TIME_COL)).child("TIME"))
+            .child(div().w(px(time_w)).child("TIME"))
             .child(div().w(px(LOG_PRI_COL)).child("PRI"))
             .child(div().w(px(LOG_SOURCE_COL)).child("UNIT"))
             .child(div().w(px(LOG_PID_COL)).child("PID"))
@@ -2325,12 +2337,20 @@ impl AppState {
                         .font_family(mono.clone())
                         .when(i % 2 == 1, |d| d.bg(theme.muted.opacity(0.3)))
                         .highlighted(cursor == Some(key), &theme)
-                        .child(
+                        .child({
+                            let at = if spans_days {
+                                format::day_time(row.ts_unix_ns)
+                            } else {
+                                format::time(row.ts_unix_ns)
+                            };
                             div()
+                                .id(("log-time", i))
+                                .test_support()
                                 .flex_none()
-                                .w(px(LOG_TIME_COL))
-                                .child(format::time(row.ts_unix_ns)),
-                        );
+                                .w(px(time_w))
+                                .aria_description(at.clone())
+                                .child(at)
+                        });
                     match &row.kind {
                         LogKind::Line(e) => {
                             let (label, color) = priority_style(e.priority, &theme);
@@ -3165,6 +3185,8 @@ fn mono_char_width(window: &Window, cx: &App) -> Pixels {
 
 /// Widths of the log table's fixed columns.
 const LOG_TIME_COL: f32 = 64.;
+/// The time column when it shows the date too.
+const LOG_DAY_TIME_COL: f32 = 104.;
 const LOG_PRI_COL: f32 = 52.;
 const LOG_SOURCE_COL: f32 = 160.;
 const LOG_PID_COL: f32 = 56.;
@@ -4515,6 +4537,72 @@ mod tests {
         assert_eq!(
             parts("[kworker/0:1]"),
             ("".into(), "[kworker/0:1]".into(), "".into())
+        );
+    }
+
+    #[gpui_kit::test]
+    fn log_times_show_the_date_when_the_lines_span_days(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        let day = 24 * 3600 * 1_000_000_000u64;
+        let t0 = 1_795_332_065 * 1_000_000_000u64;
+        let entry = |ts| sysmon_proto::LogEntry {
+            ts_unix_ns: ts,
+            priority: 3,
+            unit: None,
+            ident: "web".into(),
+            pid: None,
+            message: "m".into(),
+            truncated: false,
+        };
+        let add = |app: &Entity<AppState>, cx: &mut TestAppContext, seq: u64, ts: u64| {
+            app.update(cx, |app, cx| {
+                if app.live_hosts.is_empty() {
+                    let frame = sysmon_proto::Frame {
+                        received_ns: t0,
+                        ..test_frame(1, 0, sampled_at(t0))
+                    };
+                    apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+                }
+                apply(
+                    &mut app.live_hosts,
+                    sysmon_ingest::Event::Logs {
+                        host_id: 1,
+                        boot_id: 1,
+                        batch: sysmon_proto::LogBatch {
+                            run: 1,
+                            first_seq: seq,
+                            dropped: 0,
+                            entries: vec![entry(ts)],
+                        },
+                        received_ns: ts,
+                    },
+                );
+                app.ensure_selection();
+                app.show_logs = true;
+                cx.notify();
+            });
+        };
+        let first_time = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.find(("log-time", 0usize))
+                    .description()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .unwrap()
+        };
+        add(&app, cx, 0, t0);
+        assert_eq!(
+            first_time(cx),
+            crate::format::time(t0),
+            "one day: time only"
+        );
+        add(&app, cx, 1, t0 + 2 * day);
+        assert_eq!(
+            first_time(cx),
+            crate::format::day_time(t0),
+            "two days: dated"
         );
     }
 
