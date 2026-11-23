@@ -183,7 +183,7 @@ fn main() -> anyhow::Result<()> {
         if host_tick {
             datagrams.extend(warnings.or_skip(
                 "host info",
-                host_info_datagram(host_id, boot_id, seq, &info).map(|d| vec![d]),
+                host_info_datagram(host_id, boot_id, seq, &info),
             ));
         }
         if seq.is_multiple_of(USER_REFRESH_EVERY) {
@@ -211,16 +211,21 @@ fn main() -> anyhow::Result<()> {
             ));
             sent_users = names.into_iter().map(|u| (u.uid, u.name)).collect();
         }
-        datagrams.extend(warnings.or_skip(
-            "process metadata",
-            sysmon_proto::encode_proc_meta(host_id, boot_id, seq, &meta).map_err(Into::into),
-        ));
         datagrams.extend(
-            warnings.or_skip(
-                "sample",
-                sysmon_proto::encode_sample(host_id, boot_id, seq, &system, &procs, &threads)
-                    .map_err(Into::into),
-            ),
+            warnings
+                .or_skip(
+                    "process metadata",
+                    sysmon_proto::encode_proc_meta(host_id, boot_id, seq, &meta),
+                )
+                .unwrap_or_default(),
+        );
+        datagrams.extend(
+            warnings
+                .or_skip(
+                    "sample",
+                    sysmon_proto::encode_sample(host_id, boot_id, seq, &system, &procs, &threads),
+                )
+                .unwrap_or_default(),
         );
 
         if let Some(journal) = &mut journal {
@@ -229,21 +234,20 @@ fn main() -> anyhow::Result<()> {
                 || batch.dropped > 0
                 || seq.is_multiple_of(log_heartbeat_every)
             {
-                datagrams.extend(warnings.or_skip(
-                    "logs",
-                    sysmon_proto::encode_logs(host_id, boot_id, seq, &batch).map_err(Into::into),
-                ));
+                datagrams.extend(
+                    warnings
+                        .or_skip(
+                            "logs",
+                            sysmon_proto::encode_logs(host_id, boot_id, seq, &batch),
+                        )
+                        .unwrap_or_default(),
+                );
             }
         }
 
         let datagrams: Vec<Vec<u8>> = datagrams
             .into_iter()
-            .flat_map(|d| {
-                warnings.or_skip(
-                    "sealing",
-                    sealer.seal(d).map(|d| vec![d]).map_err(Into::into),
-                )
-            })
+            .filter_map(|d| warnings.or_skip("sealing", sealer.seal(d)))
             .collect();
         let bytes: usize = datagrams.iter().map(Vec::len).sum();
         for target in targets.current() {
@@ -317,10 +321,12 @@ fn users_datagrams(
             name: collect::cap(&u.name, MAX_USER_NAME),
         })
         .collect();
-    warnings.or_skip(
-        "user names",
-        sysmon_proto::encode_users(host_id, boot_id, seq, &names).map_err(Into::into),
-    )
+    warnings
+        .or_skip(
+            "user names",
+            sysmon_proto::encode_users(host_id, boot_id, seq, &names),
+        )
+        .unwrap_or_default()
 }
 
 /// Encoding problems are logged once per kind of record and the affected
@@ -334,14 +340,15 @@ struct Warnings {
 }
 
 impl Warnings {
-    fn or_skip(&mut self, what: &str, r: anyhow::Result<Vec<Vec<u8>>>) -> Vec<Vec<u8>> {
-        r.unwrap_or_else(|e| {
+    /// `r`'s value, or `None` (warned about) if it failed.
+    fn or_skip<T, E: Into<anyhow::Error>>(&mut self, what: &str, r: Result<T, E>) -> Option<T> {
+        r.map_err(|e| {
             if !self.seen.contains(what) {
                 self.seen.insert(what.to_string());
-                tracing::warn!("skipping {what}: {e:#}");
+                tracing::warn!("skipping {what}: {:#}", e.into());
             }
-            Vec::new()
         })
+        .ok()
     }
 }
 
@@ -371,7 +378,7 @@ fn host_info_datagram(
     boot_id: u128,
     seq: u32,
     info: &HostInfo,
-) -> anyhow::Result<Vec<u8>> {
+) -> sysmon_proto::Result<Vec<u8>> {
     let header = sysmon_proto::Header {
         host_id,
         boot_id,
@@ -379,7 +386,7 @@ fn host_info_datagram(
         chunk: 0,
         chunks: 1,
     };
-    Ok(sysmon_proto::encode(&header, &Msg::HostInfo(info.clone()))?)
+    sysmon_proto::encode(&header, &Msg::HostInfo(info.clone()))
 }
 
 fn unix_now_ns() -> u64 {
@@ -457,11 +464,11 @@ mod tests {
         assert_eq!(sent[1].name.len(), super::MAX_USER_NAME);
 
         // Anything else that fails is skipped and warned about once.
-        let failed = warnings.or_skip("test", Err(anyhow::anyhow!("boom")));
-        assert!(failed.is_empty());
-        warnings.or_skip("test", Err(anyhow::anyhow!("boom")));
+        let failed: Option<()> = warnings.or_skip("test", Err(anyhow::anyhow!("boom")));
+        assert!(failed.is_none());
+        warnings.or_skip::<(), _>("test", Err(anyhow::anyhow!("boom")));
         // Even when the error text changes, as a growing size does.
-        warnings.or_skip("test", Err(anyhow::anyhow!("boom, bigger")));
+        warnings.or_skip::<(), _>("test", Err(anyhow::anyhow!("boom, bigger")));
         assert_eq!(warnings.seen.len(), 1);
     }
 
