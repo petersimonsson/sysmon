@@ -347,7 +347,6 @@ pub fn display_key(k: &str) -> String {
             "pageup" => "PgUp".to_string(),
             "pagedown" => "PgDn".to_string(),
             "end" => "End".to_string(),
-            p if p.len() == 1 => p.to_uppercase(),
             p => p.to_uppercase(),
         })
         .collect::<Vec<_>>()
