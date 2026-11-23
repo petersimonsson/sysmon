@@ -30,8 +30,19 @@ use crate::selection::{self, Selection};
 use crate::widgets::{Chosen as _, bar, sparkline};
 
 const ROW_HEIGHT: f32 = 20.;
-/// Width of the VIRT, RES and SHR columns; fits "1023.9 MiB".
+/// Widths of the process table's fixed columns, shared by the header and
+/// the rows so they stay lined up.
+/// The graph checkbox: 10 px with 2 px either side.
+const PICK_COL: f32 = 14.;
+const PID_COL: f32 = 64.;
+const STATE_COL: f32 = 16.;
+const CPU_COL: f32 = 60.;
+/// VIRT, RES and SHR; fits "1023.9 MiB".
 const SIZE_COL: f32 = 80.;
+const MEM_PCT_COL: f32 = 44.;
+const THREADS_COL: f32 = 48.;
+/// The graph's y-axis labels, and the x labels' indent to line up with it.
+const AXIS_LABELS_W: f32 = 64.;
 /// The USER column fits the longest name shown, within these many characters;
 /// longer names are shortened in the middle.
 const USER_MIN_CHARS: usize = 4;
@@ -1279,21 +1290,21 @@ impl AppState {
             .text_color(theme.muted_foreground)
             .border_b_1()
             .border_color(theme.border)
-            .child(div().w(px(14.)))
-            .child(header_cell(SortKey::Pid, "PID", Some(64.), cx))
+            .child(div().w(px(PICK_COL)))
+            .child(header_cell(SortKey::Pid, "PID", Some(PID_COL), cx))
             .child(header_cell(
                 SortKey::User,
                 "USER",
                 Some(f32::from(user_w)),
                 cx,
             ))
-            .child(div().w(px(16.)).child("S"))
-            .child(header_cell(SortKey::Cpu, "%CPU", Some(60.), cx))
+            .child(div().w(px(STATE_COL)).child("S"))
+            .child(header_cell(SortKey::Cpu, "%CPU", Some(CPU_COL), cx))
             .child(header_cell(SortKey::Virt, "VIRT", Some(SIZE_COL), cx))
             .child(header_cell(SortKey::Res, "RES", Some(SIZE_COL), cx))
             .child(header_cell(SortKey::Shr, "SHR", Some(SIZE_COL), cx))
-            .child(div().w(px(44.)).child("%MEM"))
-            .child(header_cell(SortKey::Threads, "THR", Some(48.), cx))
+            .child(div().w(px(MEM_PCT_COL)).child("%MEM"))
+            .child(header_cell(SortKey::Threads, "THR", Some(THREADS_COL), cx))
             .child(header_cell(SortKey::Command, "COMMAND", None, cx));
 
         let count = rows.len();
@@ -1358,7 +1369,7 @@ impl AppState {
                                 })
                                 .on_click(on_pick),
                         )
-                        .child(div().w(px(64.)).child(line.key().pid.to_string()))
+                        .child(div().w(px(PID_COL)).child(line.key().pid.to_string()))
                         .child({
                             let full = user_name(p);
                             let tip = match (&p.user, p.uid) {
@@ -1382,12 +1393,12 @@ impl AppState {
                         })
                         .child(
                             div()
-                                .w(px(16.))
+                                .w(px(STATE_COL))
                                 .child(th.map_or(p.state, |t| t.state).to_string()),
                         )
                         .child(
                             div()
-                                .w(px(60.))
+                                .w(px(CPU_COL))
                                 .child(format!("{:.1}", th.map_or(p.cpu_pct, |t| t.cpu_pct))),
                         )
                         // A thread's memory is its process's, shown on that row.
@@ -1403,11 +1414,11 @@ impl AppState {
                             Some(_) => dash(),
                             None => size_cell(p.shr_kib),
                         }))
-                        .child(div().w(px(44.)).child(match th {
+                        .child(div().w(px(MEM_PCT_COL)).child(match th {
                             Some(_) => dash(),
                             None => format!("{:.1}", p.rss_kib as f32 / mem_total * 100.0),
                         }))
-                        .child(div().w(px(48.)).child(match th {
+                        .child(div().w(px(THREADS_COL)).child(match th {
                             Some(_) => dash(),
                             None => p.threads.to_string(),
                         }))
@@ -1748,7 +1759,7 @@ impl AppState {
             .flex()
             .flex_col()
             .justify_between()
-            .w(px(64.))
+            .w(px(AXIS_LABELS_W))
             .h_full()
             .pr_1()
             .text_xs()
@@ -1793,7 +1804,7 @@ impl AppState {
         let x_labels = div()
             .flex()
             .justify_between()
-            .pl(px(64.))
+            .pl(px(AXIS_LABELS_W))
             .text_xs()
             .text_color(theme.muted_foreground)
             .child(format::time(start))
