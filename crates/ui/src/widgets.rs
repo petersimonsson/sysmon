@@ -37,6 +37,28 @@ pub fn stroke(
     }
 }
 
+/// The look of the row the keyboard cursor or a click picked: the theme's
+/// active fill and a border, so it stands out from the zebra stripes (the
+/// neutral accent grey alone was hard to tell from them). The border is
+/// drawn over the row rather than around it, so the row's contents don't
+/// shift out of line with the header.
+pub trait Highlighted: Styled + ParentElement + Sized {
+    fn highlighted(self, on: bool, theme: &gpui_kit::component::Theme) -> Self {
+        if !on {
+            return self;
+        }
+        self.relative().bg(theme.table_active).child(
+            div()
+                .absolute()
+                .inset_0()
+                .border_1()
+                .border_color(theme.table_active_border),
+        )
+    }
+}
+
+impl<E: Styled + ParentElement> Highlighted for E {}
+
 /// A horizontal bar filled to `pct` (0..=100).
 pub fn bar(pct: f32, width: Pixels, track: Hsla, fill: Hsla) -> impl IntoElement {
     div().w(width).h(px(8.)).rounded_sm().bg(track).child(

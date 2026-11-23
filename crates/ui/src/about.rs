@@ -11,7 +11,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::notices::{self, CRATES, CrateNotice};
-use crate::widgets::Chosen as _;
+use crate::widgets::{Chosen as _, Highlighted as _};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shown {
@@ -254,7 +254,7 @@ impl Render for AboutView {
                             .text_xs()
                             .rounded_sm()
                             .cursor_pointer()
-                            .when(shown == Shown::Crate(i), |d| d.bg(theme.accent))
+                            .highlighted(shown == Shown::Crate(i), &theme)
                             .child(
                                 div()
                                     .overflow_hidden()

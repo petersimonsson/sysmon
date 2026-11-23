@@ -27,7 +27,7 @@ use crate::actions::{self, *};
 use crate::format;
 use crate::graph;
 use crate::selection::{self, Selection};
-use crate::widgets::{Chosen as _, bar, sparkline};
+use crate::widgets::{Chosen as _, Highlighted as _, bar, sparkline};
 
 const ROW_HEIGHT: f32 = 20.;
 /// Widths of the process table's fixed columns, shared by the header and
@@ -776,7 +776,7 @@ impl AppState {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .when(selected, |d| d.bg(theme.accent))
+                    .highlighted(selected, theme)
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.selected = Some(id);
@@ -1352,7 +1352,7 @@ impl AppState {
                         .text_xs()
                         .font_family(mono.clone())
                         .when(i % 2 == 1, |d| d.bg(theme.muted.opacity(0.3)))
-                        .when(cursor == Some(line.key()), |d| d.bg(theme.accent))
+                        .highlighted(cursor == Some(line.key()), &theme)
                         .when(dim, |d| d.text_color(theme.muted_foreground))
                         .child(
                             // Graph checkbox; filled with the line's colour when picked.
@@ -2175,7 +2175,7 @@ impl AppState {
                         .text_xs()
                         .font_family(mono.clone())
                         .when(i % 2 == 1, |d| d.bg(theme.muted.opacity(0.3)))
-                        .when(cursor == Some(key), |d| d.bg(theme.accent))
+                        .highlighted(cursor == Some(key), &theme)
                         .child(
                             div()
                                 .flex_none()
