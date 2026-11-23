@@ -16,6 +16,27 @@ impl Chosen for Button {
     }
 }
 
+/// Paint a line through `points` (nothing for none).
+pub fn stroke(
+    window: &mut Window,
+    points: impl IntoIterator<Item = Point<Pixels>>,
+    width: Pixels,
+    color: Hsla,
+) {
+    let mut points = points.into_iter();
+    let Some(first) = points.next() else {
+        return;
+    };
+    let mut path = PathBuilder::stroke(width);
+    path.move_to(first);
+    for p in points {
+        path.line_to(p);
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, color);
+    }
+}
+
 /// A horizontal bar filled to `pct` (0..=100).
 pub fn bar(pct: f32, width: Pixels, track: Hsla, fill: Hsla) -> impl IntoElement {
     div().w(width).h(px(8.)).rounded_sm().bg(track).child(
@@ -66,14 +87,11 @@ pub fn sparkline(
                         }
                         let x0 =
                             bounds.origin.x + bounds.size.width - step * (values.len() - 1) as f32;
-                        let mut path = PathBuilder::stroke(px(1.5));
-                        path.move_to(point(x0, y(values[0])));
-                        for (i, v) in values.iter().enumerate().skip(1) {
-                            path.line_to(point(x0 + step * i as f32, y(*v)));
-                        }
-                        if let Ok(path) = path.build() {
-                            window.paint_path(path, *color);
-                        }
+                        let points = values
+                            .iter()
+                            .enumerate()
+                            .map(|(i, v)| point(x0 + step * i as f32, y(*v)));
+                        stroke(window, points, px(1.5), *color);
                     }
                 },
             )

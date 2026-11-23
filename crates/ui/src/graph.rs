@@ -11,6 +11,7 @@ use sysmon_model::SeriesTarget;
 use sysmon_model::series::ProcFrame;
 
 use crate::format;
+use crate::widgets::stroke;
 
 /// Time windows offered for the graph, in seconds.
 pub const WINDOWS_S: [u64; 3] = [60, 300, 600];
@@ -220,14 +221,11 @@ pub fn chart(spec: ChartSpec, bounds_out: ChartBounds) -> impl IntoElement {
             let y =
                 |v: f32| bounds.origin.y + bounds.size.height * (1.0 - (v / y_max).clamp(0.0, 1.0));
 
+            let (left, right) = (bounds.origin.x, bounds.origin.x + bounds.size.width);
+            let (top, bottom) = (bounds.origin.y, bounds.origin.y + bounds.size.height);
             for frac in [0.0, 0.5, 1.0] {
-                let gy = bounds.origin.y + bounds.size.height * frac;
-                let mut p = PathBuilder::stroke(px(1.));
-                p.move_to(point(bounds.origin.x, gy));
-                p.line_to(point(bounds.origin.x + bounds.size.width, gy));
-                if let Ok(p) = p.build() {
-                    window.paint_path(p, grid);
-                }
+                let gy = top + bounds.size.height * frac;
+                stroke(window, [point(left, gy), point(right, gy)], px(1.), grid);
             }
 
             for line in lines.iter() {
@@ -240,14 +238,8 @@ pub fn chart(spec: ChartSpec, bounds_out: ChartBounds) -> impl IntoElement {
                         ));
                         continue;
                     }
-                    let mut p = PathBuilder::stroke(px(1.5));
-                    p.move_to(point(x(seg[0].0), y(seg[0].1)));
-                    for &(ts, v) in &seg[1..] {
-                        p.line_to(point(x(ts), y(v)));
-                    }
-                    if let Ok(p) = p.build() {
-                        window.paint_path(p, line.color);
-                    }
+                    let points = seg.iter().map(|&(ts, v)| point(x(ts), y(v)));
+                    stroke(window, points, px(1.5), line.color);
                 }
             }
 
@@ -255,22 +247,17 @@ pub fn chart(spec: ChartSpec, bounds_out: ChartBounds) -> impl IntoElement {
                 && (start_ns..=end_ns).contains(&m)
             {
                 let mx = x(m);
-                let mut p = PathBuilder::stroke(px(2.));
-                p.move_to(point(mx, bounds.origin.y));
-                p.line_to(point(mx, bounds.origin.y + bounds.size.height));
-                if let Ok(p) = p.build() {
-                    window.paint_path(p, color);
-                }
+                stroke(window, [point(mx, top), point(mx, bottom)], px(2.), color);
             }
 
             if let Some(h) = hover_ns {
                 let hx = x(h);
-                let mut p = PathBuilder::stroke(px(1.));
-                p.move_to(point(hx, bounds.origin.y));
-                p.line_to(point(hx, bounds.origin.y + bounds.size.height));
-                if let Ok(p) = p.build() {
-                    window.paint_path(p, crosshair);
-                }
+                stroke(
+                    window,
+                    [point(hx, top), point(hx, bottom)],
+                    px(1.),
+                    crosshair,
+                );
                 for line in lines.iter() {
                     if let Some(v) = value_at(&line.points, h) {
                         window.paint_quad(fill(
