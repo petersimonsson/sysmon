@@ -53,6 +53,8 @@ struct Shared {
 pub struct Journal {
     shared: Arc<Mutex<Shared>>,
     cursor_file: Option<PathBuf>,
+    /// Position of the last line handed over by [`Journal::take`].
+    taken: Option<String>,
     saved: Option<String>,
     /// Saving failed and was warned about; not repeated every tick.
     warned: bool,
@@ -80,6 +82,7 @@ impl Journal {
         Ok(Self {
             shared,
             cursor_file,
+            taken: saved.clone(),
             saved,
             warned: false,
             run: random_u64(),
@@ -92,6 +95,8 @@ impl Journal {
     pub fn take(&mut self) -> LogBatch {
         let mut s = self.shared.lock().unwrap();
         let entries: Vec<LogEntry> = s.queue.drain(..).collect();
+        // Under the same lock: the reader may move on before these are sent.
+        self.taken = s.cursor.clone();
         let batch = LogBatch {
             run: self.run,
             first_seq: self.next_seq,
@@ -103,15 +108,18 @@ impl Journal {
     }
 
     /// Remember the position of the lines taken so far, once they're sent.
+    /// Not the reader's newest position: lines read since the last `take`
+    /// aren't sent yet, and a restart must not skip them.
     pub fn save_position(&mut self) {
-        let cursor = self.shared.lock().unwrap().cursor.clone();
         let Some(path) = &self.cursor_file else {
             return;
         };
-        if cursor.is_none() || cursor == self.saved {
+        let Some(cursor) = self.taken.clone() else {
+            return;
+        };
+        if self.saved.as_ref() == Some(&cursor) {
             return;
         }
-        let cursor = cursor.unwrap();
         // Write and rename, so a crash never leaves half a cursor.
         let tmp = path.with_extension("tmp");
         let result =
@@ -469,6 +477,33 @@ mod tests {
         let mut l = RateLimit::new(t0);
         assert!(l.allow(t0, MAX_BYTES_PER_S));
         assert!(!l.allow(t0, 1));
+    }
+
+    #[test]
+    fn saves_the_position_of_what_was_taken_not_what_was_read_since() {
+        let dir = std::env::temp_dir().join(format!("sysmon-taken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let mut j = Journal {
+            shared: shared.clone(),
+            cursor_file: Some(dir.join("cursor")),
+            taken: None,
+            saved: None,
+            warned: false,
+            run: 1,
+            next_seq: 0,
+        };
+        shared.lock().unwrap().cursor = Some("s=1".into());
+        j.take();
+        // The reader moves on while the batch is being sent.
+        shared.lock().unwrap().cursor = Some("s=2".into());
+        j.save_position();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("cursor")).unwrap(),
+            "s=1\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
