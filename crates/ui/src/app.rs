@@ -30,6 +30,8 @@ use crate::graph;
 use crate::selection::{self, Selection};
 use crate::widgets::{Chosen as _, Highlighted as _, bar, sparkline};
 
+mod details;
+
 const ROW_HEIGHT: f32 = 20.;
 /// Widths of the process table's fixed columns, shared by the header and
 /// the rows so they stay lined up.
@@ -119,6 +121,8 @@ struct ReplaySession {
 enum Panel {
     Graph,
     Logs,
+    /// The process under the cursor.
+    Details,
 }
 
 pub struct AppState {
@@ -165,6 +169,8 @@ pub struct AppState {
     /// What the bottom panel shows. The graph only shows while something
     /// is picked and it isn't hidden; the other tabs always do.
     panel: Panel,
+    /// The process the Details tab last showed, for after it exits.
+    details_memo: Option<details::DetailsMemo>,
     /// Keep the newest log line in view; scrolling up stops it.
     log_follow: bool,
     log_scroll: UniformListScrollHandle,
@@ -347,6 +353,7 @@ impl AppState {
             graph_height: px(GRAPH_HEIGHT),
             graph_drag: None,
             panel: Panel::Graph,
+            details_memo: None,
             log_follow: true,
             log_scroll: UniformListScrollHandle::new(),
             log_cursor: None,
@@ -1785,7 +1792,7 @@ impl AppState {
         cx.notify();
     }
 
-    /// Whether the bottom panel is open, with the graph or the logs.
+    /// Whether the bottom panel is open, with the graph, logs or details.
     fn panel_shown(&self) -> bool {
         self.panel != Panel::Graph || self.graph_shown()
     }
@@ -2164,7 +2171,7 @@ impl AppState {
         cx.notify();
     }
 
-    /// Graph / Logs, at the left of the bottom panel's toolbar.
+    /// Graph / Logs / Details, at the left of the bottom panel's toolbar.
     fn render_panel_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let picked = self.selection().is_some_and(|s| !s.is_empty());
         div()
@@ -2191,6 +2198,16 @@ impl AppState {
                     .chosen(self.panel == Panel::Logs)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.panel = Panel::Logs;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("tab-details")
+                    .label("Details")
+                    .small()
+                    .chosen(self.panel == Panel::Details)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.panel = Panel::Details;
                         cx.notify();
                     })),
             )
@@ -3254,6 +3271,7 @@ impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mono_char = mono_char_width(window, cx);
         self.refresh_graph_names();
+        self.refresh_details();
         let panel_shown = self.panel_shown();
         // Keep the panel within the window if the window shrank.
         let max_graph = (window.viewport_size().height - px(GRAPH_MIN_LIST)).max(px(GRAPH_MIN));
@@ -3267,6 +3285,7 @@ impl Render for AppState {
             Some(host) => {
                 let graph = panel_shown.then(|| match self.panel {
                     Panel::Logs => self.render_logs(host, cx).into_any_element(),
+                    Panel::Details => self.render_details(host, cx).into_any_element(),
                     Panel::Graph => self.render_graph(host, cx).into_any_element(),
                 });
                 div()
@@ -5591,6 +5610,93 @@ mod tests {
             assert_eq!(mark.as_deref(), Some(expected.as_str()));
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn the_details_tab_follows_the_cursor_and_keeps_an_exited_process(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        for seq in 0..3 {
+            add_frame(&app, cx, seq);
+        }
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+                f(window, cx)
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        let describe = |cx: &mut TestAppContext, id: gpui_kit::ElementId| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.find(id).description().map(|d| d.to_string())
+            })
+            .unwrap()
+        };
+
+        // Nothing under the cursor yet. (The panel is closed while nothing
+        // is picked; the Logs tab opens it.)
+        step(cx, &|w, cx| w.press("l", cx));
+        step(cx, &|w, cx| w.click("tab-details", cx));
+        app.read_with(cx, |a, _| assert_eq!(a.panel, Panel::Details));
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("details-empty").is_some());
+        })
+        .unwrap();
+
+        // pid 10 (bash): its parent and child. By PID, rows are 1, 10, 11, 20.
+        step(cx, &|w, cx| {
+            w.press("shift-n", cx);
+            w.press("down", cx);
+            w.press("down", cx);
+        });
+        assert_eq!(
+            describe(cx, "details-title".into()).as_deref(),
+            Some("bash · PID 10")
+        );
+        assert_eq!(
+            describe(cx, "details-parent".into()).as_deref(),
+            Some("Parent 1 init")
+        );
+        let child = describe(cx, ("details-child", 0usize).into()).unwrap();
+        assert!(child.contains("11") && child.contains("vim"), "{child}");
+        assert_eq!(
+            describe(cx, "details-state".into()).as_deref(),
+            Some("State S – sleeping")
+        );
+
+        // The cursor moves on to vim, which then exits: still shown, marked.
+        step(cx, &|w, cx| w.press("down", cx));
+        assert_eq!(
+            describe(cx, "details-title".into()).as_deref(),
+            Some("vim · PID 11")
+        );
+        app.update(cx, |app, cx| {
+            let frame = sysmon_proto::Frame {
+                procs: vec![],
+                ..test_frame(1, 3, sampled_at(4_000_000_000))
+            };
+            apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+            cx.notify();
+        });
+        assert_eq!(
+            describe(cx, "details-title".into()).as_deref(),
+            Some("vim · PID 11")
+        );
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("details-exited").is_some());
+        })
+        .unwrap();
+
+        // Hide goes back to the graph (hidden, as nothing is picked).
+        step(cx, &|w, cx| w.click("details-hide", cx));
+        app.read_with(cx, |a, _| {
+            assert_eq!(a.panel, Panel::Graph);
+            assert!(!a.panel_shown());
+        });
     }
 
     #[gpui_kit::test]
