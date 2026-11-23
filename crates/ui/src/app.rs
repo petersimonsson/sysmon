@@ -114,6 +114,13 @@ struct ReplaySession {
     _feed: Task<()>,
 }
 
+/// The bottom panel's tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    Graph,
+    Logs,
+}
+
 pub struct AppState {
     view: View,
     live_enabled: bool,
@@ -155,8 +162,9 @@ pub struct AppState {
     graph_height: Pixels,
     /// While dragging the divider: pointer y and panel height at the start.
     graph_drag: Option<(Pixels, Pixels)>,
-    /// The bottom panel shows the host's logs instead of the graph.
-    show_logs: bool,
+    /// What the bottom panel shows. The graph only shows while something
+    /// is picked and it isn't hidden; the other tabs always do.
+    panel: Panel,
     /// Keep the newest log line in view; scrolling up stops it.
     log_follow: bool,
     log_scroll: UniformListScrollHandle,
@@ -338,7 +346,7 @@ impl AppState {
             graph_lines: Default::default(),
             graph_height: px(GRAPH_HEIGHT),
             graph_drag: None,
-            show_logs: false,
+            panel: Panel::Graph,
             log_follow: true,
             log_scroll: UniformListScrollHandle::new(),
             log_cursor: None,
@@ -1779,7 +1787,7 @@ impl AppState {
 
     /// Whether the bottom panel is open, with the graph or the logs.
     fn panel_shown(&self) -> bool {
-        self.show_logs || self.graph_shown()
+        self.panel != Panel::Graph || self.graph_shown()
     }
 
     fn graph_shown(&self) -> bool {
@@ -2167,11 +2175,11 @@ impl AppState {
                 Button::new("tab-graph")
                     .label("Graph")
                     .small()
-                    .chosen(!self.show_logs)
+                    .chosen(self.panel == Panel::Graph)
                     // There's nothing to graph until processes are picked.
                     .disabled(!picked)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_logs = false;
+                        this.panel = Panel::Graph;
                         this.graph_visible = true;
                         cx.notify();
                     })),
@@ -2180,9 +2188,9 @@ impl AppState {
                 Button::new("tab-logs")
                     .label("Logs")
                     .small()
-                    .chosen(self.show_logs)
+                    .chosen(self.panel == Panel::Logs)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_logs = true;
+                        this.panel = Panel::Logs;
                         cx.notify();
                     })),
             )
@@ -2293,7 +2301,7 @@ impl AppState {
                     .small()
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_logs = false;
+                        this.panel = Panel::Graph;
                         cx.notify();
                     })),
             );
@@ -2637,7 +2645,11 @@ impl AppState {
                 this.theme_chosen = true;
             }))
             .on_action(cx.listener(|this, _: &ToggleLogs, _, cx| {
-                this.show_logs = !this.show_logs;
+                this.panel = if this.panel == Panel::Logs {
+                    Panel::Graph
+                } else {
+                    Panel::Logs
+                };
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleGraphPanel, _, cx| {
@@ -2888,7 +2900,7 @@ impl AppState {
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.control(Control::Seek(at));
-                        this.show_logs = true;
+                        this.panel = Panel::Logs;
                         cx.notify();
                     })),
             );
@@ -3253,12 +3265,9 @@ impl Render for AppState {
 
         let main = match self.current_host() {
             Some(host) => {
-                let graph = panel_shown.then(|| {
-                    if self.show_logs {
-                        self.render_logs(host, cx).into_any_element()
-                    } else {
-                        self.render_graph(host, cx).into_any_element()
-                    }
+                let graph = panel_shown.then(|| match self.panel {
+                    Panel::Logs => self.render_logs(host, cx).into_any_element(),
+                    Panel::Graph => self.render_graph(host, cx).into_any_element(),
                 });
                 div()
                     .flex()
@@ -3369,7 +3378,7 @@ impl Render for AppState {
 mod tests {
     // Explicit imports: the gpui glob would shadow `#[test]`.
     use super::{
-        AppState, FORGET_AFTER_NS, MAX_LIVE_HOSTS, Selection, SortKey, Start, View, apply,
+        AppState, FORGET_AFTER_NS, MAX_LIVE_HOSTS, Panel, Selection, SortKey, Start, View, apply,
     };
     use gpui_kit::Modifiers;
     use sysmon_model::SeriesTarget;
@@ -4621,7 +4630,7 @@ mod tests {
                     },
                 );
                 app.ensure_selection();
-                app.show_logs = true;
+                app.panel = Panel::Logs;
                 cx.notify();
             });
         };
@@ -5196,7 +5205,7 @@ mod tests {
 
         // Nothing is picked, so the Graph tab can't be chosen.
         step(cx, &|w, cx| w.click("tab-graph", cx));
-        assert!(app.read_with(cx, |a, _| a.show_logs));
+        assert!(app.read_with(cx, |a, _| a.panel == Panel::Logs));
 
         // Scrolling up stops following; Jump to latest resumes.
         step(cx, &|w, cx| {
@@ -5224,7 +5233,7 @@ mod tests {
             assert!(!a.log_follow);
         });
         step(cx, &|w, cx| w.press("l", cx));
-        assert!(!app.read_with(cx, |a, _| a.show_logs));
+        assert!(!app.read_with(cx, |a, _| a.panel == Panel::Logs));
     }
 
     #[gpui_kit::test]
@@ -5342,7 +5351,7 @@ mod tests {
             driver.controls.try_recv().ok(),
             Some(Control::Seek(t + 6 * s))
         );
-        app.read_with(cx, |a, _| assert!(a.show_logs));
+        app.read_with(cx, |a, _| assert!(a.panel == Panel::Logs));
 
         // Clicking the warning seeks to when it was received.
         cx.update_window(window, |_, w, cx| {
@@ -5461,7 +5470,7 @@ mod tests {
             apply(&mut app.live_hosts, logs(3, vec![], 2 * s));
             apply(&mut app.live_hosts, logs(3, vec![], 5 * s));
             app.ensure_selection();
-            app.show_logs = true;
+            app.panel = Panel::Logs;
             cx.notify();
         });
     }
