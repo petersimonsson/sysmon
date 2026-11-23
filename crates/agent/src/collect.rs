@@ -346,16 +346,10 @@ pub fn proc_meta(key: ProcKey) -> Option<ProcMeta> {
     let dir = format!("/proc/{}", key.pid);
     let uid = fs::metadata(&dir).ok()?.uid();
     let raw = fs::read(format!("{dir}/cmdline")).unwrap_or_default();
-    let mut cmdline: String = String::from_utf8_lossy(&raw)
+    let cmdline = String::from_utf8_lossy(&raw)
         .trim_end_matches('\0')
         .replace('\0', " ");
-    if cmdline.len() > MAX_CMDLINE {
-        let mut end = MAX_CMDLINE;
-        while !cmdline.is_char_boundary(end) {
-            end -= 1;
-        }
-        cmdline.truncate(end);
-    }
+    let cmdline = cap(&cmdline, MAX_CMDLINE);
     Some(ProcMeta { key, uid, cmdline })
 }
 
