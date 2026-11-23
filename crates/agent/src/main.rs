@@ -148,6 +148,7 @@ fn main() -> anyhow::Result<()> {
 
     let interval = Duration::from_millis(interval_ms as u64);
     let host_info_every = args.host_info_every.max(1);
+    let meta_refresh_every = args.meta_refresh_every.max(1);
     let mut known: HashMap<ProcKey, u32> = HashMap::new();
     let mut users = users::UserNames::spawn().context("starting the user lookup thread")?;
     let mut sent_users: HashMap<u32, String> = HashMap::new();
@@ -168,7 +169,7 @@ fn main() -> anyhow::Result<()> {
         collector.procs(&mut procs, args.threads.then_some(&mut threads));
 
         // Metadata for new processes, or for all of them on a refresh tick.
-        let refresh = seq.is_multiple_of(args.meta_refresh_every.max(1));
+        let refresh = seq.is_multiple_of(meta_refresh_every);
         let current: HashSet<ProcKey> = procs.iter().map(|p| p.key()).collect();
         known.retain(|k, _| current.contains(k));
         let meta: Vec<_> = current
