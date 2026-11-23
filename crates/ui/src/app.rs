@@ -781,9 +781,14 @@ impl AppState {
             };
             let silence = self.silence(host);
             let stale = silence.is_some();
+            // Only what's worth knowing: "0.0% incomplete" on every healthy
+            // host was noise, and "incomplete" alone didn't say of what.
             let detail = match silence {
-                Some(ns) if self.view == View::Live => format!("silent {}", format::duration(ns)),
-                _ => format!("{loss:.1}% incomplete"),
+                Some(ns) if self.view == View::Live => {
+                    Some(format!("silent {}", format::duration(ns)))
+                }
+                _ if loss >= 0.05 => Some(format!("{loss:.1}% of samples incomplete")),
+                _ => None,
             };
             list = list.child(
                 div()
@@ -813,12 +818,15 @@ impl AppState {
                                 format!("{} · host id {:016x}", host.name(), id),
                             )),
                     )
-                    .child(
+                    .children(detail.map(|detail| {
                         div()
+                            .id(("host-detail", id as usize))
+                            .test_support()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(detail),
-                    ),
+                            .aria_description(detail.clone())
+                            .child(detail)
+                    })),
             );
         }
         list
@@ -4472,6 +4480,32 @@ mod tests {
         let (handle, _driver) = ReplayHandle::manual(ReplayStatus::default());
         app.update(cx, |app, cx| app.start_session(handle, "rec".into(), cx));
         assert_eq!(label(cx), None, "not beside a recording");
+    }
+
+    #[gpui_kit::test]
+    fn the_sidebar_mentions_incomplete_samples_only_when_there_are_some(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        // Heard from just now, so not silent.
+        app.update(cx, |app, _| {
+            app.live_hosts.get_mut(&1).unwrap().last_received_ns = sysmon_ingest::unix_now_ns();
+        });
+        let detail = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.try_find(("host-detail", 1usize))
+                    .and_then(|e| e.description().map(str::to_string))
+            })
+            .unwrap()
+        };
+        assert_eq!(detail(cx), None, "nothing to say about a healthy host");
+        app.update(cx, |app, cx| {
+            let host = app.live_hosts.get_mut(&1).unwrap();
+            host.frames_received = 4;
+            host.frames_incomplete = 1;
+            cx.notify();
+        });
+        assert_eq!(detail(cx).as_deref(), Some("25.0% of samples incomplete"));
     }
 
     #[gpui_kit::test]
