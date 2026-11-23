@@ -1521,14 +1521,15 @@ impl AppState {
                     )
                     .child(
                         Button::new("kernel-toggle")
-                            .label("Hide kernel threads")
+                            .label("Kernel threads")
                             .small()
-                            .chosen(self.hide_kernel)
+                            // Like its neighbours: highlighted means shown.
+                            .chosen(!self.hide_kernel)
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_kernel_threads(cx))),
                     )
                     .child(
                         Button::new("threads-toggle")
-                            .label("Show threads")
+                            .label("Threads")
                             .small()
                             .chosen(self.show_threads)
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_threads(cx))),

@@ -149,7 +149,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ["ctrl-k"],
         ToggleKernelThreads,
         false,
-        "Hide / show kernel threads"
+        "Show / hide kernel threads"
     ),
     shortcut!(
         "Processes",
@@ -275,8 +275,8 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Filter…", FocusFilter),
             MenuItem::separator(),
             MenuItem::action("Tree View", ToggleTree),
-            MenuItem::action("Hide Kernel Threads", ToggleKernelThreads),
-            MenuItem::action("Show Threads", ToggleThreads),
+            MenuItem::action("Kernel Threads", ToggleKernelThreads),
+            MenuItem::action("Threads", ToggleThreads),
             MenuItem::action("Expand All", ExpandAll),
             MenuItem::action("Collapse All", CollapseAll),
             MenuItem::separator(),
