@@ -1277,8 +1277,10 @@ impl AppState {
                 parts.push("threads not reported: start this host's agent with --threads".into());
             }
         }
-        if let Some(sel) = self.selection().filter(|s| !s.is_empty()) {
-            parts.push(format!("{} graphed", sel.len()));
+        match self.selection().filter(|s| !s.is_empty()) {
+            Some(sel) => parts.push(format!("{} graphed", sel.len())),
+            // The checkboxes have no header: say what they're for.
+            None => parts.push("tick a row's box (or press G) to graph it".into()),
         }
         parts.join(" · ")
     }
@@ -1382,6 +1384,11 @@ impl AppState {
                         || p.stale
                         || line.tree.as_ref().is_some_and(|t| !t.matched);
                     let slot = picked.get(&line.key()).copied();
+                    let pick_tip = match slot {
+                        Some(_) => "Remove from the graph (G)",
+                        None if line.thread.is_some() => "Graph this thread (G)",
+                        None => "Graph this process (G)",
+                    };
                     // Process-only figures: a thread's memory and thread
                     // count are its process's, shown on that row.
                     let proc_cell = |w: f32, text: &dyn Fn() -> String| {
@@ -1439,6 +1446,8 @@ impl AppState {
                                     }
                                     None => d.border_color(theme.muted_foreground),
                                 })
+                                .aria_description(pick_tip)
+                                .tooltip(move |window, cx| Tooltip::new(pick_tip).build(window, cx))
                                 .on_click(on_pick),
                         )
                         .child(div().w(px(PID_COL)).child(line.key().pid.to_string()))
@@ -4403,6 +4412,31 @@ mod tests {
             let host = &app.live_hosts[&1];
             assert_eq!(app.graph_span(host), (3 * s, 5 * s));
         });
+    }
+
+    #[gpui_kit::test]
+    fn the_graph_checkboxes_explain_themselves(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        app.read_with(cx, |app, cx| {
+            let host = &app.hosts()[&1];
+            let s = app.status_line(host, &app.table_lines(host, cx), cx);
+            assert!(s.contains("to graph it"), "{s}");
+        });
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let pick = w.find(("pick", 0usize));
+            assert_eq!(pick.description(), Some("Graph this process (G)"));
+            w.click(("pick", 0usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let pick = w.find(("pick", 0usize));
+            assert_eq!(pick.description(), Some("Remove from the graph (G)"));
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
