@@ -1131,13 +1131,31 @@ impl AppState {
         let matches = |p: &ProcRow| proc_matches(p) || has_matching_thread.contains(&p.key.pid);
         // The threads to show under a process: all of them unless filtering,
         // in which case those that match, or all if the process itself does.
+        // Threads always listed, busy or not: graphed or under the cursor.
+        let keep: HashSet<ProcKey> = self
+            .selection()
+            .into_iter()
+            .flat_map(|s| s.iter().map(|p| p.target.key()))
+            .chain(self.cursor)
+            .collect();
+        // The threads to show under a process. Unfiltered, only busy ones:
+        // listing every idle thread buried the processes (a desktop has
+        // over a thousand). Filtering by a process lists all of its threads,
+        // and by a thread's name, those that match.
         let shown_threads = |p: &ProcRow| -> Vec<ThreadRow> {
-            let own = proc_matches(p);
+            let all = filtering && proc_matches(p);
             threads_of
                 .get(&p.key.pid)
                 .map(|ts| {
                     ts.iter()
-                        .filter(|t| own || thread_matches(t))
+                        .filter(|t| {
+                            all || keep.contains(&t.key)
+                                || if filtering {
+                                    thread_matches(t)
+                                } else {
+                                    t.cpu_pct > 0.0
+                                }
+                        })
                         .cloned()
                         .collect()
                 })
@@ -1231,9 +1249,10 @@ impl AppState {
         out
     }
 
-    /// e.g. "113 shown · 359 kernel threads hidden · 1218 threads · 2 graphed".
-    fn status_line(&self, host: &HostModel, shown: usize) -> String {
-        let mut parts = vec![format!("{shown} shown")];
+    /// e.g. "113 shown · 359 kernel threads hidden · 12 of 1218 threads
+    /// (idle ones hidden) · 2 graphed", for the table's `lines`.
+    fn status_line(&self, host: &HostModel, lines: &[Line], cx: &App) -> String {
+        let mut parts = vec![format!("{} shown", lines.len())];
         let kernel = host
             .snapshot
             .procs
@@ -1245,7 +1264,14 @@ impl AppState {
         }
         if self.show_threads {
             if host.sends_threads() {
-                parts.push(format!("{} threads", host.snapshot.threads.len()));
+                let listed = lines.iter().filter(|l| l.thread.is_some()).count();
+                let total = host.snapshot.threads.len();
+                let filtering = !self.filter.read(cx).value().is_empty();
+                parts.push(if filtering || listed == total {
+                    format!("{listed} of {total} threads")
+                } else {
+                    format!("{listed} of {total} threads (idle ones hidden; filter to list them)")
+                });
             } else {
                 parts.push("threads not reported: start this host's agent with --threads".into());
             }
@@ -1265,6 +1291,7 @@ impl AppState {
         let theme = cx.theme().clone();
         let mono = theme.mono_font_family.clone();
         let rows = Rc::new(self.table_lines(host, cx));
+        let status = self.status_line(host, &rows, cx);
         let this = cx.entity().downgrade();
         // As wide as the longest name shown (all rows, so it doesn't change
         // while scrolling), within USER_MIN_CHARS..=USER_MAX_CHARS.
@@ -1508,7 +1535,7 @@ impl AppState {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(self.status_line(host, count)),
+                            .child(status),
                     ),
             )
             .child(header)
@@ -3689,8 +3716,9 @@ mod tests {
             cx.run_until_parked();
         };
         assert_eq!(pids(&table(&app, cx)), [1, 10, 11, 20]);
-        app.read_with(cx, |app, _| {
-            let s = app.status_line(&app.hosts()[&1], 4);
+        app.read_with(cx, |app, cx| {
+            let host = &app.hosts()[&1];
+            let s = app.status_line(host, &app.table_lines(host, cx), cx);
             assert!(s.contains("2 kernel threads hidden"), "{s}");
         });
 
@@ -3719,20 +3747,44 @@ mod tests {
         // Off by default; with an agent that doesn't send threads, say so.
         assert!(table(&app, cx).iter().all(|(_, th, _)| !th));
         step(cx, &|window, cx| window.press("ctrl-h", cx));
-        app.read_with(cx, |app, _| {
-            let s = app.status_line(&app.hosts()[&1], 4);
+        app.read_with(cx, |app, cx| {
+            let host = &app.hosts()[&1];
+            let s = app.status_line(host, &app.table_lines(host, cx), cx);
             assert!(s.contains("start this host's agent with --threads"), "{s}");
         });
 
         send_threads(&app, cx);
+        // One sample: no thread has used any CPU yet, so none is listed,
+        // and the status says why.
+        assert!(table(&app, cx).iter().all(|(_, th, _)| !th));
+        app.read_with(cx, |app, cx| {
+            let host = &app.hosts()[&1];
+            let s = app.status_line(host, &app.table_lines(host, cx), cx);
+            assert!(s.contains("0 of 2 threads (idle ones hidden"), "{s}");
+        });
+        // Filtering by the process lists all of its threads, idle or not.
+        step(cx, &|window, cx| {
+            window.press("ctrl-f", cx);
+            window.input("bash", cx);
+        });
+        assert_eq!(pids(&table(&app, cx)), [10, 101, 102]);
+        step(cx, &|window, cx| window.press("escape", cx));
+        step(cx, &|window, cx| window.press("escape", cx));
+
+        // Once they've run, they're listed (by PID here: with CPU figures
+        // now, the default %CPU order would shuffle them).
+        add_frame(&app, cx, 1);
+        step(cx, &|window, cx| window.press("shift-n", cx));
         let t = table(&app, cx);
         assert_eq!(pids(&t), [1, 10, 101, 102, 11, 20]);
         assert_eq!(
             t.iter().map(|(_, th, _)| *th).collect::<Vec<_>>(),
             [false, false, true, true, false, false]
         );
-        app.read_with(cx, |app, _| {
-            assert!(app.status_line(&app.hosts()[&1], 6).contains("2 threads"));
+        app.read_with(cx, |app, cx| {
+            let host = &app.hosts()[&1];
+            let s = app.status_line(host, &app.table_lines(host, cx), cx);
+            assert!(s.contains("2 of 2 threads"), "{s}");
         });
 
         // In the tree, threads are the first children of their process.
@@ -4182,23 +4234,26 @@ mod tests {
                 shared_pages: None,
                 kernel_thread: Some(false),
             };
-            let threads = [10u32, 11, 12]
-                .map(|tid| sysmon_proto::ThreadSample {
-                    tgid: 10,
-                    tid,
-                    starttime: 0,
-                    state: b'S',
-                    utime: 0,
-                    stime: 0,
-                    comm: format!("t{tid}"),
-                })
-                .to_vec();
-            let frame = sysmon_proto::Frame {
-                procs: vec![proc],
-                threads,
-                ..test_frame(1, 0, sampled_at(1_000_000_000))
-            };
-            apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+            // Two samples, so the threads have run (idle ones aren't listed).
+            for seq in 0..2u32 {
+                let threads = [10u32, 11, 12]
+                    .map(|tid| sysmon_proto::ThreadSample {
+                        tgid: 10,
+                        tid,
+                        starttime: 0,
+                        state: b'S',
+                        utime: seq as u64 * 10,
+                        stime: 0,
+                        comm: format!("t{tid}"),
+                    })
+                    .to_vec();
+                let frame = sysmon_proto::Frame {
+                    procs: vec![proc.clone()],
+                    threads,
+                    ..test_frame(1, seq, sampled_at(1_000_000_000 * (1 + seq as u64)))
+                };
+                apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+            }
             app.ensure_selection();
             app.show_threads = true;
             app.sort = (SortKey::Pid, true);
