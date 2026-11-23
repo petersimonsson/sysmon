@@ -463,7 +463,6 @@ impl AppState {
             for (i, &(r, e)) in lines.iter().take(DETAILS_LIST_MAX).enumerate() {
                 // Click a line to find it in the Logs tab.
                 let key = (r.received_ns, r.ts_unix_ns);
-                let (label, color) = priority_style(e.priority, theme);
                 let first = e.message.lines().next().unwrap_or("");
                 col = col.child(
                     div()
@@ -477,13 +476,7 @@ impl AppState {
                         .font_family(mono.clone())
                         .aria_description(e.message.clone())
                         .child(div().flex_none().child(format::day_time(e.ts_unix_ns)))
-                        .child(
-                            div()
-                                .flex_none()
-                                .w(px(LOG_PRI_COL))
-                                .text_color(color)
-                                .child(label),
-                        )
+                        .child(priority_cell(e.priority, theme))
                         .child(div().flex_1().min_w_0().truncate().child(first.to_string())),
                 );
             }

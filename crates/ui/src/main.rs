@@ -6,6 +6,7 @@ mod actions;
 mod app;
 mod format;
 mod graph;
+mod icons;
 mod notices;
 mod pipeline;
 mod selection;
@@ -115,24 +116,26 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    gpui_kit::application().run(move |cx| {
-        gpui_kit::init(cx);
-        actions::init(cx);
-        // Ctrl+Q, File → Quit and closing the window all end up here.
-        if let Some(r) = stopper.clone() {
-            cx.on_app_quit(move |_| {
-                r.stop(STOP_TIMEOUT);
-                async {}
+    gpui_kit::application()
+        .with_assets(icons::AppAssets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            actions::init(cx);
+            // Ctrl+Q, File → Quit and closing the window all end up here.
+            if let Some(r) = stopper.clone() {
+                cx.on_app_quit(move |_| {
+                    r.stop(STOP_TIMEOUT);
+                    async {}
+                })
+                .detach();
+            }
+            let options = window_options(Bounds::centered(None, size(px(1200.), px(800.)), cx));
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| app::AppState::new(start, window, cx))
             })
-            .detach();
-        }
-        let options = window_options(Bounds::centered(None, size(px(1200.), px(800.)), cx));
-        gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| app::AppState::new(start, window, cx))
-        })
-        .expect("failed to open window");
-        cx.activate(true);
-    });
+            .expect("failed to open window");
+            cx.activate(true);
+        });
     Ok(())
 }
 
