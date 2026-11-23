@@ -2,6 +2,7 @@
 //! the toolbar, host list, header, process table and replay timeline.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -2897,7 +2898,18 @@ fn command_cell(
         ),
         None => (command(&line.row), command(&line.row)),
     };
-    let text = clipped(("cmd", i), label, tip);
+    // The program's name in full colour, its directory and arguments
+    // muted: rows of long paths and flags read alike otherwise.
+    let text = if line.thread.is_none() {
+        let (dir, _, args) = command_parts(&label);
+        let muted = HighlightStyle {
+            color: Some(theme.muted_foreground),
+            ..Default::default()
+        };
+        clipped_styled(("cmd", i), label, [(dir, muted), (args, muted)], tip).into_any_element()
+    } else {
+        clipped(("cmd", i), label, tip).into_any_element()
+    };
     let Some(t) = &line.tree else {
         return cell.child(text);
     };
@@ -2948,6 +2960,41 @@ fn command_cell(
                 )),
         )
     })
+}
+
+/// A command line's directory, program name and arguments, as byte ranges:
+/// `/usr/bin/sshd -D` → `/usr/bin/`, `sshd`, ` -D`. A `[name]` without a
+/// command line (a kernel thread's) is all name, slashes and all.
+fn command_parts(cmd: &str) -> (Range<usize>, Range<usize>, Range<usize>) {
+    if cmd.starts_with('[') {
+        return (0..0, 0..cmd.len(), cmd.len()..cmd.len());
+    }
+    let program_end = cmd.find(' ').unwrap_or(cmd.len());
+    let name_start = cmd[..program_end].rfind('/').map_or(0, |i| i + 1);
+    (
+        0..name_start,
+        name_start..program_end,
+        program_end..cmd.len(),
+    )
+}
+
+/// [`clipped`] with parts of the text styled.
+fn clipped_styled(
+    id: impl Into<ElementId>,
+    text: String,
+    styles: impl IntoIterator<Item = (Range<usize>, HighlightStyle)>,
+    tip: String,
+) -> impl IntoElement {
+    let styles: Vec<_> = styles.into_iter().filter(|(r, _)| !r.is_empty()).collect();
+    div()
+        .id(id)
+        .test_support()
+        .flex_1()
+        .min_w_0()
+        .truncate()
+        .child(StyledText::new(text).with_highlights(styles))
+        .aria_description(tip.clone())
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
 }
 
 /// Text that ends with "…" when it doesn't fit, with the full text (or
@@ -4281,6 +4328,34 @@ mod tests {
 
     /// Stripes and the cursor highlight span the table, however short the
     /// row's command (they stopped where the text did, leaving boxes).
+    #[test]
+    fn commands_split_into_directory_name_and_arguments() {
+        let parts = |c: &str| {
+            let (d, n, a) = super::command_parts(c);
+            (c[d].to_string(), c[n].to_string(), c[a].to_string())
+        };
+        assert_eq!(
+            parts("/opt/zen/zen-bin -contentproc 7"),
+            (
+                "/opt/zen/".into(),
+                "zen-bin".into(),
+                " -contentproc 7".into()
+            )
+        );
+        assert_eq!(
+            parts("Hyprland --watchdog-fd 5"),
+            ("".into(), "Hyprland".into(), " --watchdog-fd 5".into())
+        );
+        assert_eq!(
+            parts("/sbin/init"),
+            ("/sbin/".into(), "init".into(), "".into())
+        );
+        assert_eq!(
+            parts("[kworker/0:1]"),
+            ("".into(), "[kworker/0:1]".into(), "".into())
+        );
+    }
+
     #[gpui_kit::test]
     fn the_graph_spans_the_history_it_has(cx: &mut TestAppContext) {
         let (_window, app) = open(cx);
