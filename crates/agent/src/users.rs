@@ -20,7 +20,7 @@ pub struct UserNames {
 }
 
 impl UserNames {
-    pub fn spawn() -> Self {
+    pub fn spawn() -> std::io::Result<Self> {
         let names = Arc::new(Mutex::new(HashMap::new()));
         let (lookups, rx) = mpsc::channel::<u32>();
         let shared = names.clone();
@@ -37,13 +37,12 @@ impl UserNames {
                         }
                     }
                 }
-            })
-            .expect("starting the user lookup thread");
-        Self {
+            })?;
+        Ok(Self {
             names,
             requested: HashSet::new(),
             lookups,
-        }
+        })
     }
 
     /// The name for `uid` if known. The first call for a uid starts a lookup.
@@ -107,7 +106,7 @@ mod tests {
 
     #[test]
     fn names_arrive_from_the_background_thread() {
-        let mut users = UserNames::spawn();
+        let mut users = UserNames::spawn().unwrap();
         assert_eq!(users.get(0), None, "not resolved on the first call");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while users.get(0).is_none() {

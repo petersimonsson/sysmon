@@ -149,7 +149,7 @@ fn main() -> anyhow::Result<()> {
     let interval = Duration::from_millis(interval_ms as u64);
     let host_info_every = args.host_info_every.max(1);
     let mut known: HashMap<ProcKey, u32> = HashMap::new();
-    let mut users = users::UserNames::spawn();
+    let mut users = users::UserNames::spawn().context("starting the user lookup thread")?;
     let mut sent_users: HashMap<u32, String> = HashMap::new();
     let mut collector = collect::Collector::new();
     let mut procs = Vec::new();
