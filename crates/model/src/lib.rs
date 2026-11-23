@@ -2,6 +2,7 @@
 //! whether frames come from the network or from a recording.
 
 mod clock;
+pub mod details;
 mod host;
 pub mod logs;
 pub mod replay;
@@ -10,6 +11,7 @@ mod source;
 pub mod tree;
 
 pub use clock::PlaybackClock;
+pub use details::ProcDetails;
 pub use host::{
     DiskRate, HISTORY_LEN, HISTORY_WINDOW_S, HistoryPoint, HostModel, NetRate, ProcRow, Snapshot,
     ThreadRow,
