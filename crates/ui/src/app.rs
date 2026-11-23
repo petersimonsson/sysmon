@@ -2738,36 +2738,55 @@ impl AppState {
     }
 
     /// Red ticks under the timeline where the selected host logged errors.
-    fn render_log_marks(&self, st: &ReplayStatus, cx: &App) -> impl IntoElement + use<> {
+    /// Each says when, and a click goes there with the logs open.
+    fn render_log_marks(
+        &self,
+        st: &ReplayStatus,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         // One tick per this fraction of the timeline at most.
         const BUCKETS: f64 = 500.;
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let span = st.end_ns.saturating_sub(st.start_ns).max(1) as f64;
-        let mut buckets: Vec<u64> = self
+        // Each tick's position and its first error's time (marks are sorted).
+        let mut ticks: Vec<(u64, u64)> = self
             .replay
             .iter()
             .flat_map(|s| &s.log_marks)
             .filter(|m| Some(m.host_id) == self.selected)
-            .map(|m| ((m.received_ns.saturating_sub(st.start_ns)) as f64 / span * BUCKETS) as u64)
+            .map(|m| {
+                let bucket = (m.received_ns.saturating_sub(st.start_ns)) as f64 / span * BUCKETS;
+                (bucket as u64, m.received_ns)
+            })
             .collect();
-        buckets.dedup();
+        ticks.dedup_by_key(|(bucket, _)| *bucket);
         let mut strip = div()
             .id("log-marks")
             .test_support()
             .relative()
-            .h(px(4.))
+            .h(px(8.))
             .mx(px(8.));
-        for (k, b) in buckets.into_iter().enumerate() {
+        for (k, (bucket, at)) in ticks.into_iter().enumerate() {
+            let tip = format!("Error logged at {}: click to go there", format::time(at));
             strip = strip.child(
                 div()
                     .id(("log-mark", k))
                     .test_support()
                     .absolute()
                     .top_0()
-                    .left(relative((b as f64 / BUCKETS).min(1.0) as f32))
-                    .w(px(2.))
+                    .left(relative((bucket as f64 / BUCKETS).min(1.0) as f32))
+                    .w(px(4.))
                     .h_full()
-                    .bg(theme.danger),
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .bg(theme.danger)
+                    .aria_description(tip.clone())
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.control(Control::Seek(at));
+                        this.show_logs = true;
+                        cx.notify();
+                    })),
             );
         }
         strip
@@ -2778,7 +2797,7 @@ impl AppState {
             return None;
         }
         let st = self.status()?;
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let mono = theme.mono_font_family.clone();
         let mut speeds = div().flex().gap_1();
         for (i, &speed) in SPEEDS.iter().enumerate() {
@@ -4982,10 +5001,16 @@ mod tests {
                 "error marked on the timeline"
             );
             assert!(w.try_find(("log-mark", 1usize)).is_none());
-            w.press("l", cx);
+            // Clicking the mark goes to the error, with the logs open.
+            w.click(("log-mark", 0usize), cx);
         })
         .unwrap();
         cx.run_until_parked();
+        assert_eq!(
+            driver.controls.try_recv().ok(),
+            Some(Control::Seek(t + 6 * s))
+        );
+        app.read_with(cx, |a, _| assert!(a.show_logs));
 
         // Clicking the warning seeks to when it was received.
         cx.update_window(window, |_, w, cx| {
