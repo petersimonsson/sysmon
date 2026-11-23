@@ -2344,19 +2344,25 @@ impl AppState {
         cx.notify();
     }
 
-    fn seek_by(&self, delta_s: i64) {
+    /// Seek the recording on screen to `at(status)`, kept within it.
+    fn seek_to(&self, at: impl FnOnce(&ReplayStatus) -> u64) {
         if self.view != View::Replay {
             return;
         }
         if let Some(st) = self.status() {
-            let delta = delta_s.unsigned_abs() * 1_000_000_000;
-            let ts = if delta_s < 0 {
+            self.control(Control::Seek(at(&st).clamp(st.start_ns, st.end_ns)));
+        }
+    }
+
+    fn seek_by(&self, delta_s: i64) {
+        let delta = delta_s.unsigned_abs() * 1_000_000_000;
+        self.seek_to(|st| {
+            if delta_s < 0 {
                 st.position_ns.saturating_sub(delta)
             } else {
                 st.position_ns.saturating_add(delta)
-            };
-            self.control(Control::Seek(ts.clamp(st.start_ns, st.end_ns)));
-        }
+            }
+        });
     }
 
     fn change_speed(&self, faster: bool) {
@@ -2471,16 +2477,8 @@ impl AppState {
             .on_action(cx.listener(|this, _: &SeekForwardLong, _, _| {
                 this.seek_by(actions::SEEK_LONG_S as i64)
             }))
-            .on_action(cx.listener(|this, _: &SeekStart, _, _| {
-                if let Some(st) = this.status().filter(|_| this.view == View::Replay) {
-                    this.control(Control::Seek(st.start_ns));
-                }
-            }))
-            .on_action(cx.listener(|this, _: &SeekEnd, _, _| {
-                if let Some(st) = this.status().filter(|_| this.view == View::Replay) {
-                    this.control(Control::Seek(st.end_ns));
-                }
-            }))
+            .on_action(cx.listener(|this, _: &SeekStart, _, _| this.seek_to(|st| st.start_ns)))
+            .on_action(cx.listener(|this, _: &SeekEnd, _, _| this.seek_to(|st| st.end_ns)))
     }
 
     /// Overlay listing every shortcut, grouped as in [`actions::SHORTCUTS`].
