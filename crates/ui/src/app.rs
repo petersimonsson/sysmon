@@ -717,6 +717,7 @@ impl AppState {
         if self.live_enabled {
             bar = bar.child(
                 Button::new("view-live")
+                    .icon(icon(IconName::RadioTower))
                     .label("Live")
                     .small()
                     .when(self.view == View::Live, |b| b.primary())
@@ -727,6 +728,7 @@ impl AppState {
             bar = bar
                 .child(
                     Button::new("view-replay")
+                        .icon(icon(IconName::FileClock))
                         .label("Recording")
                         .small()
                         .when(self.view == View::Replay, |b| b.primary())
@@ -769,6 +771,7 @@ impl AppState {
             })
             .child(
                 Button::new("open")
+                    .icon(icon(IconName::FolderOpen))
                     .label("Open recording…")
                     .small()
                     .ghost()
@@ -920,7 +923,11 @@ impl AppState {
                 .bg(theme.warning.opacity(0.15))
                 .border_b_1()
                 .border_color(theme.warning)
+                .flex()
+                .items_center()
+                .gap_2()
                 .aria_description(text.clone())
+                .child(icon(IconName::Link2Off).text_color(theme.warning))
                 .child(text),
         )
     }
@@ -1602,12 +1609,16 @@ impl AppState {
                     .gap_2()
                     .p_2()
                     .child(
-                        div()
-                            .w(px(260.))
-                            .child(Input::new(&self.filter).small().cleanable(true)),
+                        div().w(px(260.)).child(
+                            Input::new(&self.filter)
+                                .small()
+                                .prefix(icon(IconName::Search))
+                                .cleanable(true),
+                        ),
                     )
                     .child(
                         Button::new("tree")
+                            .icon(icon(IconName::ListTree))
                             .label("Tree")
                             .small()
                             .chosen(self.tree)
@@ -1615,6 +1626,7 @@ impl AppState {
                     )
                     .child(
                         Button::new("kernel-toggle")
+                            .icon(icon(IconName::Cpu))
                             .label("Kernel threads")
                             .small()
                             // Like its neighbours: highlighted means shown.
@@ -1623,6 +1635,7 @@ impl AppState {
                     )
                     .child(
                         Button::new("threads-toggle")
+                            .icon(icon(IconName::CornerDownRight))
                             .label("Threads")
                             .small()
                             .chosen(self.show_threads)
@@ -1631,14 +1644,18 @@ impl AppState {
                     .when(self.tree, |d| {
                         d.child(
                             Button::new("expand-all")
-                                .label("Expand all")
+                                .icon(icon(IconName::ChevronsUpDown))
+                                .tooltip("Expand all (E)")
+                                .accessibility_label("Expand all")
                                 .small()
                                 .ghost()
                                 .on_click(cx.listener(|this, _, _, cx| this.expand_all(cx))),
                         )
                         .child(
                             Button::new("collapse-all")
-                                .label("Collapse all")
+                                .icon(icon(IconName::ChevronsDownUp))
+                                .tooltip("Collapse all (C)")
+                                .accessibility_label("Collapse all")
                                 .small()
                                 .ghost()
                                 .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
@@ -1930,6 +1947,7 @@ impl AppState {
             .child(div().flex_1())
             .child(
                 Button::new("graph-clear")
+                    .icon(icon(IconName::Eraser))
                     .label("Clear")
                     .small()
                     .ghost()
@@ -1937,7 +1955,9 @@ impl AppState {
             )
             .child(
                 Button::new("graph-hide")
-                    .label("Hide")
+                    .icon(icon(IconName::PanelBottomClose))
+                    .tooltip("Hide the panel")
+                    .accessibility_label("Hide the panel")
                     .small()
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2287,9 +2307,12 @@ impl AppState {
             .py_1()
             .child(self.render_panel_tabs(cx))
             .child(
-                div()
-                    .w(px(200.))
-                    .child(Input::new(&self.log_filter).small().cleanable(true)),
+                div().w(px(200.)).child(
+                    Input::new(&self.log_filter)
+                        .small()
+                        .prefix(icon(IconName::Search))
+                        .cleanable(true),
+                ),
             )
             .children(
                 [(7u8, "All"), (4, "Warnings"), (3, "Errors")].map(|(p, label)| {
@@ -2330,6 +2353,7 @@ impl AppState {
             .when(!self.log_follow, |d| {
                 d.child(
                     Button::new("logs-latest")
+                        .icon(icon(IconName::ArrowDownToLine))
                         .label("Jump to latest")
                         .small()
                         .ghost()
@@ -2341,7 +2365,9 @@ impl AppState {
             })
             .child(
                 Button::new("logs-hide")
-                    .label("Hide")
+                    .icon(icon(IconName::PanelBottomClose))
+                    .tooltip("Hide the panel")
+                    .accessibility_label("Hide the panel")
                     .small()
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2989,6 +3015,7 @@ impl AppState {
                     Button::new("play")
                         .icon(icon(play_icon))
                         .tooltip(format!("{play_label} (Space)"))
+                        .accessibility_label(play_label)
                         .small()
                         .primary()
                         .on_click(cx.listener(|this, _, _, _| this.control(Control::TogglePause))),
@@ -3141,9 +3168,16 @@ fn command_cell(
             .test_support()
             .flex_none()
             .w(px(14.))
+            .flex()
+            .items_center()
             .cursor_pointer()
             .text_color(theme.foreground)
-            .child(if t.collapsed { "▸" } else { "▾" })
+            .aria_description(if t.collapsed { "expand" } else { "collapse" })
+            .child(icon(if t.collapsed {
+                IconName::ChevronRight
+            } else {
+                IconName::ChevronDown
+            }))
             .on_click(move |_, _, cx| {
                 let _ = this.update(cx, |this, cx| {
                     this.toggle_collapsed(key);
@@ -5815,6 +5849,27 @@ mod tests {
             assert!(a.log_cursor.is_some());
             assert!(!a.log_follow);
         });
+    }
+
+    /// Buttons drawn as an icon alone still have a name to be found by.
+    #[gpui_kit::test]
+    fn icon_only_buttons_are_named(cx: &mut TestAppContext) {
+        use gpui_kit::test::TestQueryExt as _;
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        cx.update_window(window, |_, w, cx| {
+            w.press("t", cx);
+            w.press("d", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            for name in ["Expand all", "Collapse all", "Hide the panel"] {
+                assert!(w.try_find_by_label(name).is_some(), "{name}");
+            }
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]

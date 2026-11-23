@@ -138,6 +138,10 @@ impl AppState {
                         .test_support()
                         .text_xs()
                         .text_color(theme.danger)
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(icon(IconName::CircleX).text_color(theme.danger))
                         .child("exited"),
                 )
             })
@@ -148,17 +152,25 @@ impl AppState {
                     .selection()
                     .is_some_and(|sel| sel.iter().any(|p| p.target == target));
                 d.child(
+                    // Highlighted while graphed, like the toolbar's toggles.
                     Button::new("details-graph")
-                        .label(if picked { "Ungraph" } else { "Graph" })
+                        .icon(icon(IconName::ChartLine))
+                        .label("Graph")
                         .small()
-                        .ghost()
-                        .tooltip("Add the process to the graph, or take it out")
+                        .chosen(picked)
+                        .tooltip(if picked {
+                            "Take the process out of the graph"
+                        } else {
+                            "Add the process to the graph"
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| this.toggle_pick(target, cx))),
                 )
             })
             .child(
                 Button::new("details-hide")
-                    .label("Hide")
+                    .icon(icon(IconName::PanelBottomClose))
+                    .tooltip("Hide the panel")
+                    .accessibility_label("Hide the panel")
                     .small()
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| {
