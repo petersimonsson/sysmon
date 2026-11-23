@@ -399,11 +399,21 @@ impl AppState {
     ) -> impl IntoElement + use<> {
         let hover = theme.muted;
         let mono = theme.mono_font_family.clone();
-        let heading = |text: String| div().mt_1().text_color(theme.muted_foreground).child(text);
+        // Every row is `flex_none`: the column scrolls, and a row that may
+        // shrink is squeezed to nothing when the panel is short (`truncate`
+        // clips it, which lets its height go down to zero).
+        let heading = |text: String| {
+            div()
+                .flex_none()
+                .mt_1()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
         let item = |id: (&'static str, usize), text: String| {
             div()
                 .id(id)
                 .test_support()
+                .flex_none()
                 .font_family(mono.clone())
                 .truncate()
                 .aria_description(text.clone())
@@ -412,6 +422,7 @@ impl AppState {
         let more = |n: usize| {
             (n > DETAILS_LIST_MAX).then(|| {
                 div()
+                    .flex_none()
                     .text_color(theme.muted_foreground)
                     .child(format!("and {} more", n - DETAILS_LIST_MAX))
             })
@@ -480,6 +491,7 @@ impl AppState {
                     div()
                         .id(("details-log", i))
                         .test_support()
+                        .flex_none()
                         .cursor_pointer()
                         .hover(move |st| st.bg(hover))
                         .on_click(cx.listener(move |this, _, _, cx| this.open_log_line(key, cx)))
