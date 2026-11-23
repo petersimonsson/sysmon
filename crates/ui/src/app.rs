@@ -1726,6 +1726,18 @@ impl AppState {
         known.extend(names);
     }
 
+    /// The times the graph spans: the chosen window up to the newest
+    /// sample, but no further back than the oldest one, so a short history
+    /// fills the chart instead of huddling at its right edge.
+    fn graph_span(&self, host: &HostModel) -> (u64, u64) {
+        let end = host.proc_history.back().map_or(0, |f| f.ts_unix_ns);
+        let oldest = host.proc_history.front().map_or(0, |f| f.ts_unix_ns);
+        let start = end
+            .saturating_sub(self.graph_window_s * 1_000_000_000)
+            .max(oldest);
+        (start, end)
+    }
+
     fn render_graph(&self, host: &HostModel, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let metric = self.graph_metric;
@@ -1733,8 +1745,7 @@ impl AppState {
             .selection()
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default();
-        let end = host.proc_history.back().map_or(0, |f| f.ts_unix_ns);
-        let start = end.saturating_sub(self.graph_window_s * 1_000_000_000);
+        let (start, end) = self.graph_span(host);
         let view = self.view;
         let mut cache = self.graph_lines.borrow_mut();
         let lines: Rc<Vec<graph::Line>> = Rc::new(
@@ -4270,6 +4281,24 @@ mod tests {
 
     /// Stripes and the cursor highlight span the table, however short the
     /// row's command (they stopped where the text did, leaving boxes).
+    #[gpui_kit::test]
+    fn the_graph_spans_the_history_it_has(cx: &mut TestAppContext) {
+        let (_window, app) = open(cx);
+        for seq in 0..5 {
+            add_frame(&app, cx, seq);
+        }
+        let s = 1_000_000_000;
+        app.update(cx, |app, _| {
+            // Samples at 1..=5 s: 4 s of history, within the 10 min window.
+            let host = &app.live_hosts[&1];
+            assert_eq!(app.graph_span(host), (s, 5 * s));
+            // A window shorter than the history cuts it.
+            app.graph_window_s = 2;
+            let host = &app.live_hosts[&1];
+            assert_eq!(app.graph_span(host), (3 * s, 5 * s));
+        });
+    }
+
     #[gpui_kit::test]
     fn rows_span_the_table(cx: &mut TestAppContext) {
         let (window, app) = open(cx);
