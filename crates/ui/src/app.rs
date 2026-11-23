@@ -200,6 +200,8 @@ pub struct AppState {
     /// In-window menu bar (not used on macOS, which has a native one).
     menu_bar: Option<Entity<AppMenuBar>>,
     show_shortcuts: bool,
+    /// Light or dark was picked from the menu: stop following the system.
+    theme_chosen: bool,
 }
 
 impl AppState {
@@ -278,7 +280,14 @@ impl AppState {
                 InputEvent::Focus => {}
             }
         };
+        // Light or dark as the system is, until one is picked from the menu.
+        gpui_kit::component::Theme::sync_system_appearance(Some(window), cx);
         let subscriptions = vec![
+            cx.observe_window_appearance(window, |this, window, cx| {
+                if !this.theme_chosen {
+                    gpui_kit::component::Theme::sync_system_appearance(Some(window), cx);
+                }
+            }),
             cx.subscribe_in(&filter, window, on_filter),
             cx.subscribe_in(&log_filter, window, on_filter),
             cx.subscribe_in(
@@ -303,6 +312,7 @@ impl AppState {
             focus,
             menu_bar,
             show_shortcuts: false,
+            theme_chosen: false,
             view: View::Live,
             live_enabled: start.live.is_some(),
             live_hosts: BTreeMap::new(),
@@ -2616,6 +2626,16 @@ impl AppState {
             .on_action(cx.listener(|this, _: &ToggleGraph, _, cx| this.toggle_cursor(cx)))
             .on_action(cx.listener(|this, _: &ClearGraph, _, cx| this.clear_graph(cx)))
             .on_action(cx.listener(|this, _: &About, window, cx| this.open_about(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleDarkTheme, window, cx| {
+                use gpui_kit::component::{Theme, ThemeMode};
+                let mode = if cx.theme().is_dark() {
+                    ThemeMode::Light
+                } else {
+                    ThemeMode::Dark
+                };
+                Theme::change(mode, Some(window), cx);
+                this.theme_chosen = true;
+            }))
             .on_action(cx.listener(|this, _: &ToggleLogs, _, cx| {
                 this.show_logs = !this.show_logs;
                 cx.notify();
@@ -4538,6 +4558,29 @@ mod tests {
             parts("[kworker/0:1]"),
             ("".into(), "[kworker/0:1]".into(), "".into())
         );
+    }
+
+    #[gpui_kit::test]
+    fn the_view_menu_switches_between_light_and_dark(cx: &mut TestAppContext) {
+        use gpui_kit::component::ActiveTheme as _;
+        let (window, app) = open(cx);
+        let dark = |cx: &mut TestAppContext| cx.update(|cx| cx.theme().is_dark());
+        let before = dark(cx);
+        cx.update_window(window, |_, w, cx| {
+            w.dispatch_action(Box::new(crate::actions::ToggleDarkTheme), cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(dark(cx), !before);
+        app.read_with(cx, |app, _| {
+            assert!(app.theme_chosen, "no longer following the system")
+        });
+        cx.update_window(window, |_, w, cx| {
+            w.dispatch_action(Box::new(crate::actions::ToggleDarkTheme), cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(dark(cx), before);
     }
 
     #[gpui_kit::test]

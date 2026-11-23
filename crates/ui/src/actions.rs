@@ -55,6 +55,7 @@ actions!(
         ToggleKernelThreads,
         ToggleThreads,
         ToggleLogs,
+        ToggleDarkTheme,
     ]
 );
 
@@ -317,6 +318,8 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Previous Host", PreviousHost),
             MenuItem::separator(),
             MenuItem::action("Logs", ToggleLogs),
+            MenuItem::separator(),
+            MenuItem::action("Dark Theme", ToggleDarkTheme),
         ]),
         Menu::new("Processes").items([
             MenuItem::action("Filter…", FocusFilter),
