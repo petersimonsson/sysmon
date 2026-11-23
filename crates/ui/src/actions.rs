@@ -55,6 +55,7 @@ actions!(
         ToggleKernelThreads,
         ToggleThreads,
         ToggleLogs,
+        ToggleDetails,
         ToggleDarkTheme,
     ]
 );
@@ -136,6 +137,13 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ToggleLogs,
         false,
         "Show the host's logs, or the graph again"
+    ),
+    shortcut!(
+        "View",
+        ["d", "enter"],
+        ToggleDetails,
+        false,
+        "Show the cursor row's process details, or the graph again"
     ),
     shortcut!(
         "Processes",
@@ -285,7 +293,11 @@ pub const MOUSE: &[(&str, &str)] = &[
     ("Click a unit", "Show only its log lines"),
     ("Click a log's PID", "Find the process in the table"),
     ("Click a timeline mark", "Go to the error, logs open"),
-    ("Drag the divider", "Resize the graph or log panel"),
+    (
+        "Click a parent or child",
+        "Move the cursor to it (Details tab)",
+    ),
+    ("Drag the divider", "Resize the bottom panel"),
 ];
 
 /// Register key bindings and menus. Call once, after `gpui_kit::init`.
@@ -318,6 +330,7 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Previous Host", PreviousHost),
             MenuItem::separator(),
             MenuItem::action("Logs", ToggleLogs),
+            MenuItem::action("Process Details", ToggleDetails),
             MenuItem::separator(),
             MenuItem::action("Dark Theme", ToggleDarkTheme),
         ]),
