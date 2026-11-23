@@ -175,8 +175,7 @@ impl Collector {
         let mut seen = HashSet::new();
         let mut seen_threads = HashSet::new();
         for entry in dir.flatten() {
-            let name = entry.file_name();
-            let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            let Some(pid) = numeric_name(&entry) else {
                 continue;
             };
             seen.insert(pid);
@@ -231,11 +230,7 @@ impl Collector {
             return;
         };
         for entry in dir.flatten() {
-            let Some(tid) = entry
-                .file_name()
-                .to_str()
-                .and_then(|s| s.parse::<u32>().ok())
-            else {
+            let Some(tid) = numeric_name(&entry) else {
                 continue;
             };
             if tid == tgid {
@@ -264,6 +259,11 @@ impl Collector {
     fn open_files(&self) -> usize {
         self.budget.open
     }
+}
+
+/// A `/proc` or `task` entry's pid or tid; `None` for everything else there.
+fn numeric_name(entry: &fs::DirEntry) -> Option<u32> {
+    entry.file_name().to_str()?.parse().ok()
 }
 
 /// The count of kept files, and the most allowed.
