@@ -2669,6 +2669,14 @@ impl AppState {
                 };
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ToggleDetails, _, cx| {
+                this.panel = if this.panel == Panel::Details {
+                    Panel::Graph
+                } else {
+                    Panel::Details
+                };
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &ToggleGraphPanel, _, cx| {
                 this.graph_visible = !this.graph_visible;
                 cx.notify();
@@ -3601,15 +3609,20 @@ mod tests {
         step(cx, &|window, cx| {
             window.press("ctrl-f", cx);
             window.press("t", cx);
+            window.press("d", cx);
             window.input("bash", cx);
         });
         app.read_with(cx, |app, cx| {
             assert!(!app.tree, "t is typed into the filter, not a shortcut");
-            assert_eq!(app.filter.read(cx).value().as_ref(), "tbash");
+            assert_eq!(app.panel, Panel::Graph, "and so is d");
+            assert_eq!(app.filter.read(cx).value().as_ref(), "tdbash");
         });
 
         // Enter returns focus to the app; single-key shortcuts work again.
         step(cx, &|window, cx| window.press("enter", cx));
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.panel, Panel::Graph, "Enter in the filter only returns")
+        });
         step(cx, &|window, cx| window.press("t", cx));
         app.read_with(cx, |app, _| assert!(app.tree));
 
@@ -5635,10 +5648,8 @@ mod tests {
             .unwrap()
         };
 
-        // Nothing under the cursor yet. (The panel is closed while nothing
-        // is picked; the Logs tab opens it.)
-        step(cx, &|w, cx| w.press("l", cx));
-        step(cx, &|w, cx| w.click("tab-details", cx));
+        // Nothing under the cursor yet.
+        step(cx, &|w, cx| w.press("d", cx));
         app.read_with(cx, |a, _| assert_eq!(a.panel, Panel::Details));
         cx.update_window(window, |_, w, cx| {
             w.render_frame(cx);
@@ -5717,9 +5728,8 @@ mod tests {
             w.press("shift-n", cx);
             w.press("down", cx);
             w.press("down", cx);
-            w.press("l", cx);
+            w.press("enter", cx);
         });
-        step(cx, &|w, cx| w.click("tab-details", cx));
         // Its child, then that one's parent.
         step(cx, &|w, cx| w.click(("details-child", 0usize), cx));
         app.read_with(cx, |a, _| assert_eq!(a.cursor, Some(key(11))));
