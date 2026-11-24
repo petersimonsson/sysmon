@@ -2723,6 +2723,13 @@ impl AppState {
             self.log_reveal.set(false);
             self.log_scroll.scroll_to_item(i, ScrollStrategy::Center);
         }
+        // An empty list says why, rather than looking broken.
+        let empty_note = (count == 0 && host.logs.enabled()).then_some(if total == 0 {
+            "No log lines yet. The agent sends new ones as they're logged \
+             (warnings and worse, unless it was started with --log-priority)."
+        } else {
+            "No lines match. Clear the filter, or pick All."
+        });
         let status = if !host.logs.enabled() {
             "No logs from this host: start its agent with --logs".into()
         } else if count < total {
@@ -2974,6 +2981,16 @@ impl AppState {
                             this.log_follow = false;
                             cx.notify();
                         }
+                    }))
+                    .children(empty_note.map(|note| {
+                        div()
+                            .id("logs-empty")
+                            .test_support()
+                            .p_4()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .aria_description(note)
+                            .child(note)
                     }))
                     .child(list),
             )
@@ -6667,6 +6684,40 @@ mod tests {
 
     /// A host with one sample and, unless `lines` is empty, log lines
     /// numbered from 0 with a gap of two after the first.
+    #[gpui_kit::test]
+    fn an_empty_log_list_says_why(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        let note = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.try_find("logs-empty")
+                    .and_then(|e| e.description().map(str::to_string))
+            })
+            .unwrap()
+        };
+        // Sending logs, but none yet.
+        host_with_logs(&app, cx, &[]);
+        app.update(cx, |app, cx| {
+            app.ensure_selection();
+            app.panel = Panel::Logs;
+            cx.notify();
+        });
+        assert!(note(cx).unwrap().starts_with("No log lines yet"));
+
+        // Lines, but none from the unit picked.
+        host_with_logs(&app, cx, &["boom"]);
+        app.update(cx, |app, cx| {
+            app.log_source = Some("other.service".into());
+            cx.notify();
+        });
+        assert!(note(cx).unwrap().starts_with("No lines match"));
+        app.update(cx, |app, cx| {
+            app.log_source = None;
+            cx.notify();
+        });
+        assert_eq!(note(cx), None);
+    }
+
     fn host_with_logs(app: &Entity<AppState>, cx: &mut TestAppContext, lines: &[&str]) {
         app.update(cx, |app, cx| {
             let frame = sysmon_proto::Frame {
