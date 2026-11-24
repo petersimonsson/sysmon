@@ -239,7 +239,8 @@ application menu: copy it to `~/.local/share/applications/` (with
     in the Logs tab, and use **Graph** to add the process to the graph.
   - A process that exits stays on show, marked *exited*, until you move the
     cursor.
-- **Times** are shown in your local time zone.
+- **Times** are shown in your local time zone; hover the sample time or a
+  process's start time to see which (the replay bar always says).
 - **Help → About sysmon** shows the version, sysmon's licenses, and the
   license of every third-party crate built into the UI, with the full texts.
   **Save all notices…** writes them all to one file.

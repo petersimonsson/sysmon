@@ -302,10 +302,9 @@ impl AppState {
         if row.stale {
             state.push_str(" (last sample lost)");
         }
-        let started = s.started_unix_ns.map_or_else(
-            || "– (agent too old)".into(),
-            |t| format!("{} {}", format::datetime(t), format::utc_offset(t)),
-        );
+        let started = s
+            .started_unix_ns
+            .map_or_else(|| "– (agent too old)".into(), format::datetime);
         let running = s.started_unix_ns.map_or_else(
             || "–".into(),
             |t| format::duration(s.seen_ns.saturating_sub(t)),
@@ -330,7 +329,17 @@ impl AppState {
             .child(parent_fact)
             .child(fact("details-user", "User", user))
             .child(fact("details-state", "State", state))
-            .child(fact("details-started", "Started", started))
+            .child({
+                let zone = s
+                    .started_unix_ns
+                    .map(|t| format!("Local time ({})", format::utc_offset(t)));
+                div()
+                    .id("details-started-zone")
+                    .when_some(zone, |d, zone| {
+                        d.tooltip(move |window, cx| Tooltip::new(zone.clone()).build(window, cx))
+                    })
+                    .child(fact("details-started", "Started", started))
+            })
             .child(fact("details-running", "Running", running))
             .child(fact("details-threads", "Threads", threads))
             .child(
