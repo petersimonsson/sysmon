@@ -153,9 +153,6 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ToggleDetails,
         "Show the cursor row's process details, or the graph again"
     ),
-    shortcut!("View", [], ThemeSystem, "Theme: as the system"),
-    shortcut!("View", [], ThemeLight, "Theme: light"),
-    shortcut!("View", [], ThemeDark, "Theme: dark"),
     shortcut!(
         "Processes",
         ["ctrl-f", "/"],
@@ -237,6 +234,9 @@ pub const SHORTCUTS: &[Shortcut] = &[
     ),
     shortcut!("Playback (recordings)", ["home"], SeekStart, "Go to start"),
     shortcut!("Playback (recordings)", ["end"], SeekEnd, "Go to end"),
+    shortcut!("Settings", [], ThemeSystem, "Theme: as the system"),
+    shortcut!("Settings", [], ThemeLight, "Theme: light"),
+    shortcut!("Settings", [], ThemeDark, "Theme: dark"),
 ];
 
 /// What the mouse does, for the shortcuts overlay: gestures there are no
@@ -357,12 +357,6 @@ fn menus(available: &Available) -> Vec<Menu> {
             MenuItem::separator(),
             action!("Logs", ToggleLogs),
             action!("Process Details", ToggleDetails),
-            MenuItem::separator(),
-            MenuItem::submenu(Menu::new("Theme").items([
-                action!("System", ThemeSystem),
-                action!("Light", ThemeLight),
-                action!("Dark", ThemeDark),
-            ])),
         ]),
         Menu::new("Processes").items([
             action!("Filter…", FocusFilter),
@@ -411,6 +405,11 @@ fn menus(available: &Available) -> Vec<Menu> {
             action!("Go to Start", SeekStart),
             action!("Go to End", SeekEnd),
         ]),
+        Menu::new("Settings").items([MenuItem::submenu(Menu::new("Theme").items([
+            action!("System", ThemeSystem),
+            action!("Light", ThemeLight),
+            action!("Dark", ThemeDark),
+        ]))]),
         Menu::new("Help").items([
             action!("Keyboard Shortcuts", ToggleShortcuts),
             MenuItem::separator(),

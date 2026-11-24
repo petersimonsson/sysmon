@@ -6139,7 +6139,7 @@ mod tests {
         let checked = |cx: &mut TestAppContext, name: &str| {
             cx.update(|cx| {
                 let menus = gpui_kit::component::GlobalState::global(cx).app_menus();
-                let view = menus.iter().find(|m| m.name == "View").unwrap();
+                let view = menus.iter().find(|m| m.name == "Settings").unwrap();
                 view.items.iter().find_map(|i| match i {
                     gpui_kit::OwnedMenuItem::Submenu(m) if m.name == "Theme" => {
                         m.items.iter().find_map(|i| match i {
@@ -6394,8 +6394,10 @@ mod tests {
             let screen = w.find("shortcuts-overlay").bounds();
             // Every group, the mouse's last, is within the width: they wrap
             // (and the panel scrolls if the window is short).
+            // (A group whose actions all lack a key isn't shown.)
             let groups = crate::actions::SHORTCUTS
                 .iter()
+                .filter(|s| !s.keys.is_empty())
                 .map(|s| s.group)
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
