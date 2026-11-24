@@ -92,196 +92,132 @@ pub struct Shortcut {
     /// Keystrokes in gpui syntax; the first is shown in the overlay.
     pub keys: &'static [&'static str],
     pub description: &'static str,
-    /// Bindable while the filter input has focus.
-    pub while_typing: bool,
     bind: fn(&'static str, Option<&str>) -> KeyBinding,
 }
 
 macro_rules! shortcut {
-    ($group:literal, [$($key:literal),+], $action:expr, $typing:expr, $desc:literal) => {
+    ($group:literal, [$($key:literal),+], $action:expr, $desc:literal) => {
         Shortcut {
             group: $group,
             keys: &[$($key),+],
             description: $desc,
-            while_typing: $typing,
             bind: |k, c| KeyBinding::new(k, $action, c),
         }
     };
 }
 
 pub const SHORTCUTS: &[Shortcut] = &[
-    shortcut!(
-        "General",
-        ["ctrl-o"],
-        OpenRecording,
-        true,
-        "Open a recording"
-    ),
-    shortcut!("General", ["ctrl-q"], Quit, true, "Quit"),
+    shortcut!("General", ["ctrl-o"], OpenRecording, "Open a recording"),
+    shortcut!("General", ["ctrl-q"], Quit, "Quit"),
     shortcut!(
         "General",
         ["f1", "?"],
         ToggleShortcuts,
-        false,
         "Show or hide this list"
     ),
     shortcut!(
         "General",
         ["escape"],
         Dismiss,
-        true,
         "Close this list, or clear the filter"
     ),
-    shortcut!("View", ["ctrl-1"], ShowLive, true, "Live view"),
-    shortcut!("View", ["ctrl-2"], ShowRecording, true, "Recording view"),
-    shortcut!("View", ["ctrl-up"], PreviousHost, true, "Previous host"),
-    shortcut!("View", ["ctrl-down"], NextHost, true, "Next host"),
+    shortcut!("View", ["ctrl-1"], ShowLive, "Live view"),
+    shortcut!("View", ["ctrl-2"], ShowRecording, "Recording view"),
+    shortcut!("View", ["ctrl-up"], PreviousHost, "Previous host"),
+    shortcut!("View", ["ctrl-down"], NextHost, "Next host"),
     shortcut!(
         "View",
         ["l"],
         ToggleLogs,
-        false,
         "Show the host's logs, or the graph again"
     ),
     shortcut!(
         "View",
         ["d", "enter"],
         ToggleDetails,
-        false,
         "Show the cursor row's process details, or the graph again"
     ),
     shortcut!(
         "Processes",
         ["ctrl-f", "/"],
         FocusFilter,
-        true,
         "Filter processes (Enter returns)"
     ),
-    shortcut!("Processes", ["t"], ToggleTree, false, "Toggle tree view"),
+    shortcut!("Processes", ["t"], ToggleTree, "Toggle tree view"),
     shortcut!(
         "Processes",
         ["ctrl-k"],
         ToggleKernelThreads,
-        false,
         "Show / hide kernel threads"
     ),
     shortcut!(
         "Processes",
         ["ctrl-h"],
         ToggleThreads,
-        false,
         "Show / hide threads"
     ),
-    shortcut!("Processes", ["e"], ExpandAll, false, "Expand all (tree)"),
-    shortcut!(
-        "Processes",
-        ["c"],
-        CollapseAll,
-        false,
-        "Collapse all (tree)"
-    ),
-    shortcut!("Processes", ["up", "k"], CursorUp, false, "Previous row"),
-    shortcut!("Processes", ["down", "j"], CursorDown, false, "Next row"),
-    shortcut!("Processes", ["pageup"], CursorPageUp, false, "Up 20 rows"),
-    shortcut!(
-        "Processes",
-        ["pagedown"],
-        CursorPageDown,
-        false,
-        "Down 20 rows"
-    ),
-    shortcut!("Processes", ["shift-p"], SortByCpu, false, "Sort by CPU"),
-    shortcut!("Processes", ["shift-v"], SortByVirt, false, "Sort by VIRT"),
-    shortcut!("Processes", ["shift-m"], SortByMemory, false, "Sort by RES"),
-    shortcut!("Processes", ["shift-s"], SortByShr, false, "Sort by SHR"),
-    shortcut!("Processes", ["shift-n"], SortByPid, false, "Sort by PID"),
-    shortcut!("Processes", ["shift-u"], SortByUser, false, "Sort by user"),
-    shortcut!(
-        "Processes",
-        ["shift-c"],
-        SortByCommand,
-        false,
-        "Sort by command"
-    ),
+    shortcut!("Processes", ["e"], ExpandAll, "Expand all (tree)"),
+    shortcut!("Processes", ["c"], CollapseAll, "Collapse all (tree)"),
+    shortcut!("Processes", ["up", "k"], CursorUp, "Previous row"),
+    shortcut!("Processes", ["down", "j"], CursorDown, "Next row"),
+    shortcut!("Processes", ["pageup"], CursorPageUp, "Up 20 rows"),
+    shortcut!("Processes", ["pagedown"], CursorPageDown, "Down 20 rows"),
+    shortcut!("Processes", ["shift-p"], SortByCpu, "Sort by CPU"),
+    shortcut!("Processes", ["shift-v"], SortByVirt, "Sort by VIRT"),
+    shortcut!("Processes", ["shift-m"], SortByMemory, "Sort by RES"),
+    shortcut!("Processes", ["shift-s"], SortByShr, "Sort by SHR"),
+    shortcut!("Processes", ["shift-n"], SortByPid, "Sort by PID"),
+    shortcut!("Processes", ["shift-u"], SortByUser, "Sort by user"),
+    shortcut!("Processes", ["shift-c"], SortByCommand, "Sort by command"),
     shortcut!(
         "Graph",
         ["g"],
         ToggleGraph,
-        false,
         "Graph the row (collapsed: its subtree)"
     ),
-    shortcut!("Graph", ["ctrl-g"], ClearGraph, true, "Remove all lines"),
-    shortcut!(
-        "Graph",
-        ["v"],
-        ToggleGraphPanel,
-        false,
-        "Show / hide the graph"
-    ),
-    shortcut!("Graph", ["1"], GraphCpu, false, "Graph %CPU"),
-    shortcut!("Graph", ["2"], GraphVirt, false, "Graph VIRT"),
-    shortcut!("Graph", ["3"], GraphRss, false, "Graph RES"),
-    shortcut!("Graph", ["4"], GraphShr, false, "Graph SHR"),
-    shortcut!("Graph", ["5"], GraphMem, false, "Graph %MEM"),
-    shortcut!("Graph", ["6"], GraphThreads, false, "Graph threads"),
+    shortcut!("Graph", ["ctrl-g"], ClearGraph, "Remove all lines"),
+    shortcut!("Graph", ["v"], ToggleGraphPanel, "Show / hide the graph"),
+    shortcut!("Graph", ["1"], GraphCpu, "Graph %CPU"),
+    shortcut!("Graph", ["2"], GraphVirt, "Graph VIRT"),
+    shortcut!("Graph", ["3"], GraphRss, "Graph RES"),
+    shortcut!("Graph", ["4"], GraphShr, "Graph SHR"),
+    shortcut!("Graph", ["5"], GraphMem, "Graph %MEM"),
+    shortcut!("Graph", ["6"], GraphThreads, "Graph threads"),
     shortcut!(
         "Graph",
         ["w"],
         CycleGraphWindow,
-        false,
         "Time window: 1 / 5 / 10 min"
     ),
     shortcut!(
         "Playback (recordings)",
         ["space"],
         TogglePause,
-        false,
         "Play / pause"
     ),
-    shortcut!("Playback (recordings)", ["]"], Faster, false, "Faster"),
-    shortcut!("Playback (recordings)", ["["], Slower, false, "Slower"),
-    shortcut!(
-        "Playback (recordings)",
-        ["left"],
-        SeekBackward,
-        false,
-        "Back 10 s"
-    ),
+    shortcut!("Playback (recordings)", ["]"], Faster, "Faster"),
+    shortcut!("Playback (recordings)", ["["], Slower, "Slower"),
+    shortcut!("Playback (recordings)", ["left"], SeekBackward, "Back 10 s"),
     shortcut!(
         "Playback (recordings)",
         ["right"],
         SeekForward,
-        false,
         "Forward 10 s"
     ),
     shortcut!(
         "Playback (recordings)",
         ["shift-left"],
         SeekBackwardLong,
-        false,
         "Back 1 min"
     ),
     shortcut!(
         "Playback (recordings)",
         ["shift-right"],
         SeekForwardLong,
-        false,
         "Forward 1 min"
     ),
-    shortcut!(
-        "Playback (recordings)",
-        ["home"],
-        SeekStart,
-        false,
-        "Go to start"
-    ),
-    shortcut!(
-        "Playback (recordings)",
-        ["end"],
-        SeekEnd,
-        false,
-        "Go to end"
-    ),
+    shortcut!("Playback (recordings)", ["home"], SeekStart, "Go to start"),
+    shortcut!("Playback (recordings)", ["end"], SeekEnd, "Go to end"),
 ];
 
 /// What the mouse does, for the shortcuts overlay: gestures there are no
@@ -361,8 +297,14 @@ impl<E: InteractiveElement> OnAvailable for E {}
 /// Register key bindings and menus. Call once, after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
     cx.bind_keys(SHORTCUTS.iter().flat_map(|s| {
-        let ctx = if s.while_typing { CONTEXT } else { NOT_TYPING };
-        s.keys.iter().map(move |k| (s.bind)(k, Some(ctx)))
+        s.keys.iter().map(move |k| {
+            let ctx = if works_while_typing(k) {
+                CONTEXT
+            } else {
+                NOT_TYPING
+            };
+            (s.bind)(k, Some(ctx))
+        })
     }));
     cx.on_action(|_: &Quit, cx| cx.quit());
     // The window sets the menus up for what it shows once it draws.
@@ -463,6 +405,24 @@ fn menus(available: &Available) -> Vec<Menu> {
     ]
 }
 
+/// Whether the keystroke `k` (gpui syntax) may fire while a text box has
+/// the keyboard: only if it can't be typed. That's a key with Ctrl, Alt or
+/// Super, or Esc or an F-key; a plain or shifted key is text. Decided per
+/// key, not per action: `/` beside Ctrl+F once inherited Ctrl+F's "yes"
+/// and couldn't be typed into the filter.
+pub fn works_while_typing(k: &str) -> bool {
+    if k == "-" || k == "+" {
+        return false;
+    }
+    let mut parts: Vec<&str> = k.split('-').collect();
+    let key = parts.pop().unwrap_or_default();
+    parts
+        .iter()
+        .any(|m| matches!(*m, "ctrl" | "alt" | "cmd" | "super" | "platform" | "fn"))
+        || key == "escape"
+        || (key.len() > 1 && key.starts_with('f') && key[1..].parse::<u8>().is_ok())
+}
+
 /// How a gpui keystroke string is shown to people, e.g. `ctrl-o` → `Ctrl+O`.
 pub fn display_key(k: &str) -> String {
     if k == "-" || k == "+" {
@@ -498,7 +458,30 @@ pub fn display_key(k: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: the gpui glob would shadow `#[test]`.
-    use super::{PAGE_ROWS, SEEK_LONG_S, SEEK_SHORT_S, SHORTCUTS, display_key, seek_label};
+    use super::{
+        PAGE_ROWS, SEEK_LONG_S, SEEK_SHORT_S, SHORTCUTS, display_key, seek_label,
+        works_while_typing,
+    };
+
+    #[test]
+    fn only_keys_that_cant_be_typed_work_while_typing() {
+        for k in [
+            "ctrl-f",
+            "ctrl-shift-g",
+            "alt-x",
+            "escape",
+            "f1",
+            "f12",
+            "ctrl-up",
+        ] {
+            assert!(works_while_typing(k), "{k}");
+        }
+        for k in [
+            "/", "?", "g", "shift-p", "up", "space", "enter", "1", "]", "-", "f", "fn",
+        ] {
+            assert!(!works_while_typing(k), "{k}");
+        }
+    }
 
     #[test]
     fn displays_keys() {
