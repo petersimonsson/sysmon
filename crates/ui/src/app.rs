@@ -35,6 +35,8 @@ use crate::selection::{self, Selection};
 use crate::widgets::{Chosen as _, Highlighted as _, bar, sparkline};
 
 mod details;
+mod parts;
+mod plot;
 
 const ROW_HEIGHT: f32 = 20.;
 /// The tree's ▾/▸ column; guide lines run down its middle.
@@ -203,9 +205,12 @@ pub struct AppState {
     graph_metric: Metric,
     graph_window_s: u64,
     graph_visible: bool,
-    /// Mouse position over the chart, as a fraction of its width.
-    graph_hover: Option<f32>,
-    graph_bounds: graph::ChartBounds,
+    /// The chart, its labels and legend: a view of its own, so moving the
+    /// pointer over it builds only that again.
+    graph_plot: Entity<plot::GraphPlot>,
+    /// The table and sidebar, drawn as cached views: see [`parts`].
+    procs_table: Entity<parts::PartView>,
+    sidebar_part: Entity<parts::PartView>,
     /// Last known command of each graphed process, so the legend can still
     /// name processes that have exited; per view and host, like `selections`.
     graph_names: HashMap<(View, u64), HashMap<ProcKey, String>>,
@@ -409,8 +414,18 @@ impl AppState {
             graph_metric: Metric::Cpu,
             graph_window_s: graph::WINDOWS_S[2],
             graph_visible: true,
-            graph_hover: None,
-            graph_bounds: Default::default(),
+            graph_plot: {
+                let app = cx.entity().downgrade();
+                cx.new(|_| plot::GraphPlot::new(app))
+            },
+            procs_table: {
+                let app = cx.entity();
+                cx.new(|cx| parts::PartView::new(&app, parts::Part::Table, cx))
+            },
+            sidebar_part: {
+                let app = cx.entity();
+                cx.new(|cx| parts::PartView::new(&app, parts::Part::Sidebar, cx))
+            },
 
             graph_names: HashMap::new(),
             graph_lines: Default::default(),
@@ -2339,9 +2354,6 @@ impl AppState {
         });
         drop(cache);
         let y_max = graph::y_max(metric, &lines);
-        let hover_ns = self
-            .graph_hover
-            .map(|f| start + ((end - start) as f64 * f as f64) as u64);
 
         // Toolbar: tabs, metric, window, clear, hide.
         let mut toolbar = div()
@@ -2398,161 +2410,46 @@ impl AppState {
                     })),
             );
 
-        // Chart with y labels on the left and times underneath.
-        let y_labels = div()
-            .flex()
-            .flex_col()
-            .justify_between()
-            .w(px(AXIS_LABELS_W))
-            .h_full()
-            .pr_1()
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .items_end()
-            .child(graph::format_value(metric, y_max))
-            .child(graph::format_value(metric, y_max / 2.0))
-            .child(graph::format_value(metric, 0.0));
-        let plot = div()
-            .id("graph-plot")
-            .test_support()
-            .flex_1()
-            .h_full()
-            .border_1()
-            .border_color(theme.border)
-            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
-                if let Some(b) = this.graph_bounds.get() {
-                    let f = f32::from(ev.position.x - b.origin.x) / f32::from(b.size.width);
-                    this.graph_hover = Some(f.clamp(0.0, 1.0));
-                    cx.notify();
+        // The chart and legend are drawn by their own view: given the
+        // figures here, it redraws alone as the pointer moves.
+        let legend = picks
+            .iter()
+            .map(|p| {
+                let key = p.target.key();
+                let name = self
+                    .graph_names
+                    .get(&(view, host.host_id))
+                    .and_then(|n| n.get(&key))
+                    .cloned()
+                    .unwrap_or_else(|| "?".into());
+                let latest = host.latest(p.target, metric);
+                let label = match p.target {
+                    SeriesTarget::Subtree(_) => {
+                        let n = latest.map_or(0, |(_, n)| n);
+                        format!("{} {name} + subtree ({n})", key.pid)
+                    }
+                    SeriesTarget::Process(_) | SeriesTarget::Thread(_) => {
+                        format!("{} {name}", key.pid)
+                    }
+                };
+                plot::LegendEntry {
+                    slot: p.slot,
+                    key,
+                    label,
+                    latest: latest.map(|(v, _)| v),
                 }
-            }))
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                if !*hovered {
-                    this.graph_hover = None;
-                    cx.notify();
-                }
-            }))
-            .child(graph::chart(
-                graph::ChartSpec {
-                    lines: lines.clone(),
-                    start_ns: start,
-                    end_ns: end,
-                    y_max,
-                    hover_ns,
-                    mark: self.log_cursor.map(|(_, ts)| (ts, theme.warning)),
-                    grid: theme.border,
-                    crosshair: theme.muted_foreground,
-                },
-                self.graph_bounds.clone(),
-            ));
-        let x_labels = div()
-            .flex()
-            .justify_between()
-            .pl(px(AXIS_LABELS_W))
-            .text_xs()
-            .text_color(theme.muted_foreground)
-            .child(format::time(start))
-            .child(match (hover_ns, self.log_cursor) {
-                (Some(h), _) => div().child(format::time(h)).into_any_element(),
-                // The selected log line's time, drawn as a line on the chart.
-                (None, Some((_, ts))) if (start..=end).contains(&ts) => {
-                    let text = format!("log line {}", format::time(ts));
-                    div()
-                        .id("graph-log-mark")
-                        .test_support()
-                        .text_color(theme.warning)
-                        .aria_description(text.clone())
-                        .child(text)
-                        .into_any_element()
-                }
-                _ => div().into_any_element(),
             })
-            .child(format::time(end));
-        let chart = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .gap_1()
-            .child(div().flex().flex_1().min_h_0().child(y_labels).child(plot))
-            .child(x_labels);
-
-        // Legend: one entry per line with its value now (or at the crosshair).
-        let mut legend = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .w(px(300.))
-            .pl_3()
-            .text_xs()
-            .child(
-                div()
-                    .text_color(theme.muted_foreground)
-                    .child(match hover_ns {
-                        Some(t) => format!("{} at {}", metric.label(), format::time(t)),
-                        None => format!("{} now", metric.label()),
-                    }),
-            );
-        for (p, line) in picks.iter().zip(lines.iter()) {
-            let key = p.target.key();
-            let name = self
-                .graph_names
-                .get(&(view, host.host_id))
-                .and_then(|n| n.get(&key))
-                .cloned()
-                .unwrap_or_else(|| "?".into());
-            let latest = host.latest(p.target, metric);
-            let label = match p.target {
-                SeriesTarget::Subtree(_) => {
-                    let n = latest.map_or(0, |(_, n)| n);
-                    format!("{} {name} + subtree ({n})", key.pid)
-                }
-                SeriesTarget::Process(_) | SeriesTarget::Thread(_) => {
-                    format!("{} {name}", key.pid)
-                }
-            };
-            let value = match hover_ns {
-                Some(t) => graph::value_at(&line.points, t),
-                None => latest.map(|(v, _)| v),
-            };
-            let value = match (value, latest) {
-                (Some(v), _) => graph::format_value(metric, v),
-                (None, None) => "exited".into(),
-                (None, Some(_)) => "–".into(),
-            };
-            legend = legend.child(
-                div()
-                    .id(("legend", p.slot))
-                    .test_support()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().flex_none().size(px(10.)).rounded_sm().bg(line.color))
-                    .child(clipped(("legend-label", p.slot), label.clone(), label))
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_family(theme.mono_font_family.clone())
-                            .child(value),
-                    )
-                    .child(
-                        div()
-                            .id(("legend-remove", p.slot))
-                            .test_support()
-                            .flex_none()
-                            .px_1()
-                            .cursor_pointer()
-                            .text_color(theme.muted_foreground)
-                            .aria_description("Remove from the graph")
-                            .tooltip(|window, cx| {
-                                Tooltip::new("Remove from the graph").build(window, cx)
-                            })
-                            .child(icon(IconName::X))
-                            .on_click(cx.listener(move |this, _, _, cx| this.remove_pick(key, cx))),
-                    ),
-            );
-        }
+            .collect();
+        let data = plot::PlotData {
+            lines,
+            start_ns: start,
+            end_ns: end,
+            y_max,
+            metric,
+            log_mark: self.log_cursor.map(|(_, ts)| ts),
+            legend,
+        };
+        self.graph_plot.update(cx, |p, _| p.set(data));
 
         div()
             .id("graph-panel")
@@ -2570,8 +2467,7 @@ impl AppState {
                     .min_h_0()
                     .px_2()
                     .pb_2()
-                    .child(chart)
-                    .child(legend),
+                    .child(self.graph_plot.clone()),
             )
     }
 
@@ -4234,7 +4130,6 @@ fn apply_theme(theme: crate::config::ThemePref, window: &mut Window, cx: &mut Ap
 
 impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mono_char = mono_char_width(window, cx);
         self.refresh_available(cx);
         self.refresh_graph_names();
         self.refresh_details();
@@ -4248,7 +4143,10 @@ impl Render for AppState {
         self.graph_height = self.graph_height.clamp(px(GRAPH_MIN), max_graph);
         let theme = cx.theme().clone();
         let toolbar = self.render_toolbar(cx);
-        let sidebar = self.render_sidebar(cx);
+        let sidebar = self
+            .sidebar_part
+            .clone()
+            .cached(parts::PartView::style(parts::Part::Sidebar));
         let timeline = self.render_timeline(cx);
 
         let main = match self.current_host() {
@@ -4278,7 +4176,11 @@ impl Render for AppState {
                             .flex_col()
                             .flex_1()
                             .min_h_0()
-                            .child(self.render_procs(host, mono_char, cx)),
+                            .child(
+                                self.procs_table
+                                    .clone()
+                                    .cached(parts::PartView::style(parts::Part::Table)),
+                            ),
                     )
                     .when_some(graph, |d, graph| {
                         d.child(
@@ -4882,9 +4784,21 @@ mod tests {
             assert_eq!(app.graph_metric, sysmon_model::Metric::Rss)
         });
         step(cx, &|window, cx| window.hover("graph-plot", cx));
-        app.read_with(cx, |app, _| {
-            let f = app.graph_hover.expect("hovering sets the crosshair");
-            assert!((f - 0.5).abs() < 0.05, "{f}");
+        app.read_with(cx, |app, cx| {
+            let at = app
+                .graph_plot
+                .read(cx)
+                .hover
+                .expect("hovering sets the crosshair");
+            // On a sample, about halfway along.
+            let host = &app.live_hosts[&1];
+            let (start, end) = app.graph_span(host);
+            let f = (at - start) as f64 / (end - start) as f64;
+            assert!((f - 0.5).abs() < 0.1, "{f}");
+            assert!(
+                host.proc_history.iter().any(|s| s.ts_unix_ns == at),
+                "a sample's time"
+            );
         });
 
         // A subtree line: pid 10 and its child 11 use 10 + 11 ticks/s
@@ -6355,6 +6269,63 @@ mod tests {
             let note = w.find("procs-empty");
             let text = note.description().unwrap_or_default();
             assert!(text.contains("nothing-like-it"), "{text}");
+        })
+        .unwrap();
+    }
+
+    /// Frames drawn as the app draws them, not forced afresh as
+    /// `render_frame` does: the table, a cached view, must still show what
+    /// changed.
+    #[gpui_kit::test]
+    fn the_table_and_sidebar_follow_changes_between_frames(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        let draw = |cx: &mut TestAppContext| {
+            cx.run_until_parked();
+            cx.update_window(window, |_, w, cx| w.draw(cx).clear(cx))
+                .unwrap();
+        };
+        cx.update_window(window, |_, w, cx| w.render_frame(cx))
+            .unwrap();
+        let shown = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, _| {
+                (0..10usize)
+                    .filter(|&i| w.try_find(("row", i)).is_some())
+                    .count()
+            })
+            .unwrap()
+        };
+        assert_eq!(shown(cx), 4, "kernel threads hidden");
+        app.update(cx, |app, cx| app.toggle_kernel_threads(cx));
+        draw(cx);
+        assert_eq!(shown(cx), 6, "and now listed");
+
+        // A sample that makes the host silent shows in the sidebar.
+        app.update(cx, |app, cx| {
+            let host = app.live_hosts.get_mut(&1).unwrap();
+            host.last_received_ns = 1;
+            cx.notify();
+        });
+        draw(cx);
+        cx.update_window(window, |_, w, _| {
+            assert!(w.try_find(("host-silent", 1usize)).is_some())
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn the_table_starts_below_the_header(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            // The figures under the header's graphs (the test host has no cores).
+            let header = w.find("net-rx").bounds();
+            let table = w.find("procs-panel").bounds();
+            assert!(header.bottom() <= table.top(), "{header:?} over {table:?}");
+            // And its rows are drawn, in the room under its own header.
+            let row = w.find(("row", 0usize)).bounds();
+            assert!(row.top() > table.top() && row.bottom() <= table.bottom());
         })
         .unwrap();
     }
