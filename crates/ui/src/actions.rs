@@ -39,7 +39,6 @@ actions!(
         SortByPid,
         SortByUser,
         SortByCommand,
-        ToggleShortcuts,
         CursorUp,
         CursorDown,
         CursorPageUp,
@@ -125,15 +124,9 @@ pub const SHORTCUTS: &[Shortcut] = &[
     shortcut!("General", ["ctrl-q"], Quit, "Quit"),
     shortcut!(
         "General",
-        ["f1", "?"],
-        ToggleShortcuts,
-        "Show or hide this list"
-    ),
-    shortcut!(
-        "General",
         ["escape"],
         Dismiss,
-        "Close this list, or clear the filter"
+        "Close a dialog, clear the filter, or dismiss a message"
     ),
     // No key by default, but one can be set ([keys] in the settings);
     // the shortcuts list leaves out actions without one.
@@ -239,27 +232,6 @@ pub const SHORTCUTS: &[Shortcut] = &[
     shortcut!("Settings", [], ThemeSystem, "Theme: as the system"),
     shortcut!("Settings", [], ThemeLight, "Theme: light"),
     shortcut!("Settings", [], ThemeDark, "Theme: dark"),
-];
-
-/// What the mouse does, for the shortcuts overlay: gestures there are no
-/// keys for, or that do more than their key.
-pub const MOUSE: &[(&str, &str)] = &[
-    ("Click a row", "Move the cursor to it"),
-    ("Ctrl+click", "Graph the row, or stop"),
-    ("Shift+click", "Graph the rows from the last one picked"),
-    ("Click a column", "Sort by it, again to reverse"),
-    (
-        "Click a log line",
-        "Highlight it (in a recording, go there)",
-    ),
-    ("Click a unit", "Show only its log lines"),
-    ("Click a log's PID", "Find the process in the table"),
-    ("Click a timeline mark", "Go to the error, logs open"),
-    (
-        "Click a parent or child",
-        "Move the cursor to it (Details tab)",
-    ),
-    ("Drag the divider", "Resize the bottom panel"),
 ];
 
 /// The actions that can do something right now, in the view on screen
@@ -416,11 +388,9 @@ fn menus(available: &Available) -> Vec<Menu> {
                 action!("Dark", ThemeDark),
             ])),
         ]),
-        Menu::new("Help").items([
-            action!("Keyboard Shortcuts", ToggleShortcuts),
-            MenuItem::separator(),
-            action!("About sysmon", About),
-        ]),
+        // The shortcuts list is F1 or ?, and Settings → Keyboard
+        // Shortcuts… shows and changes them all.
+        Menu::new("Help").items([action!("About sysmon", About)]),
     ]
 }
 

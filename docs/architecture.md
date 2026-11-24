@@ -655,7 +655,7 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   `keymap::Keymap::resolve` applies the settings' `[keys]` (by action name
   in snake_case; a setting replaces the defaults, takes its keys off other
   actions, and the first setting to name a key keeps it), and the result is
-  bound and kept as a gpui global. The F1 / `?` overlay, the menus and the
+  bound and kept as a gpui global. The menus, the shortcut editor and the
   key hints in tooltips (`keymap::hinted`) all show what's in effect;
   `--print-keys` prints it as TOML. Settings → Keyboard Shortcuts…
   (`shortcuts.rs`) edits a draft of it: adding a key installs a keystroke
@@ -695,7 +695,6 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   | Shift+N / U / C | Sort by PID / user / command (again flips) |
   | Space, `]`, `[` | Play/pause, faster, slower |
   | ←/→, Shift+←/→, Home/End | Seek 10 s, 1 min, to start/end |
-  | F1 or `?` | Shortcuts overlay |
 - **Tests:** headless UI tests (`gpui-kit` `test-support`, dev-only) press
   keys and click in a real window and check the resulting state and layout:
   shortcuts (and that single-key ones don't fire while typing in the

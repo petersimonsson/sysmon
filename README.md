@@ -299,8 +299,9 @@ only until you quit.
 
 ### Keyboard
 
-Press **F1** or **?** in the app for the full list. The most useful ones
+**Settings → Keyboard Shortcuts…** lists them all. The most useful ones
 are below; you can change any of them (see [Changing keys](#changing-keys)).
+The menus show each item's key too.
 
 | Keys | |
 |---|---|
@@ -324,8 +325,7 @@ Single-letter shortcuts are turned off while you type in the filter.
 
 #### Changing keys
 
-**Settings → Keyboard Shortcuts…** (or **Edit…** in the F1 list) lists every
-action with its keys:
+**Settings → Keyboard Shortcuts…** lists every action with its keys:
 
 - Click **+** (or pick a row with ↑/↓ and press Enter), then press the new
   key. Esc gives up. The key you press is caught before it does anything.
