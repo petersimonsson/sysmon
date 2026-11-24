@@ -3160,6 +3160,12 @@ impl AppState {
             .on_available(
                 can,
                 cx.listener(|this, _: &Dismiss, window, cx| {
+                    // A dialog that doesn't take the keyboard (About) leaves
+                    // Esc with the app: close it first.
+                    if window.has_active_dialog(cx) {
+                        window.close_dialog(cx);
+                        return;
+                    }
                     // In a filter box: clear it, or once empty, leave it.
                     let typing_in = [this.filter.clone(), this.log_filter.clone()]
                         .into_iter()
@@ -4869,6 +4875,24 @@ mod tests {
         // Single-key shortcuts work again once it's closed.
         step(cx, &|window, cx| window.press("?", cx));
         app.read_with(cx, |app, _| assert!(app.show_shortcuts));
+
+        // Opened from the Help menu, the menu hands the keyboard back to
+        // the app as it closes, so the dialog doesn't have it: Esc still
+        // closes it.
+        let focus = app.read_with(cx, |app, _| app.focus.clone());
+        step(cx, &|window, cx| {
+            window.dispatch_action(Box::new(crate::actions::About), cx)
+        });
+        step(cx, &|window, cx| focus.focus(window, cx));
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("about").is_some(), "open again");
+            window.press("escape", cx)
+        });
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("about").is_none(), "Esc closes it at once");
+        });
 
         // So does the Close button.
         step(cx, &|window, cx| {
