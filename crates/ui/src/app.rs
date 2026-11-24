@@ -4580,6 +4580,22 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn a_slash_can_be_typed_into_the_filter(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        cx.update_window(window, |_, w, cx| {
+            w.press("ctrl-f", cx);
+            w.press("/", cx);
+            w.press("u", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        // `/` also opens the filter, but typed in it, it's text.
+        let v = app.read_with(cx, |a, cx| a.filter.read(cx).value().to_string());
+        assert_eq!(v, "/u");
+    }
+
+    #[gpui_kit::test]
     fn single_key_shortcuts_are_off_while_typing_in_the_filter(cx: &mut TestAppContext) {
         let (window, app) = open(cx);
         add_host(&app, cx);
