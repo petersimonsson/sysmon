@@ -148,16 +148,28 @@ impl AppState {
             .child(div().flex_1())
             .when_some(shown.as_ref().filter(|s| s.live.is_some()), |d, s| {
                 let target = SeriesTarget::Process(s.row.key);
-                let picked = self
+                let slot = self
                     .selection()
-                    .is_some_and(|sel| sel.iter().any(|p| p.target == target));
+                    .and_then(|sel| sel.iter().find(|p| p.target == target))
+                    .map(|p| p.slot);
+                let picked = slot.is_some();
                 d.child(
-                    // Highlighted while graphed, like the toolbar's toggles.
+                    // While graphed it says so, with its line's colour as
+                    // in the table's checkbox (a filled button alone looked
+                    // like the selected tab beside it).
                     Button::new("details-graph")
                         .icon(icon(IconName::ChartLine))
-                        .label("Graph")
+                        .label(if picked { "Graphed" } else { "Graph" })
                         .small()
-                        .chosen(picked)
+                        .map(|b| if picked { b.outline() } else { b.ghost() })
+                        .children(slot.map(|slot| {
+                            div()
+                                .id("details-graph-color")
+                                .test_support()
+                                .size(px(8.))
+                                .rounded_full()
+                                .bg(selection::color(slot))
+                        }))
                         .tooltip(if picked {
                             "Take the process out of the graph"
                         } else {
