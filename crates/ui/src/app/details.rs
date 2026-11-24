@@ -113,7 +113,7 @@ impl AppState {
         let theme = cx.theme().clone();
         let shown = self.details_shown(host);
         let title = match &shown {
-            Some(s) => format!("{} · PID {}", s.row.comm, s.row.key.pid),
+            Some(s) => format!("{} · PID {}", proc_name(s.row), s.row.key.pid),
             None => String::new(),
         };
         let toolbar = div()
@@ -247,7 +247,7 @@ impl AppState {
         };
         let parent_row = s.live.as_ref().and_then(|d| d.parent);
         let parent = match parent_row {
-            Some(p) => format!("{} {}", p.key.pid, p.comm),
+            Some(p) => format!("{} {}", p.key.pid, proc_name(p)),
             None if row.ppid == 0 => "–".into(),
             None => row.ppid.to_string(),
         };
