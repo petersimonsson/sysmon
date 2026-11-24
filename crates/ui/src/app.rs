@@ -70,8 +70,11 @@ const SIDEBAR_W: f32 = 190.;
 const SIDEBAR_BAR_W: f32 = 84.;
 /// Samples shown in the header's sparklines.
 const SPARK_POINTS: usize = 240;
-/// Initial height of the graph panel below the process list.
+/// Smallest initial height of the graph panel below the process list.
 const GRAPH_HEIGHT: f32 = 260.;
+/// Share of the window the panel takes until you drag its divider: a
+/// fixed 260 px was a sliver of a tall window.
+const GRAPH_SHARE: f32 = 0.3;
 /// Smallest graph panel, and room always left for the rest of the window.
 const GRAPH_MIN: f32 = 140.;
 const GRAPH_MIN_LIST: f32 = 300.;
@@ -211,6 +214,8 @@ pub struct AppState {
     graph_lines: std::cell::RefCell<graph::LineCache<(View, u64, SeriesTarget, Metric)>>,
     /// Height of the graph panel; drag the divider above it to change it.
     graph_height: Pixels,
+    /// The divider was dragged: keep its height rather than the window's share.
+    graph_resized: bool,
     /// While dragging the divider: pointer y and panel height at the start.
     graph_drag: Option<(Pixels, Pixels)>,
     /// What the bottom panel shows. The graph only shows while something
@@ -410,6 +415,7 @@ impl AppState {
             graph_names: HashMap::new(),
             graph_lines: Default::default(),
             graph_height: px(GRAPH_HEIGHT),
+            graph_resized: false,
             graph_drag: None,
             panel: Panel::Graph,
             details_memo: None,
@@ -4234,7 +4240,11 @@ impl Render for AppState {
         self.refresh_details();
         let panel_shown = self.panel_shown();
         // Keep the panel within the window if the window shrank.
-        let max_graph = (window.viewport_size().height - px(GRAPH_MIN_LIST)).max(px(GRAPH_MIN));
+        let viewport = window.viewport_size().height;
+        let max_graph = (viewport - px(GRAPH_MIN_LIST)).max(px(GRAPH_MIN));
+        if !self.graph_resized {
+            self.graph_height = (viewport * GRAPH_SHARE).max(px(GRAPH_HEIGHT));
+        }
         self.graph_height = self.graph_height.clamp(px(GRAPH_MIN), max_graph);
         let theme = cx.theme().clone();
         let toolbar = self.render_toolbar(cx);
@@ -4286,6 +4296,7 @@ impl Render for AppState {
                                     MouseButton::Left,
                                     cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                                         this.graph_drag = Some((ev.position.y, this.graph_height));
+                                        this.graph_resized = true;
                                         cx.notify();
                                     }),
                                 ),
@@ -5852,6 +5863,45 @@ mod tests {
             ..test_frame(1, seq, sampled_at(1_000_000_000 * (1 + seq as u64)))
         };
         apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+    }
+
+    #[gpui_kit::test]
+    fn the_bottom_panel_takes_a_share_of_a_tall_window(cx: &mut TestAppContext) {
+        use gpui_kit::{px, size};
+        let (window, app) = open(cx);
+        for seq in 0..2 {
+            add_frame(&app, cx, seq);
+        }
+        let height = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.find("graph-panel").bounds().size.height
+            })
+            .unwrap()
+        };
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            w.click(("pick", 1usize), cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(
+            (height(cx) - px(super::GRAPH_HEIGHT)).abs() < px(8.),
+            "the least"
+        );
+
+        cx.simulate_window_resize(window, size(px(1200.), px(2000.)));
+        cx.run_until_parked();
+        assert!((height(cx) - px(600.)).abs() < px(8.), "30% of 2000 px");
+
+        // Once dragged, the height is yours, whatever the window does.
+        app.update(cx, |app, _| {
+            app.graph_resized = true;
+            app.graph_height = px(400.);
+        });
+        cx.simulate_window_resize(window, size(px(1200.), px(2400.)));
+        cx.run_until_parked();
+        assert!((height(cx) - px(400.)).abs() < px(8.));
     }
 
     #[gpui_kit::test]

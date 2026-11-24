@@ -215,7 +215,8 @@ application menu: copy it to `~/.local/share/applications/` (with
   - Choose the metric (%CPU, VIRT, RES, SHR, %MEM, threads) and the time window (1, 5 or
     10 minutes) at the top of the panel.
   - Hover over the chart to read the values at that moment.
-  - Drag the divider above the panel to resize it.
+  - The panel takes 30% of the window's height (at least 260 px) until you
+    drag the divider above it to resize it.
 - **Logs:** press `L`, or choose the **Logs** tab in the bottom panel, to see
   the host's journal lines (from agents started with `--logs`): time,
   priority (errors red, warnings orange), unit, PID and message, with the
