@@ -185,6 +185,10 @@ application menu: copy it to `~/.local/share/applications/` (with
     named too. A user shows as a number until its name arrives. The static
     musl build of the agent can only see users in `/etc/passwd`.
   - Click a column header to sort, and click it again to reverse.
+  - While you move the row cursor, pick rows or move the pointer over the
+    table, rows keep their places for 3 s, so they don't move out from
+    under you (the status line says *order held*). Figures still update,
+    and new processes go at the end. Choosing a sort shows it at once.
   - Type in the filter box to match command, user or an exact PID.
   - **Tree** groups processes under their parent. Click ▾/▸ to collapse a
     subtree; a collapsed row shows the subtree's total CPU, RES and VIRT.

@@ -80,6 +80,10 @@ const SPEEDS: [f64; 5] = [1., 4., 16., 64., 256.];
 const REPLAY_SLICE: Duration = Duration::from_millis(8);
 /// How often the sidebar is brought up to date for hosts not shown.
 const SIDEBAR_EVERY: Duration = Duration::from_secs(1);
+/// How long the table keeps its row order after you last moved the cursor,
+/// picked a row or moved the pointer over it: re-sorting every second moved
+/// rows out from under the pointer and made ↑/↓ jump about.
+const ORDER_HOLD: Duration = Duration::from_secs(3);
 /// How long a sender whose data was turned away stays on show.
 const REJECTED_RECENT_NS: u64 = 30_000_000_000;
 /// A live host not heard from for this long is dropped, history and all.
@@ -127,6 +131,15 @@ enum SortKey {
     Shr,
     Threads,
     Command,
+}
+
+/// The table's row order, kept while you work in it ([`ORDER_HOLD`]).
+struct HeldOrder {
+    /// The view and host it was taken from; another one isn't held.
+    host: (View, u64),
+    /// Each row's place when the order was taken; rows new since go last.
+    rank: HashMap<ProcKey, usize>,
+    until: std::time::Instant,
 }
 
 struct ReplaySession {
@@ -180,6 +193,8 @@ pub struct AppState {
     selections: HashMap<(View, u64), Selection>,
     /// The highlighted row, moved with ↑/↓ and toggled into the graph with G.
     cursor: Option<ProcKey>,
+    /// The row order kept while you work in the table, if it is.
+    held: Option<HeldOrder>,
     graph_metric: Metric,
     graph_window_s: u64,
     graph_visible: bool,
@@ -298,6 +313,9 @@ impl AppState {
                     if this.live_tick(std::time::Instant::now(), sysmon_ingest::unix_now_ns()) {
                         cx.notify();
                     }
+                    if this.release_order(std::time::Instant::now()) {
+                        cx.notify();
+                    }
                 });
                 if alive.is_err() {
                     break;
@@ -375,6 +393,7 @@ impl AppState {
             selected: None,
             sort: (SortKey::Cpu, true),
             tree: false,
+            held: None,
             hide_kernel: true,
             show_threads: false,
             collapsed: HashMap::new(),
@@ -1441,6 +1460,10 @@ impl AppState {
             !filtering || t.comm.to_lowercase().contains(&needle) || needle_pid == Some(t.key.pid)
         };
         let (key, desc) = self.sort;
+        // Where each row was while the order is held ([`ORDER_HOLD`]).
+        let held_place = self
+            .held_rank()
+            .map(|rank| move |k: &ProcKey| rank.get(k).copied().unwrap_or(usize::MAX));
 
         // Threads by owner, in the current sort order where it applies (PID
         // sorts by TID). Threads have no user or memory of their own (those
@@ -1461,6 +1484,9 @@ impl AppState {
                     let ord = if desc && applies { ord.reverse() } else { ord };
                     ord.then(a.key.pid.cmp(&b.key.pid))
                 });
+                if let Some(place) = &held_place {
+                    list.sort_by_key(|t| place(&t.key));
+                }
             }
         }
         let has_matching_thread: HashSet<u32> = if filtering {
@@ -1528,6 +1554,11 @@ impl AppState {
             let ord = if desc { ord.reverse() } else { ord };
             ord.then(a.key.pid.cmp(&b.key.pid))
         });
+        // While held, rows keep their places (the sort is stable, so new
+        // ones follow in sorted order).
+        if let Some(place) = &held_place {
+            rows.sort_by_key(|r| place(&r.key));
+        }
 
         let mut out = Vec::new();
         if !self.tree {
@@ -1618,6 +1649,9 @@ impl AppState {
             } else {
                 parts.push("threads not reported: start this host's agent with --threads".into());
             }
+        }
+        if self.held_rank().is_some() {
+            parts.push("order held".into());
         }
         match self.selection().filter(|s| !s.is_empty()) {
             Some(sel) => parts.push(format!("{} graphed", sel.len())),
@@ -1838,6 +1872,14 @@ impl AppState {
                 .collect()
         })
         .track_scroll(&self.scroll)
+        // Pointing at a row holds the order, so it's still there to click.
+        .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| {
+            let was = this.held_rank().is_some();
+            this.hold_order(cx);
+            if !was {
+                cx.notify();
+            }
+        }))
         .flex_1();
 
         div()
@@ -1977,6 +2019,7 @@ impl AppState {
         let Some(line) = lines.get(i) else {
             return;
         };
+        self.hold_order(cx);
         self.cursor = Some(line.key());
         let result = if shift {
             let anchor = self
@@ -1999,6 +2042,7 @@ impl AppState {
     }
 
     fn toggle_pick(&mut self, target: SeriesTarget, cx: &mut Context<Self>) {
+        self.hold_order(cx);
         if let Some(r) = self.selection_mut().map(|s| s.toggle(target)) {
             self.report_full(r);
         }
@@ -2014,8 +2058,54 @@ impl AppState {
         cx.notify();
     }
 
+    /// The held row order for the table shown now, if it's still held.
+    fn held_rank(&self) -> Option<&HashMap<ProcKey, usize>> {
+        let host = (self.view, self.selected?);
+        self.held
+            .as_ref()
+            .filter(|h| h.host == host && std::time::Instant::now() < h.until)
+            .map(|h| &h.rank)
+    }
+
+    /// Keep the table's rows where they are now for [`ORDER_HOLD`] more:
+    /// called whenever you work in the table.
+    fn hold_order(&mut self, cx: &App) {
+        let until = std::time::Instant::now() + ORDER_HOLD;
+        if self.held_rank().is_some() {
+            if let Some(h) = &mut self.held {
+                h.until = until;
+            }
+            return;
+        }
+        let (Some(id), Some(host)) = (self.selected, self.current_host()) else {
+            return;
+        };
+        let rank = self
+            .table_lines(host, cx)
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (l.key(), i))
+            .collect();
+        self.held = Some(HeldOrder {
+            host: (self.view, id),
+            rank,
+            until,
+        });
+    }
+
+    /// Let go of a hold that has run out, at `now`; whether there was one
+    /// (so the table re-sorts and the status line stops saying so).
+    fn release_order(&mut self, now: std::time::Instant) -> bool {
+        if self.held.as_ref().is_some_and(|h| now >= h.until) {
+            self.held = None;
+            return true;
+        }
+        false
+    }
+
     /// Move the cursor by `delta` rows in the table's current order.
     fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.hold_order(cx);
         let Some(host) = self.current_host() else {
             return;
         };
@@ -2806,6 +2896,8 @@ impl AppState {
 
     /// Sort by `key`, or flip the direction if already sorted by it.
     fn sort_by(&mut self, key: SortKey, cx: &mut Context<Self>) {
+        // Asked for a new order: show it now.
+        self.held = None;
         self.sort = if self.sort.0 == key {
             (key, !self.sort.1)
         } else {
@@ -3404,6 +3496,7 @@ impl AppState {
     }
 
     fn toggle_tree(&mut self, cx: &mut Context<Self>) {
+        self.held = None;
         self.tree = !self.tree;
         cx.notify();
     }
@@ -5465,6 +5558,75 @@ mod tests {
                 .map(|l| l.key().pid)
                 .collect();
             assert_eq!(tids, [12, 11, 10]);
+        });
+    }
+
+    /// Feed host 1 a sample in which each `(pid, utime)` process has used
+    /// that much CPU time so far; two of them give each a %CPU.
+    fn busy_sample(app: &mut AppState, seq: u32, procs: &[(u32, u64)]) {
+        let procs = procs
+            .iter()
+            .map(|&(pid, utime)| sysmon_proto::ProcSample {
+                pid,
+                ppid: 0,
+                starttime: 0,
+                state: b'S',
+                utime,
+                stime: 0,
+                rss_pages: 1,
+                threads: 1,
+                comm: format!("p{pid}"),
+                vsize_bytes: None,
+                shared_pages: None,
+                kernel_thread: Some(false),
+            })
+            .collect();
+        let frame = sysmon_proto::Frame {
+            procs,
+            ..test_frame(1, seq, sampled_at(1_000_000_000 * (1 + seq as u64)))
+        };
+        apply(&mut app.live_hosts, sysmon_ingest::Event::Frame(frame));
+    }
+
+    #[gpui_kit::test]
+    fn the_row_order_holds_while_you_work_in_the_table(cx: &mut TestAppContext) {
+        let (_window, app) = open(cx);
+        let order = |app: &AppState, cx: &gpui_kit::App| -> Vec<u32> {
+            app.table_lines(&app.live_hosts[&1], cx)
+                .iter()
+                .map(|l| l.key().pid)
+                .collect()
+        };
+        app.update(cx, |app, cx| {
+            // 20 is the busier, so first by %CPU.
+            busy_sample(app, 0, &[(10, 0), (20, 0)]);
+            busy_sample(app, 1, &[(10, 10), (20, 50)]);
+            app.ensure_selection();
+            app.sort = (SortKey::Cpu, true);
+            assert_eq!(order(app, cx), [20, 10]);
+
+            // Moving the cursor holds the order: 10 gets busier, and a new
+            // process shows up, but the rows stay where they were.
+            app.move_cursor(1, cx);
+            busy_sample(app, 2, &[(10, 110), (20, 60), (30, 0)]);
+            assert_eq!(order(app, cx), [20, 10, 30], "held; the new one last");
+            let host = &app.live_hosts[&1];
+            let status = app.status_line(host, &app.table_lines(host, cx), cx);
+            assert!(status.contains("order held"), "{status}");
+
+            // Once it runs out, the table sorts again.
+            let later = std::time::Instant::now() + super::ORDER_HOLD;
+            assert!(app.release_order(later));
+            assert!(!app.release_order(later), "only once");
+            assert_eq!(order(app, cx), [10, 20, 30]);
+
+            // Choosing a sort shows it at once, held or not.
+            app.move_cursor(1, cx);
+            app.sort_by(SortKey::Pid, cx);
+            assert_eq!(app.sort, (SortKey::Pid, false));
+            assert_eq!(order(app, cx), [10, 20, 30]);
+            app.sort_by(SortKey::Pid, cx);
+            assert_eq!(order(app, cx), [30, 20, 10]);
         });
     }
 
