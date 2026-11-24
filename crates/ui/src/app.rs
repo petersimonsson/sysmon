@@ -21,7 +21,7 @@ use gpui_kit::*;
 use sysmon_ingest::Event;
 use sysmon_model::{
     Control, Feed, HISTORY_LEN, HostModel, LogKind, Metric, ProcRow, ReplayHandle, ReplayStatus,
-    SeriesTarget, ThreadRow, TreeLine,
+    SeriesTarget, ThreadRow, TreeLine, tree::Guide,
 };
 use sysmon_proto::ProcKey;
 
@@ -35,6 +35,11 @@ use crate::widgets::{Chosen as _, Highlighted as _, bar, sparkline};
 mod details;
 
 const ROW_HEIGHT: f32 = 20.;
+/// The tree's ▾/▸ column; guide lines run down its middle.
+const TWISTY_W: f32 = 14.;
+/// Where a guide line leaves a ▾: just below the chevron's stroke, which
+/// is centred in the row.
+const TWISTY_STUB_TOP: f32 = ROW_HEIGHT / 2. + 3.;
 /// Widths of the process table's fixed columns, shared by the header and
 /// the rows so they stay lined up.
 /// The graph checkbox: 10 px with 2 px either side.
@@ -1426,7 +1431,6 @@ impl AppState {
             };
             // Threads go first among the children, so the guides drawn for
             // the real children below stay right.
-            let prefix = child_prefix(&t.guides);
             let n = threads.len();
             let thread_lines: Vec<Line> = threads
                 .into_iter()
@@ -1436,7 +1440,7 @@ impl AppState {
                     let tree = TreeLine {
                         row: t.row,
                         depth: t.depth + 1,
-                        guides: format!("{prefix}{}", if last { "└─ " } else { "├─ " }),
+                        guides: sysmon_model::tree::child_guides(&t.guides, last),
                         has_children: false,
                         collapsed: false,
                         matched: true,
@@ -1580,6 +1584,8 @@ impl AppState {
             range
                 .map(|i| {
                     let line = &rows[i];
+                    let depth = |l: &Line| l.tree.as_ref().map(|t| t.depth);
+                    let opens = |i: usize| rows.get(i + 1).and_then(depth) > depth(&rows[i]);
                     let p = &line.row;
                     let th = line.thread.as_ref();
                     // Thread rows are always dim, so only a process's own
@@ -1694,7 +1700,7 @@ impl AppState {
                             format!("{:.1}", p.rss_kib as f32 / mem_total * 100.0)
                         }))
                         .child(proc_cell(THREADS_COL, &|| p.threads.to_string()))
-                        .child(command_cell(line, i, &this, &theme))
+                        .child(command_cell(line, i, opens(i), &this, mono_char, &theme))
                 })
                 .collect()
         })
@@ -3501,15 +3507,44 @@ impl Line {
     }
 }
 
-/// The guide prefix for a tree line's children, from the line's own guides.
-fn child_prefix(guides: &str) -> String {
-    if let Some(p) = guides.strip_suffix("├─ ") {
-        format!("{p}│  ")
-    } else if let Some(p) = guides.strip_suffix("└─ ") {
-        format!("{p}   ")
-    } else {
-        String::new()
+/// Tree guides drawn as 1 px lines, one column three characters wide per
+/// [`Guide`]. A column's vertical runs down the middle of the ▾/▸ of the
+/// ancestor it belongs to, so a parent's line drops from under its arrow.
+/// Each piece reaches the row's top and bottom edges, so they join into
+/// continuous lines from row to row (glyphs are shorter than the row and
+/// left gaps).
+fn tree_guides(guides: &[Guide], char_w: Pixels, color: Hsla) -> Div {
+    // Whole pixels, so the lines stay sharp.
+    let col_w = (char_w * 3.).round();
+    let x = px((TWISTY_W / 2.).floor());
+    let line = |id: (&'static str, usize)| div().id(id).test_support().absolute().bg(color);
+    let mut d = div().flex_none().h_full().flex();
+    for (c, &g) in guides.iter().enumerate() {
+        let col = div().relative().flex_none().w(col_w).h_full();
+        let vertical = |to_middle: bool| {
+            line(("guide-v", c))
+                .left(x)
+                .w(px(1.))
+                .top_0()
+                .when(to_middle, |l| l.h(relative(0.5)))
+                .when(!to_middle, |l| l.bottom_0())
+        };
+        let horizontal = || {
+            // On to the ▾/▸ (or, for a leaf, see `command_cell`).
+            line(("guide-h", c))
+                .left(x)
+                .right_0()
+                .top(relative(0.5))
+                .h(px(1.))
+        };
+        d = d.child(match g {
+            Guide::Blank => col,
+            Guide::Pass => col.child(vertical(false)),
+            Guide::Tee => col.child(vertical(false)).child(horizontal()),
+            Guide::Last => col.child(vertical(true)).child(horizontal()),
+        });
     }
+    d
 }
 
 /// The COMMAND cell: in tree mode, guide lines, a clickable expand/collapse
@@ -3517,10 +3552,15 @@ fn child_prefix(guides: &str) -> String {
 fn command_cell(
     line: &Line,
     i: usize,
+    // The next line is this one's child: its guide line starts here.
+    opens: bool,
     this: &WeakEntity<AppState>,
+    char_w: Pixels,
     theme: &gpui_kit::component::Theme,
 ) -> impl IntoElement + use<> {
     let cell = div()
+        // The row's full height, for the tree guides to reach its edges.
+        .h_full()
         .flex_1()
         .min_w_0()
         .flex()
@@ -3562,7 +3602,8 @@ fn command_cell(
             .id(("twisty", i))
             .test_support()
             .flex_none()
-            .w(px(14.))
+            .w(px(TWISTY_W))
+            .h_full()
             .flex()
             .items_center()
             .cursor_pointer()
@@ -3584,31 +3625,55 @@ fn command_cell(
             .id(("twisty", i))
             .test_support()
             .flex_none()
-            .w(px(14.))
+            .w(px(TWISTY_W))
+            .h_full()
+            // A leaf has no arrow: its connector runs on to the name.
+            .when(!t.guides.is_empty(), |d| {
+                d.child(
+                    div()
+                        .id("guide-leaf")
+                        .test_support()
+                        .absolute()
+                        .left_0()
+                        .right(px(3.))
+                        .top(relative(0.5))
+                        .h(px(1.))
+                        .bg(theme.muted_foreground),
+                )
+            })
     };
-    cell.child(
-        div()
-            .flex_none()
-            .text_color(theme.muted_foreground)
-            .child(t.guides.clone()),
-    )
-    .child(twisty)
-    .child(text)
-    .when(t.collapsed, |d| {
+    // The line to this line's children starts under its arrow.
+    let twisty = twisty.relative().when(opens, |d| {
         d.child(
             div()
-                .flex_none()
-                .ml_2()
-                .text_color(theme.muted_foreground)
-                .child(format!(
-                    "+{} · {:.1}% CPU · RES {} · VIRT {}",
-                    t.hidden,
-                    t.hidden_cpu_pct,
-                    format::bytes(t.hidden_rss_kib as f64 * 1024.0),
-                    format::bytes(t.hidden_virt_kib as f64 * 1024.0)
-                )),
+                .id("guide-stub")
+                .test_support()
+                .absolute()
+                .left(px((TWISTY_W / 2.).floor()))
+                .w(px(1.))
+                .top(px(TWISTY_STUB_TOP))
+                .bottom_0()
+                .bg(theme.muted_foreground),
         )
-    })
+    });
+    cell.child(tree_guides(&t.guides, char_w, theme.muted_foreground))
+        .child(twisty)
+        .child(text)
+        .when(t.collapsed, |d| {
+            d.child(
+                div()
+                    .flex_none()
+                    .ml_2()
+                    .text_color(theme.muted_foreground)
+                    .child(format!(
+                        "+{} · {:.1}% CPU · RES {} · VIRT {}",
+                        t.hidden,
+                        t.hidden_cpu_pct,
+                        format::bytes(t.hidden_rss_kib as f64 * 1024.0),
+                        format::bytes(t.hidden_virt_kib as f64 * 1024.0)
+                    )),
+            )
+        })
 }
 
 /// How many of `cores` per-core bars to put in a row when `fit` fit: as
@@ -4508,6 +4573,68 @@ mod tests {
         assert_eq!(super::size_cell(Some(1 << 20)), "1.0 GiB");
     }
 
+    #[gpui_kit::test]
+    fn tree_guides_join_up_between_rows(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        app.update(cx, |app, cx| app.toggle_tree(cx));
+        // 1 ─┬─ 10 ── 11: 10's line carries on past 11 to its sibling 20.
+        let t = table(&app, cx);
+        let at = |pid| t.iter().position(|(p, _, _)| *p == pid).unwrap();
+        let (ten, eleven) = (at(10), at(11));
+        assert_eq!(eleven, ten + 1);
+        assert_eq!(t[ten].2, "├─ ");
+        assert_eq!(t[eleven].2, "│  └─ ");
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let piece = |w: &mut gpui_kit::Window, row: usize, id: &'static str, col: usize| {
+                w.within(("row", row)).find((id, col)).bounds()
+            };
+            let row_h = px(super::ROW_HEIGHT);
+            let a = piece(w, ten, "guide-v", 0);
+            let b = piece(w, eleven, "guide-v", 0);
+            assert_eq!(a.size.height, row_h, "full height");
+            assert_eq!(a.bottom(), b.origin.y, "no gap between the rows");
+            assert_eq!(a.origin.x, b.origin.x, "one straight line");
+            assert_eq!(b.size.height, row_h);
+            // The last child's line stops at its connector, halfway down.
+            let last = piece(w, eleven, "guide-v", 1);
+            assert_eq!(last.size.height, row_h * 0.5);
+            let arm = piece(w, eleven, "guide-h", 1);
+            assert_eq!(arm.origin.y, last.bottom());
+            assert_eq!(arm.origin.x, last.origin.x);
+
+            // Each line drops from under its parent's arrow: a stub there
+            // runs down to the row's edge, on into the children's column.
+            let stub = |w: &mut gpui_kit::Window, row: usize| {
+                w.within(("row", row)).find("guide-stub").bounds()
+            };
+            let (one, under_one) = (stub(w, at(1)), a);
+            assert_eq!(one.origin.x, under_one.origin.x, "1's line is 10's column");
+            assert_eq!(one.bottom(), under_one.origin.y);
+            let under_ten = stub(w, ten);
+            assert_eq!(
+                under_ten.origin.x, last.origin.x,
+                "10's line is 11's column"
+            );
+            assert_eq!(under_ten.bottom(), last.origin.y);
+            let arrow = w.within(("row", ten)).find(("twisty", ten)).bounds();
+            assert_eq!(
+                under_ten.origin.x,
+                arrow.origin.x + px((super::TWISTY_W / 2.).floor()),
+                "under the middle of the arrow"
+            );
+            assert!(under_ten.origin.y > arrow.center().y, "below the chevron");
+            // A leaf has no arrow, so neither a stub nor a gap: its arm runs
+            // on to the name.
+            assert!(w.within(("row", eleven)).try_find("guide-stub").is_none());
+            let leaf = w.within(("row", eleven)).find("guide-leaf").bounds();
+            assert_eq!(leaf.origin.x, arm.right());
+            assert_eq!(leaf.origin.y, arm.origin.y);
+        })
+        .unwrap();
+    }
+
     /// The table as (key, is-thread, guides) for assertions.
     fn table(app: &Entity<AppState>, cx: &mut TestAppContext) -> Vec<(u32, bool, String)> {
         app.read_with(cx, |app, cx| {
@@ -4520,7 +4647,7 @@ mod tests {
                         l.thread.is_some(),
                         l.tree
                             .as_ref()
-                            .map(|t| t.guides.clone())
+                            .map(|t| sysmon_model::tree::guides_text(&t.guides))
                             .unwrap_or_default(),
                     )
                 })

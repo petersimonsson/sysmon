@@ -6,14 +6,68 @@ use sysmon_proto::ProcKey;
 
 use crate::ProcRow;
 
+/// One column of a tree line's guides, three characters wide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Guide {
+    /// Nothing: the ancestor here was a last child.
+    Blank,
+    /// A line passing by to a later sibling of an ancestor: `│  `.
+    Pass,
+    /// This line, with siblings after it: `├─ `.
+    Tee,
+    /// This line, the last of its siblings: `└─ `.
+    Last,
+}
+
+impl Guide {
+    /// This line's connector, for a child that is or isn't the last.
+    pub fn branch(last: bool) -> Self {
+        if last { Self::Last } else { Self::Tee }
+    }
+
+    /// What this column becomes on the lines below: the line carries on to
+    /// a later sibling, or stops.
+    pub fn below(self) -> Self {
+        match self {
+            Self::Pass | Self::Tee => Self::Pass,
+            Self::Blank | Self::Last => Self::Blank,
+        }
+    }
+
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Blank => "   ",
+            Self::Pass => "│  ",
+            Self::Tee => "├─ ",
+            Self::Last => "└─ ",
+        }
+    }
+}
+
+/// The guides of a child of a line with `guides`, which is or isn't the
+/// last child.
+pub fn child_guides(guides: &[Guide], last: bool) -> Vec<Guide> {
+    guides
+        .iter()
+        .map(|g| g.below())
+        .chain([Guide::branch(last)])
+        .collect()
+}
+
+/// Guides as box-drawing text, e.g. `"│  ├─ "`.
+pub fn guides_text(guides: &[Guide]) -> String {
+    guides.iter().map(|g| g.text()).collect()
+}
+
 /// One visible line of the tree, in display order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TreeLine {
     /// Index into the rows passed to [`build`].
     pub row: usize,
     pub depth: usize,
-    /// Guide drawing for this line, e.g. `"│  ├─ "`. Empty for roots.
-    pub guides: String,
+    /// Guide columns for this line, left to right (see [`guides_text`]).
+    /// Empty for roots.
+    pub guides: Vec<Guide>,
     pub has_children: bool,
     pub collapsed: bool,
     /// Whether this row matched the filter (as opposed to being shown only
@@ -79,10 +133,10 @@ pub fn build(
     }
 
     // Iterative depth-first walk (process trees can be deep).
-    // Stack entries: (row, depth, guides for this line, guides for its children).
+    // Stack entries: (row, depth, guides for this line).
     let mut out = Vec::with_capacity(rows.len());
     let mut visited = vec![false; rows.len()];
-    let mut stack: Vec<(usize, usize, String, String)> = Vec::new();
+    let mut stack: Vec<(usize, usize, Vec<Guide>)> = Vec::new();
     // Roots in order, then anything left unvisited (only possible if the
     // parent links contain a cycle) so no row is ever dropped.
     let mut starts = roots.into_iter().chain(0..rows.len());
@@ -91,9 +145,9 @@ pub fn build(
             starts
                 .by_ref()
                 .find(|&r| shown[r] && !visited[r])
-                .map(|r| (r, 0, String::new(), String::new()))
+                .map(|r| (r, 0, Vec::new()))
         });
-        let Some((i, depth, guides, child_prefix)) = next else {
+        let Some((i, depth, guides)) = next else {
             break;
         };
         if std::mem::replace(&mut visited[i], true) {
@@ -104,7 +158,7 @@ pub fn build(
         let mut line = TreeLine {
             row: i,
             depth,
-            guides,
+            guides: guides.clone(),
             has_children: !kids.is_empty(),
             collapsed: is_collapsed,
             matched: matched[i],
@@ -130,12 +184,7 @@ pub fn build(
         } else {
             for (n, &k) in kids.iter().enumerate().rev() {
                 let last = n + 1 == kids.len();
-                stack.push((
-                    k,
-                    depth + 1,
-                    format!("{child_prefix}{}", if last { "└─ " } else { "├─ " }),
-                    format!("{child_prefix}{}", if last { "   " } else { "│  " }),
-                ));
+                stack.push((k, depth + 1, child_guides(&guides, last)));
             }
         }
         out.push(line);
@@ -169,7 +218,7 @@ mod tests {
     fn render(rows: &[ProcRow], lines: &[TreeLine]) -> Vec<String> {
         lines
             .iter()
-            .map(|l| format!("{}{}", l.guides, rows[l.row].comm))
+            .map(|l| format!("{}{}", guides_text(&l.guides), rows[l.row].comm))
             .collect()
     }
 
@@ -189,6 +238,16 @@ mod tests {
             row(20, 2, 5.0),
             row(50, 999, 6.0),
         ]
+    }
+
+    #[test]
+    fn child_guides_carry_on_or_stop_each_column() {
+        use Guide::*;
+        assert_eq!(child_guides(&[], false), [Tee]);
+        assert_eq!(child_guides(&[Tee], true), [Pass, Last]);
+        assert_eq!(child_guides(&[Last, Tee], false), [Blank, Pass, Tee]);
+        assert_eq!(child_guides(&[Pass, Last], true), [Pass, Blank, Last]);
+        assert_eq!(guides_text(&[Pass, Blank, Tee, Last]), "│     ├─ └─ ");
     }
 
     #[test]
