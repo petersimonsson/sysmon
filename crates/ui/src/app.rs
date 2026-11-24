@@ -86,6 +86,9 @@ pub struct Start {
     pub replay: Option<(ReplayHandle, PathBuf)>,
     /// Where live data is recorded, if it is.
     pub recording_to: Option<PathBuf>,
+    /// Where recordings are kept, recording or not: the Open Recording
+    /// dialog lists what's there.
+    pub data_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -136,6 +139,7 @@ pub struct AppState {
     next_session: u64,
     /// Where live data is recorded, if it is.
     recording_to: Option<PathBuf>,
+    data_dir: PathBuf,
     selected: Option<u64>,
     sort: (SortKey, bool),
     /// Show processes as a tree grouped by parent.
@@ -335,6 +339,7 @@ impl AppState {
             replay: None,
             next_session: 0,
             recording_to: start.recording_to,
+            data_dir: start.data_dir,
             selected: None,
             sort: (SortKey::Cpu, true),
             tree: false,
@@ -3542,6 +3547,7 @@ mod tests {
                 live: None,
                 replay: None,
                 recording_to: Some(std::env::temp_dir()),
+                data_dir: std::env::temp_dir(),
             };
             gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| AppState::new(start, window, cx))
