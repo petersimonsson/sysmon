@@ -3002,6 +3002,11 @@ impl AppState {
             can.check::<ThemeLight>(self.theme == ThemePref::Light);
             can.check::<ThemeDark>(self.theme == ThemePref::Dark);
         }
+        // The view toggles say whether they're on, as their buttons do:
+        // checked means shown.
+        can.check::<ToggleTree>(self.tree);
+        can.check::<ToggleKernelThreads>(!self.hide_kernel);
+        can.check::<ToggleThreads>(self.show_threads);
         can.set::<ShowLive>(self.live_enabled);
         can.set::<ShowRecording>(self.replay.is_some());
         let several_hosts = self.hosts().len() > 1;
@@ -4297,6 +4302,39 @@ mod tests {
             let menu = menus.iter().find(|m| m.name == menu).expect("menu");
             find(&menu.items, name).expect("menu item")
         })
+    }
+
+    #[gpui_kit::test]
+    fn view_toggles_are_checked_in_the_menu_when_on(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        let checked = |cx: &mut TestAppContext, name: &str| {
+            cx.update(|cx| {
+                let menus = gpui_kit::component::GlobalState::global(cx).app_menus();
+                let menu = menus.iter().find(|m| m.name == "Processes").unwrap();
+                menu.items.iter().find_map(|i| match i {
+                    gpui_kit::OwnedMenuItem::Action {
+                        name: n, checked, ..
+                    } if n == name => Some(*checked),
+                    _ => None,
+                })
+            })
+            .expect("menu item")
+        };
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| w.render_frame(cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        draw(cx);
+        assert!(!checked(cx, "Kernel Threads"), "hidden at first");
+        assert!(!checked(cx, "Tree View"));
+        app.update(cx, |app, _| {
+            app.hide_kernel = false;
+            app.tree = true;
+        });
+        draw(cx);
+        assert!(checked(cx, "Kernel Threads"), "checked means shown");
+        assert!(checked(cx, "Tree View"));
     }
 
     #[gpui_kit::test]
