@@ -56,7 +56,10 @@ fn main() -> std::io::Result<()> {
                 let r = &rows[line.row];
                 println!(
                     "{:>7} {:5.1}% {}{}",
-                    r.key.pid, r.cpu_pct, line.guides, r.comm
+                    r.key.pid,
+                    r.cpu_pct,
+                    sysmon_model::tree::guides_text(&line.guides),
+                    r.comm
                 );
             }
         }

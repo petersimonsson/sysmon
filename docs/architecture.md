@@ -547,7 +547,10 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
     text has the full text as a tooltip and accessible description;
   - a **Tree** toggle that groups processes under their parent
     (`sysmon_model::tree::build`). Siblings follow the current sort, guide
-    lines show the structure, and ▾/▸ collapse a subtree. A collapsed row
+    lines show the structure (a `Guide` per column, drawn as 1 px lines that
+    reach each row's edges so they join up, where box-drawing glyphs left
+    gaps; each parent's line drops from under its ▾, and a leaf's arm runs
+    on to its name), and ▾/▸ collapse a subtree. A collapsed row
     shows how many descendants it hides and their summed CPU and memory.
     When filtering, matches are shown with their ancestors (dimmed) so they
     keep their place. Expand all / Collapse all act on the selected host;
