@@ -7110,12 +7110,19 @@ mod tests {
         step(cx, &|w, cx| w.click("details-parent", cx));
         app.read_with(cx, |a, _| assert_eq!(a.cursor, Some(key(10))));
         // Graph it, and take it out again.
-        step(cx, &|w, cx| w.click("details-graph", cx));
+        step(cx, &|w, cx| {
+            assert!(w.try_find("details-graph-color").is_none());
+            w.click("details-graph", cx)
+        });
         app.read_with(cx, |a, _| {
             assert_eq!(picked(a), [SeriesTarget::Process(key(10))]);
             assert_eq!(a.panel, Panel::Details, "stays on Details");
         });
-        step(cx, &|w, cx| w.click("details-graph", cx));
+        // It says so, in its line's colour.
+        step(cx, &|w, cx| {
+            assert!(w.try_find("details-graph-color").is_some());
+            w.click("details-graph", cx)
+        });
         app.read_with(cx, |a, _| assert!(picked(a).is_empty()));
     }
 
