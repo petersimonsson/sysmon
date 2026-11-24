@@ -130,13 +130,7 @@ fn key_list(item: &Item) -> Option<Vec<String>> {
 /// needed and keeping everything else in it. Written to a temporary file
 /// first and renamed into place, so a crash can't leave half a file.
 pub fn save_theme(path: &Path, theme: ThemePref) -> std::io::Result<()> {
-    let mut doc: DocumentMut = match std::fs::read_to_string(path) {
-        Ok(t) => t
-            .parse()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
-        Err(e) => return Err(e),
-    };
+    let mut doc = read_doc(path)?;
     let ui = doc
         .entry("ui")
         .or_insert_with(|| Item::Table(Table::new()))
@@ -148,6 +142,67 @@ pub fn save_theme(path: &Path, theme: ThemePref) -> std::io::Result<()> {
             )
         })?;
     ui.insert("theme", value(theme.as_str()));
+    write_doc(path, &doc)
+}
+
+/// Write `[keys]` entries to the file at `path`, keeping everything else
+/// in it (comments, other settings, entries for actions not given). Each
+/// entry is an action's name and its keys, or `None` to remove the action's
+/// entry (it's back to its defaults). An empty `[keys]` is removed.
+pub fn save_keys(path: &Path, entries: &[(String, Option<Vec<String>>)]) -> std::io::Result<()> {
+    let mut doc = read_doc(path)?;
+    let keys = doc
+        .entry("keys")
+        .or_insert_with(|| Item::Table(Table::new()))
+        .as_table_like_mut()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "`keys` in the config isn't a table",
+            )
+        })?;
+    for (name, list) in entries {
+        match list {
+            Some(list) => {
+                let array: toml_edit::Array = list.iter().map(String::as_str).collect();
+                // Keep the comment after an entry being changed.
+                match keys.get_mut(name).and_then(Item::as_value_mut) {
+                    Some(old) => {
+                        let decor = old.decor().clone();
+                        *old = toml_edit::Value::Array(array);
+                        *old.decor_mut() = decor;
+                    }
+                    None => {
+                        keys.insert(name, value(array));
+                    }
+                }
+            }
+            None => {
+                keys.remove(name);
+            }
+        }
+    }
+    if keys.is_empty() {
+        doc.remove("keys");
+    }
+    write_doc(path, &doc)
+}
+
+/// The file at `path` to edit; an empty one if there's none yet. One that
+/// can't be parsed is an error, so it's never overwritten.
+fn read_doc(path: &Path) -> std::io::Result<DocumentMut> {
+    match std::fs::read_to_string(path) {
+        Ok(t) => t
+            .parse()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DocumentMut::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Write `doc` to `path` (and its directory), through a temporary file
+/// renamed into place, so a crash can't leave half a file.
+fn write_doc(path: &Path, doc: &DocumentMut) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -159,6 +214,60 @@ pub fn save_theme(path: &Path, theme: ThemePref) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_keys_changes_only_the_entries_given() {
+        let path = tmp("save-keys");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let before = "# mine\n[ui]\ntheme = \"dark\"\n\n[keys]\n\
+                      toggle_graph = \"x\" # my x\ntoggel_tree = \"t\"\nquit = \"ctrl-w\"\n";
+        std::fs::write(&path, before).unwrap();
+        save_keys(
+            &path,
+            &[
+                (
+                    "toggle_graph".into(),
+                    Some(vec!["y".into(), "ctrl-y".into()]),
+                ),
+                ("quit".into(), None),
+                ("about".into(), Some(vec![])),
+            ],
+        )
+        .unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("# mine"), "{after}");
+        assert!(after.contains("theme = \"dark\""), "{after}");
+        assert!(
+            after.contains("toggle_graph = [\"y\", \"ctrl-y\"] # my x"),
+            "{after}"
+        );
+        assert!(
+            after.contains("toggel_tree = \"t\""),
+            "unknown entries stay: {after}"
+        );
+        assert!(!after.contains("quit"), "back to its defaults: {after}");
+        assert!(after.contains("about = []"), "{after}");
+        let (config, _) = load(&path);
+        assert_eq!(config.keys.len(), 3);
+
+        // Nothing left: no [keys] at all.
+        save_keys(
+            &path,
+            &[
+                ("toggle_graph".into(), None),
+                ("toggel_tree".into(), None),
+                ("about".into(), None),
+            ],
+        )
+        .unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("[keys]"));
+
+        // A file it can't parse is left alone.
+        std::fs::write(&path, "[keys\n").unwrap();
+        assert!(save_keys(&path, &[("about".into(), None)]).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[keys\n");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
 
     #[test]
     fn keys_are_read_in_file_order() {

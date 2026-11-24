@@ -2272,6 +2272,71 @@ impl AppState {
         }
     }
 
+    /// Show `text` in the error strip (until dismissed).
+    pub(crate) fn set_error(&mut self, text: String) {
+        self.error = Some(text);
+    }
+
+    /// Settings → Keyboard Shortcuts…: the shortcut editor, on the keys in
+    /// effect. Save there puts its keys in effect and in the settings.
+    fn open_shortcuts_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_shortcuts = false;
+        let app = cx.entity().downgrade();
+        let save_to = self.config_path.clone();
+        let view = cx.new(|cx| {
+            let keymap = cx.global::<crate::keymap::Keymap>();
+            // Built from a copy: `new` borrows the context mutably.
+            let keymap = crate::keymap::Keymap::from_draft(keymap.draft());
+            crate::shortcuts::ShortcutsView::new(app, &keymap, save_to, window, cx)
+        });
+        let focus = self.focus.clone();
+        let shown = view.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let view = shown.clone();
+            let (enter, reset, save) = (view.clone(), view.clone(), view.clone());
+            let focus = focus.clone();
+            dialog
+                .title("Keyboard shortcuts")
+                .w(px(900.))
+                .child(view)
+                // Enter: add a key to the action picked; the dialog stays.
+                .on_ok(move |_, _, cx| {
+                    enter.update(cx, |v, cx| v.start_recording_selected(cx));
+                    false
+                })
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("shortcuts-reset-all")
+                                .label("Reset all")
+                                .tooltip("Every action back to its default keys")
+                                .on_click(move |_, _, cx| {
+                                    reset.update(cx, |v, cx| v.reset_all(cx));
+                                }),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("shortcuts-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("shortcuts-save")
+                                .label("Save")
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    save.update(cx, |v, cx| v.save(window, cx));
+                                }),
+                        ),
+                )
+                // Give the keyboard back to the app's shortcuts.
+                .on_close(move |_, window, cx| focus.focus(window, cx))
+        });
+        let filter = view.read(cx).filter().clone();
+        filter.update(cx, |f, cx| f.focus(window, cx));
+        cx.notify();
+    }
+
     fn open_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // The dialog's builder can run again; the view is created once here.
         let view = cx.new(|cx| crate::about::AboutView::new(window, cx));
@@ -3022,6 +3087,7 @@ impl AppState {
             TypeId::of::<ToggleShortcuts>(),
             TypeId::of::<Dismiss>(),
             TypeId::of::<About>(),
+            TypeId::of::<EditShortcuts>(),
             TypeId::of::<ThemeSystem>(),
             TypeId::of::<ThemeLight>(),
             TypeId::of::<ThemeDark>(),
@@ -3147,6 +3213,17 @@ impl AppState {
     }
 
     /// Bring [`Self::available`] up to date, and the menus with it.
+    /// Put `keymap` in effect (from the shortcut editor), and show it:
+    /// the menus are rebuilt, as they print keys, and the window redrawn
+    /// for the shortcuts list and hints.
+    pub(crate) fn apply_keymap(&mut self, keymap: crate::keymap::Keymap, cx: &mut Context<Self>) {
+        crate::keymap::apply(cx, keymap);
+        // Forget what the menus were built for, so they're built again.
+        self.available = actions::Available::default();
+        self.refresh_available(cx);
+        cx.notify();
+    }
+
     fn refresh_available(&mut self, cx: &mut Context<Self>) {
         let now = self.compute_available();
         if now == self.available {
@@ -3300,6 +3377,12 @@ impl AppState {
             .on_available(
                 can,
                 cx.listener(|this, _: &About, window, cx| this.open_about(window, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &EditShortcuts, window, cx| {
+                    this.open_shortcuts_editor(window, cx)
+                }),
             )
             .on_available(
                 can,
@@ -3547,16 +3630,31 @@ impl AppState {
                             .clone()
                             .unwrap_or_else(crate::config::default_path);
                         let text = format!(
-                            "Change keys under [keys] in {} (sysmon-ui --print-keys lists them all).",
+                            "Change them in Settings → Keyboard Shortcuts…, or under [keys] in {}.",
                             crate::recordings::home_relative(&path)
                         );
                         div()
-                            .id("shortcuts-settings")
-                            .test_support()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .aria_description(text.clone())
-                            .child(text)
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .id("shortcuts-settings")
+                                    .test_support()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .aria_description(text.clone())
+                                    .child(text),
+                            )
+                            .child(
+                                Button::new("shortcuts-edit")
+                                    .label("Edit…")
+                                    .small()
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.open_shortcuts_editor(window, cx);
+                                    })),
+                            )
                     }),
             )
     }
@@ -4473,6 +4571,241 @@ mod tests {
                 keymap.label::<crate::actions::ToggleGraph>().as_deref(),
                 Some("x")
             );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn keys_can_change_while_running(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        add_host(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        let (keymap, problems) =
+            crate::keymap::Keymap::resolve(&[("toggle_graph".into(), vec!["x".into()])]);
+        assert!(problems.is_empty());
+        app.update(cx, |app, cx| app.apply_keymap(keymap, cx));
+        step(cx, &|w, cx| {
+            w.press("down", cx);
+            w.press("g", cx);
+        });
+        app.read_with(cx, |app, _| assert!(picked(app).is_empty(), "g is off"));
+        step(cx, &|w, cx| w.press("x", cx));
+        app.read_with(cx, |app, _| assert_eq!(picked(app).len(), 1, "x graphs"));
+        // gpui-kit's own keys survive: typing and Backspace in the filter.
+        step(cx, &|w, cx| {
+            w.press("ctrl-f", cx);
+            w.press("a", cx);
+            w.press("b", cx);
+            w.press("backspace", cx);
+        });
+        let typed = app.read_with(cx, |a, cx| a.filter.read(cx).value().to_string());
+        assert_eq!(typed, "a");
+        // And again, back to the defaults.
+        app.update(cx, |app, cx| {
+            app.apply_keymap(crate::keymap::Keymap::defaults(), cx)
+        });
+        step(cx, &|w, cx| {
+            w.press("escape", cx);
+            w.press("escape", cx);
+            w.press("g", cx);
+        });
+        app.read_with(cx, |app, _| {
+            assert!(picked(app).is_empty(), "g ungraphs again")
+        });
+    }
+
+    fn row_of(name: &str) -> usize {
+        crate::actions::SHORTCUTS
+            .iter()
+            .position(|s| s.name() == name)
+            .expect("action")
+    }
+
+    #[gpui_kit::test]
+    fn the_shortcut_editor_takes_a_key_from_another_action_and_saves(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("sysmon-keys-ui-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("config.toml");
+        let (window, app) = open_with(cx, |s| s.config_path = Some(path.clone()));
+        add_host(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        let (graph, tree) = (row_of("toggle_graph"), row_of("toggle_tree"));
+        step(cx, &|w, cx| {
+            w.dispatch_action(Box::new(crate::actions::EditShortcuts), cx)
+        });
+        // The filter has the keyboard: narrow the list down.
+        step(cx, &|w, cx| w.input("graph the row", cx));
+        // Add t to "Graph the row": t is the tree's, so it asks.
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("shortcuts-editor").is_some(), "open");
+            w.click(("shortcut-add", graph), cx);
+        });
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            assert!(
+                w.try_find(("shortcut-recording", graph)).is_some(),
+                "waiting"
+            );
+            w.press("t", cx);
+        });
+        app.read_with(cx, |app, _| assert!(!app.tree, "t was caught, not run"));
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            let found = w.find(("shortcut-conflict", graph));
+            let asked = found.description().unwrap_or_default().to_string();
+            assert!(asked.starts_with("t is used by"), "{asked}");
+            w.click("conflict-take", cx);
+        });
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            assert!(
+                w.try_find(gpui_kit::SharedString::from(format!("key-{graph}-t")))
+                    .is_some()
+            );
+            assert!(
+                w.try_find(gpui_kit::SharedString::from(format!("key-{tree}-t")))
+                    .is_none()
+            );
+            w.click("shortcuts-save", cx);
+        });
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("shortcuts-editor").is_none(), "Save closes it");
+        });
+        // In effect: t graphs the cursor row, and the tree has no key.
+        step(cx, &|w, cx| {
+            w.press("down", cx);
+            w.press("t", cx);
+        });
+        app.read_with(cx, |app, _| {
+            assert_eq!(picked(app).len(), 1, "t graphs");
+            assert!(!app.tree);
+            assert!(app.error.is_none(), "{:?}", app.error);
+        });
+        // And saved.
+        let (config, _) = crate::config::load(&path);
+        let get = |n: &str| {
+            config
+                .keys
+                .iter()
+                .find(|(k, _)| k == n)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("toggle_graph"), Some(vec!["g".into(), "t".into()]));
+        assert_eq!(get("toggle_tree"), Some(vec![]));
+        assert_eq!(config.keys.len(), 2, "{:?}", config.keys);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
+    fn the_shortcuts_list_opens_the_editor(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        // Tall enough for the whole list (a short one scrolls).
+        cx.simulate_window_resize(
+            window,
+            gpui_kit::size(gpui_kit::px(1200.), gpui_kit::px(1400.)),
+        );
+        cx.update_window(window, |_, w, cx| w.press("f1", cx))
+            .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            w.click("shortcuts-edit", cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("shortcuts-editor").is_some(), "editor open");
+        })
+        .unwrap();
+        app.read_with(cx, |app, _| assert!(!app.show_shortcuts, "list closed"));
+    }
+
+    #[gpui_kit::test]
+    fn the_shortcut_editor_gives_up_cancels_and_resets(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        let graph = row_of("toggle_graph");
+        step(cx, &|w, cx| {
+            w.dispatch_action(Box::new(crate::actions::EditShortcuts), cx)
+        });
+        step(cx, &|w, cx| w.input("graph the row", cx));
+        // Esc while waiting for a key only stops waiting.
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            w.click(("shortcut-add", graph), cx);
+        });
+        step(cx, &|w, cx| w.press("escape", cx));
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("shortcuts-editor").is_some(), "still open");
+            assert!(w.try_find(("shortcut-recording", graph)).is_none());
+            // Remove g, then Cancel: nothing changes.
+            w.click(
+                gpui_kit::SharedString::from(format!("key-remove-{graph}-g")),
+                cx,
+            );
+        });
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            assert!(
+                w.try_find(gpui_kit::SharedString::from(format!("key-{graph}-g")))
+                    .is_none()
+            );
+            w.click("shortcuts-cancel", cx);
+        });
+        cx.update(|cx| {
+            let keymap = cx.global::<crate::keymap::Keymap>();
+            assert_eq!(
+                keymap.keys::<crate::actions::ToggleGraph>(),
+                ["g"],
+                "cancelled"
+            );
+        });
+        // Reset all brings back a removed key; Save with no config file
+        // still puts the keys in effect, and says they weren't saved.
+        step(cx, &|w, cx| {
+            w.dispatch_action(Box::new(crate::actions::EditShortcuts), cx)
+        });
+        step(cx, &|w, cx| w.input("graph the row", cx));
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            w.click(
+                gpui_kit::SharedString::from(format!("key-remove-{graph}-g")),
+                cx,
+            );
+        });
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            w.click("shortcuts-reset-all", cx);
+        });
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            assert!(
+                w.try_find(gpui_kit::SharedString::from(format!("key-{graph}-g")))
+                    .is_some()
+            );
+            w.click("shortcuts-save", cx);
+        });
+        app.read_with(cx, |app, _| {
+            let e = app.error.clone().unwrap_or_default();
+            assert!(e.contains("until you quit"), "{e}");
         });
     }
 

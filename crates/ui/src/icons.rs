@@ -33,8 +33,9 @@ icon_set!(
     Play,
     Pause,
     RotateCcw,
-    // Close and remove.
+    // Close and remove, and add.
     X,
+    Plus,
     // Bottom panel tabs.
     ChartLine,
     ScrollText,

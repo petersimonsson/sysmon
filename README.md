@@ -289,8 +289,8 @@ setting; the default), **Light** or **Dark**. The choice is saved to
 theme = "system"   # "system", "light" or "dark"
 ```
 
-The same file can set your own keyboard shortcuts: see
-[Changing keys](#changing-keys).
+**Settings → Keyboard Shortcuts…** changes the keys; they're saved in the
+same file: see [Changing keys](#changing-keys).
 
 You can also edit the file by hand. Saving changes only the keys it sets,
 so your comments stay. If the file can't be parsed, sysmon uses the
@@ -324,8 +324,21 @@ Single-letter shortcuts are turned off while you type in the filter.
 
 #### Changing keys
 
-Set your own keys under `[keys]` in the settings file. Each action is named
-in snake_case, and the keys you give it replace its defaults:
+**Settings → Keyboard Shortcuts…** (or **Edit…** in the F1 list) lists every
+action with its keys:
+
+- Click **+** (or pick a row with ↑/↓ and press Enter), then press the new
+  key. Esc gives up. The key you press is caught before it does anything.
+- If another action has that key, it asks first: **Use it here** moves it.
+- **×** on a key removes it (Delete removes the selected row's last one);
+  **Reset** puts a row back to its defaults, **Reset all** every row.
+- Type in the filter to find an action by what it does, or by a key.
+- **Save** puts the keys in effect at once and writes them to the settings
+  file; **Cancel** or Esc leaves everything as it was.
+
+The dialog writes them under `[keys]` in the settings file, which you can
+also edit by hand. Each action is named in snake_case, and the keys you give
+it replace its defaults:
 
 ```toml
 [keys]
@@ -350,8 +363,8 @@ menus write it, works too; a capital letter on its own means Shift).
 - Anything sysmon can't use (an action it doesn't know, a key that isn't
   one, a clash) is skipped; the first problem is shown in the window when it
   starts, and all of them in the log.
-- Changes take effect the next time sysmon starts. Mouse actions can't be
-  changed.
+- Changes made in the file take effect the next time sysmon starts; ones
+  made in the dialog at once. Mouse actions can't be changed.
 
 ## Command-line tools
 

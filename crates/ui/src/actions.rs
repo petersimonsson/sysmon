@@ -55,6 +55,7 @@ actions!(
         GraphThreads,
         CycleGraphWindow,
         About,
+        EditShortcuts,
         ToggleKernelThreads,
         ToggleThreads,
         ToggleLogs,
@@ -234,6 +235,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     ),
     shortcut!("Playback (recordings)", ["home"], SeekStart, "Go to start"),
     shortcut!("Playback (recordings)", ["end"], SeekEnd, "Go to end"),
+    shortcut!("Settings", [], EditShortcuts, "Change keyboard shortcuts"),
     shortcut!("Settings", [], ThemeSystem, "Theme: as the system"),
     shortcut!("Settings", [], ThemeLight, "Theme: light"),
     shortcut!("Settings", [], ThemeDark, "Theme: dark"),
@@ -405,11 +407,15 @@ fn menus(available: &Available) -> Vec<Menu> {
             action!("Go to Start", SeekStart),
             action!("Go to End", SeekEnd),
         ]),
-        Menu::new("Settings").items([MenuItem::submenu(Menu::new("Theme").items([
-            action!("System", ThemeSystem),
-            action!("Light", ThemeLight),
-            action!("Dark", ThemeDark),
-        ]))]),
+        Menu::new("Settings").items([
+            action!("Keyboard Shortcuts…", EditShortcuts),
+            MenuItem::separator(),
+            MenuItem::submenu(Menu::new("Theme").items([
+                action!("System", ThemeSystem),
+                action!("Light", ThemeLight),
+                action!("Dark", ThemeDark),
+            ])),
+        ]),
         Menu::new("Help").items([
             action!("Keyboard Shortcuts", ToggleShortcuts),
             MenuItem::separator(),
