@@ -3,10 +3,11 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use sysmon_ingest::{Event, RawDatagram, Sinks};
+use sysmon_ingest::{Event, RawDatagram, Rejections, Sinks};
 use sysmon_model::{ReplayHandle, ReplaySource};
 use sysmon_store::{Recorder, Retention};
 
@@ -37,11 +38,22 @@ impl RecorderHandle {
     }
 }
 
+/// What the UI gets from a running receiver.
+pub struct Live {
+    pub events: flume::Receiver<Event>,
+    /// The address it listens on, to tell agents where to send.
+    pub listen: SocketAddr,
+    /// Whether it only accepts data encrypted with a key.
+    pub keyed: bool,
+    /// Datagrams it turned away, to say why an agent isn't showing up.
+    pub rejections: Arc<Rejections>,
+}
+
 pub fn start_live(
     listen: SocketAddr,
     opener: sysmon_proto::Opener,
     recording: Option<Recording>,
-) -> anyhow::Result<(flume::Receiver<Event>, Option<RecorderHandle>)> {
+) -> anyhow::Result<(Live, Option<RecorderHandle>)> {
     let (events_tx, events_rx) = flume::bounded(EVENT_QUEUE);
     let (raw, handle) = match recording {
         Some(rec) => {
@@ -54,16 +66,25 @@ pub fn start_live(
         }
         None => (None, None),
     };
+    let rejections = Arc::new(Rejections::default());
+    let keyed = opener.has_key();
     sysmon_ingest::spawn(
         listen,
         opener,
         Sinks {
             events: events_tx,
             raw,
+            rejections: rejections.clone(),
         },
     )
     .with_context(|| format!("listening on {listen}"))?;
-    Ok((events_rx, handle))
+    let live = Live {
+        events: events_rx,
+        listen,
+        keyed,
+        rejections,
+    };
+    Ok((live, handle))
 }
 
 fn record(
@@ -170,7 +191,7 @@ mod tests {
         addr: SocketAddr,
         agent: UdpSocket,
         recorder: RecorderHandle,
-        _events: flume::Receiver<Event>,
+        _live: super::Live,
     }
 
     impl Rig {
@@ -182,7 +203,7 @@ mod tests {
                 .unwrap()
                 .local_addr()
                 .unwrap();
-            let (events, recorder) = start_live(
+            let (live, recorder) = start_live(
                 addr,
                 sysmon_proto::Opener::new(None),
                 Some(Recording {
@@ -196,7 +217,7 @@ mod tests {
                 addr,
                 agent: UdpSocket::bind("127.0.0.1:0").unwrap(),
                 recorder: recorder.unwrap(),
-                _events: events,
+                _live: live,
             }
         }
 

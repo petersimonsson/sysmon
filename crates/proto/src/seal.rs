@@ -159,6 +159,11 @@ impl Opener {
         }
     }
 
+    /// Whether it only accepts encrypted datagrams.
+    pub fn has_key(&self) -> bool {
+        self.cipher.is_some()
+    }
+
     /// Return the datagram with encryption removed (it may still be
     /// compressed; [`crate::decode`] handles that). This is what gets recorded.
     pub fn open<'a>(&self, buf: &'a [u8]) -> Result<Cow<'a, [u8]>> {

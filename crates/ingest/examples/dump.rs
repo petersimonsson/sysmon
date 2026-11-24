@@ -18,6 +18,7 @@ fn main() -> anyhow::Result<()> {
         sysmon_ingest::Sinks {
             events: tx,
             raw: None,
+            rejections: Default::default(),
         },
     )?;
     for event in rx {
