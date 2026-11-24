@@ -164,9 +164,10 @@ application menu: copy it to `~/.local/share/applications/` (with
   missing or different key, or an agent newer than the monitor), it says
   from where and why; once other hosts are showing, a banner above them
   keeps saying so.
-- **Sidebar:** one entry per host, by name. The dot turns red when the
-  monitor hasn't heard from a host for three intervals; a host silent for
-  an hour is dropped. Click a host to show it.
+- **Sidebar:** one entry per host, by name, with bars for its CPU and
+  memory use. The dot turns red when the monitor hasn't heard from a host
+  for three intervals (and the bars go, as they'd be out of date); a host
+  silent for an hour is dropped. Click a host to show it.
 - **Header:** CPU, memory, network and disk for the selected host, each with
   a short history graph, plus a bar for every core. The network graph shows
   receive (blue) and transmit (orange), the disk graph read (blue) and
