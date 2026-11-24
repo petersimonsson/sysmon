@@ -607,7 +607,90 @@ impl AppState {
         }
     }
 
-    fn open_recording(&mut self, cx: &mut Context<Self>) {
+    /// The Open Recording dialog, listing what the data directory holds.
+    fn open_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let app = cx.entity().downgrade();
+        let on_open: crate::recordings::OnOpen = Rc::new(move |path, window, cx| {
+            window.close_dialog(cx);
+
+            let _ = app.update(cx, |app, cx| app.open_path(path, cx));
+        });
+        let live = self.recording_to.as_ref() == Some(&self.data_dir);
+        let dir = self.data_dir.clone();
+        // The dialog's builder can run again; the view is created once here.
+        let view =
+            cx.new(|cx| crate::recordings::RecordingsView::new(dir, live, on_open, window, cx));
+        let focus = self.focus.clone();
+        let app = cx.entity().downgrade();
+        let shown = view.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let view = shown.clone();
+            let focus = focus.clone();
+            let (open, confirm, all) = (view.clone(), view.clone(), view.clone());
+            let (browse, app) = (app.clone(), app.clone());
+            dialog
+                .title("Open recording")
+                .w(px(860.))
+                .child(view.clone())
+                // Enter: open the picked row, which closes the dialog itself.
+                .on_ok(move |_, window, cx| {
+                    crate::recordings::RecordingsView::open(&confirm, window, cx);
+                    false
+                })
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("recordings-browse")
+                                .icon(icon(IconName::FolderOpen))
+                                .label("Browse…")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let _ = browse.update(cx, |app, cx| app.browse_recording(cx));
+                                }),
+                        )
+                        .child(
+                            Button::new("recordings-all")
+                                .label("Open all")
+                                .tooltip("Every machine and boot in the data directory")
+                                .on_click(move |_, window, cx| {
+                                    let dir = all.read(cx).dir().to_path_buf();
+                                    window.close_dialog(cx);
+                                    let _ = app.update(cx, |app, cx| app.open_path(dir, cx));
+                                }),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("recordings-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("recordings-open")
+                                .label("Open")
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    crate::recordings::RecordingsView::open(&open, window, cx)
+                                }),
+                        ),
+                )
+                // Give the keyboard back to the app's shortcuts.
+                .on_close(move |_, window, cx| focus.focus(window, cx))
+        });
+        let filter = view.read(cx).filter().clone();
+        filter.update(cx, |f, cx| f.focus(window, cx));
+    }
+
+    fn on_open_recording(
+        &mut self,
+        _: &OpenRecording,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_recording(window, cx);
+    }
+
+    /// The system's file picker, for a recording outside the data directory.
+    fn browse_recording(&mut self, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: true,
@@ -780,7 +863,7 @@ impl AppState {
                     .label("Open recording…")
                     .small()
                     .ghost()
-                    .on_click(cx.listener(|this, _, _, cx| this.open_recording(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.open_recording(window, cx))),
             )
             // Where live data goes; nothing in a recording, whose own path
             // is beside the Recording button (the data directory beside it
@@ -2639,7 +2722,7 @@ impl AppState {
 
     /// Hook every action up to the root element.
     fn actions(&self, root: Div, cx: &mut Context<Self>) -> Div {
-        root.on_action(cx.listener(|this, _: &OpenRecording, _, cx| this.open_recording(cx)))
+        root.on_action(cx.listener(Self::on_open_recording))
             .on_action(cx.listener(|this, _: &ShowLive, _, cx| this.show(View::Live, cx)))
             .on_action(cx.listener(|this, _: &ShowRecording, _, cx| this.show(View::Replay, cx)))
             .on_action(cx.listener(|this, _: &NextHost, _, cx| this.step_host(true, cx)))
@@ -5080,6 +5163,123 @@ mod tests {
         assert_eq!(driver.controls.try_recv().ok(), Some(Control::SetSpeed(4.)));
     }
 
+    /// Opens the recording for real (in the background), but plays it with
+    /// a handle driven by hand rather than an engine thread.
+    fn open_without_engine(path: &std::path::Path, _speed: f64) -> anyhow::Result<ReplayHandle> {
+        let source = sysmon_model::ReplaySource::open(path)?;
+        let (start, end) = source
+            .time_range()
+            .ok_or_else(|| anyhow::anyhow!("no recorded data under {}", path.display()))?;
+        let (handle, driver) = ReplayHandle::manual(ReplayStatus {
+            start_ns: start,
+            end_ns: end,
+            position_ns: start,
+            ..Default::default()
+        });
+        // Nothing is fed: the session's feed just ends.
+        drop(driver);
+        Ok(handle)
+    }
+
+    #[gpui_kit::test]
+    fn the_open_dialog_lists_machines_and_boots(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("sysmon-ui-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut rec = sysmon_store::Recorder::new(&dir);
+        let now = sysmon_ingest::unix_now_ns();
+        let sec = 1_000_000_000u64;
+        // web1 (host 1) recorded a minute ago, db1 (host 2) an hour ago.
+        for (host, name, at) in [(1u64, "web1", now - 60 * sec), (2, "db1", now - 3600 * sec)] {
+            let header = sysmon_proto::Header {
+                host_id: host,
+                boot_id: 7,
+                seq: 0,
+                chunk: 0,
+                chunks: 1,
+            };
+            let info = sysmon_proto::HostInfo {
+                hostname: name.into(),
+                kernel: "6.0".into(),
+                cpu_count: 1,
+                mem_total_kib: 1,
+                clk_tck: 100,
+                page_size: 4096,
+                interval_ms: 1000,
+                sends_threads: false,
+            };
+            let d = sysmon_proto::encode(&header, &sysmon_proto::Msg::HostInfo(info)).unwrap();
+            for s in 0..3 {
+                rec.append(host, 7, at + s * sec, &d).unwrap();
+            }
+        }
+        rec.flush().unwrap();
+        drop(rec);
+
+        let (window, app) = open(cx);
+        app.update(cx, |app, _| {
+            app.open_replay = open_without_engine;
+            app.data_dir = dir.clone();
+            app.recording_to = Some(dir.clone());
+        });
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        step(cx, &|window, cx| {
+            window.dispatch_action(Box::new(crate::actions::OpenRecording), cx)
+        });
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("recordings").is_some(), "dialog open");
+            // web1, its boot, db1, its boot: newest machine first.
+            for i in 0..4usize {
+                assert!(window.try_find(("recording-row", i)).is_some(), "row {i}");
+            }
+            assert!(window.try_find(("recording-row", 4usize)).is_none());
+            assert!(window.try_find(("recording-span", 1usize)).is_some());
+            assert!(
+                window.try_find(("recording-live", 1usize)).is_some(),
+                "web1 is still being recorded"
+            );
+            assert!(window.try_find(("recording-live", 3usize)).is_none());
+        });
+        // The newest boot is picked; the keys move through the rows.
+        step(cx, &|window, cx| window.press("down", cx));
+        step(cx, &|window, cx| window.press("down", cx));
+        step(cx, &|window, cx| window.press("up", cx));
+        step(cx, &|window, cx| window.press("enter", cx));
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("recordings").is_none(),
+                "Enter opens and closes"
+            );
+        });
+        app.read_with(cx, |app, _| {
+            let s = app.replay.as_ref().expect("a recording is open");
+            assert_eq!(
+                s.label,
+                dir.join(format!("{:016x}", 2)).display().to_string(),
+                "db1, all boots"
+            );
+        });
+
+        // Cancel closes without opening; keyboard shortcuts work again.
+        step(cx, &|window, cx| {
+            window.dispatch_action(Box::new(crate::actions::OpenRecording), cx)
+        });
+        step(cx, &|window, cx| window.click("recordings-cancel", cx));
+        step(cx, &|window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("recordings").is_none());
+        });
+        step(cx, &|window, cx| window.press("t", cx));
+        app.read_with(cx, |app, _| assert!(app.tree));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[gpui_kit::test]
     fn recordings_open_in_the_background(cx: &mut TestAppContext) {
         let dir = std::env::temp_dir().join(format!("sysmon-ui-open-{}", std::process::id()));
@@ -5100,26 +5300,6 @@ mod tests {
         drop(rec);
 
         let (_window, app) = open(cx);
-        // Opens the recording for real (in the background), but plays it
-        // with a handle driven by hand rather than an engine thread.
-        fn open_without_engine(
-            path: &std::path::Path,
-            _speed: f64,
-        ) -> anyhow::Result<ReplayHandle> {
-            let source = sysmon_model::ReplaySource::open(path)?;
-            let (start, end) = source
-                .time_range()
-                .ok_or_else(|| anyhow::anyhow!("no recorded data under {}", path.display()))?;
-            let (handle, driver) = ReplayHandle::manual(ReplayStatus {
-                start_ns: start,
-                end_ns: end,
-                position_ns: start,
-                ..Default::default()
-            });
-            // Nothing is fed: the session's feed just ends.
-            drop(driver);
-            Ok(handle)
-        }
         app.update(cx, |app, _| app.open_replay = open_without_engine);
         app.update(cx, |app, cx| app.open_path(dir.clone(), cx));
         // Returned at once, with the work still to do.

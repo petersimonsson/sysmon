@@ -55,6 +55,25 @@ pub fn datetime(ts_ns: u64) -> String {
     local(ts_ns).strftime("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+/// A stretch of time in local time, to the minute, leaving out the end's
+/// date when it's the same day: `2026-11-23 14:02 → 18:40`, or
+/// `2026-11-23 14:02 → 11-24 09:15`.
+pub fn span(start_ns: u64, end_ns: u64) -> String {
+    span_in(start_ns, end_ns, TimeZone::system())
+}
+
+fn span_in(start_ns: u64, end_ns: u64, tz: TimeZone) -> String {
+    let (a, b) = (in_zone(start_ns, tz.clone()), in_zone(end_ns, tz));
+    let end = if a.date() == b.date() {
+        b.strftime("%H:%M")
+    } else if a.year() == b.year() {
+        b.strftime("%m-%d %H:%M")
+    } else {
+        b.strftime("%Y-%m-%d %H:%M")
+    };
+    format!("{} → {end}", a.strftime("%Y-%m-%d %H:%M"))
+}
+
 /// The local zone's offset at that moment, e.g. `UTC+01:00`.
 pub fn utc_offset(ts_ns: u64) -> String {
     offset_label(&local(ts_ns))
@@ -117,6 +136,22 @@ mod tests {
 
     fn fixed(offset_s: i32) -> TimeZone {
         TimeZone::fixed(jiff::tz::Offset::from_seconds(offset_s).unwrap())
+    }
+
+    #[test]
+    fn spans_leave_out_what_the_start_says() {
+        let utc = || fixed(0);
+        let t = 1_795_332_065u64 * 1_000_000_000; // 2026-11-22T07:21:05Z
+        let h = 3600 * 1_000_000_000;
+        assert_eq!(span_in(t, t + 2 * h, utc()), "2026-11-22 07:21 → 09:21");
+        assert_eq!(
+            span_in(t, t + 20 * h, utc()),
+            "2026-11-22 07:21 → 11-23 03:21"
+        );
+        assert_eq!(
+            span_in(t, t + 60 * 24 * h, utc()),
+            "2026-11-22 07:21 → 2027-01-21 07:21"
+        );
     }
 
     #[test]
