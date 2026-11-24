@@ -1324,6 +1324,34 @@ impl AppState {
                 .into_any_element()
         };
         let text = |t: String| div().child(t).into_any_element();
+        // A rate graph scales to its highest point, so without a figure a
+        // full-height spike could be 2 KiB/s or 2 GiB/s: say what the top is.
+        let spark_rates = |id: &'static str, series: Vec<(Vec<f32>, Hsla)>| {
+            let top = series
+                .iter()
+                .flat_map(|(v, _)| v.iter().copied())
+                .fold(0.0f32, f32::max);
+            let label = format!("max {}", format::bytes_per_s(top as f64));
+            div()
+                .relative()
+                .child(spark(series, None))
+                .when(top > 0.0, |d| {
+                    d.child(
+                        div()
+                            .id(id)
+                            .test_support()
+                            .absolute()
+                            .top(px(1.))
+                            .left(px(3.))
+                            .text_size(px(9.))
+                            .line_height(px(10.))
+                            .text_color(theme.muted_foreground)
+                            .aria_description(label.clone())
+                            .child(label),
+                    )
+                })
+                .into_any_element()
+        };
 
         let cpu = s.cpu_pct.first().copied().unwrap_or(0.0);
         // Per-core bars in even rows: as many to a row as fit `width`, then
@@ -1414,12 +1442,12 @@ impl AppState {
                                 out_color,
                             ),
                         )),
-                        spark(
+                        spark_rates(
+                            "net-scale",
                             vec![
                                 (recent(|p| p.net_rx_bytes_per_s as f32), in_color),
                                 (recent(|p| p.net_tx_bytes_per_s as f32), out_color),
                             ],
-                            None,
                         ),
                     ))
                     .child(metric(
@@ -1439,12 +1467,12 @@ impl AppState {
                                 out_color,
                             ),
                         )),
-                        spark(
+                        spark_rates(
+                            "disk-scale",
                             vec![
                                 (recent(|p| p.disk_read_bytes_per_s as f32), in_color),
                                 (recent(|p| p.disk_write_bytes_per_s as f32), out_color),
                             ],
-                            None,
                         ),
                     ))
                     .child(
@@ -6587,6 +6615,9 @@ mod tests {
             assert_eq!(d("disk-write").as_deref(), Some("Disk write 8.0 KiB/s"));
             assert_eq!(d("net-total").as_deref(), Some("Network total 3.0 KiB/s"));
             assert_eq!(d("disk-total").as_deref(), Some("Disk total 12.0 KiB/s"));
+            // The graphs say what their top stands for: the highest point.
+            assert_eq!(d("net-scale").as_deref(), Some("max 2.0 KiB/s"));
+            assert_eq!(d("disk-scale").as_deref(), Some("max 8.0 KiB/s"));
             // The total heads the tile, the directions go under the sparkline.
             for (t, a) in [("net-total", "net-rx"), ("disk-total", "disk-read")] {
                 let (t, a) = (window.find(t).bounds(), window.find(a).bounds());

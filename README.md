@@ -172,7 +172,8 @@ application menu: copy it to `~/.local/share/applications/` (with
   a short history graph, plus a bar for every core. The network graph shows
   receive (blue, ↓) and transmit (orange, ↑), the disk graph read (blue,
   ↓) and write (orange, ↑); hover a figure to see which it is. The figure
-  at the top is the two added together.
+  at the top is the two added together. These two graphs scale to their
+  highest point, which is written in their top corner.
 - **Process table:** like htop, memory is shown as **VIRT** (virtual size),
   **RES** (resident set size, RSS) and **SHR** (resident memory shared
   with other processes, e.g. libraries), plus %MEM (RES as a share of RAM).
