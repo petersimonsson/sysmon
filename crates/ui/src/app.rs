@@ -1267,13 +1267,20 @@ impl AppState {
         // are all shades of one hue.
         let (in_color, out_color) = (selection::color(0), selection::color(1));
         // The colour ties a figure to its line; the description says it in words.
+        // Network and disk alike: ↓ in (receive, read), ↑ out (transmit,
+        // write); hovering names it.
         let colored = |id: &'static str, text: String, what: &str, color: Hsla| {
             let figure = text.split_once(' ').map_or(text.as_str(), |(_, f)| f);
+            let named = format!("{what} {figure}");
             div()
                 .id(id)
                 .test_support()
                 .text_color(color)
-                .aria_description(format!("{what} {figure}"))
+                .tooltip({
+                    let named = named.clone();
+                    move |window, cx| Tooltip::new(named.clone()).build(window, cx)
+                })
+                .aria_description(named)
                 .child(text.clone())
                 .into_any_element()
         };
@@ -1421,13 +1428,13 @@ impl AppState {
                         Some(pair(
                             colored(
                                 "disk-read",
-                                format!("R {}", format::bytes_per_s(rd)),
+                                format!("↓ {}", format::bytes_per_s(rd)),
                                 "Disk read",
                                 in_color,
                             ),
                             colored(
                                 "disk-write",
-                                format!("W {}", format::bytes_per_s(wr)),
+                                format!("↑ {}", format::bytes_per_s(wr)),
                                 "Disk write",
                                 out_color,
                             ),
