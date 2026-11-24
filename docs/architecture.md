@@ -676,7 +676,7 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   | Ctrl+F or `/` | Filter processes (Enter returns, Esc clears) |
   | ↑/↓ or `j`/`k`, PgUp/PgDn | Move the row cursor |
   | `t`, `e`, `c` | Tree view, expand all, collapse all |
-  | Ctrl+K, Ctrl+H | Hide/show kernel threads, show/hide threads |
+  | Ctrl+K, Ctrl+H | Show/hide kernel threads, show/hide threads |
   | `g`, Ctrl+G | Graph the cursor row (collapsed: its subtree), clear the graph |
   | `1`–`6`, `w`, `v` | Graph %CPU / VIRT / RES / SHR / %MEM / threads, cycle window, show/hide |
   | Shift+P / V / M / S | Sort by CPU / VIRT / RES / SHR (again flips) |

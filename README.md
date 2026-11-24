@@ -194,9 +194,10 @@ application menu: copy it to `~/.local/share/applications/` (with
     subtree; a collapsed row shows the subtree's total CPU, RES and VIRT.
     (Like htop's, these totals count memory shared between the processes
     more than once.)
-  - **Hide kernel threads** (on by default, Ctrl+K) leaves out the kernel's
-    own threads (`kthreadd` and its children), which are often most of the
-    list. The header and status line say how many there are.
+  - **Kernel threads** (off by default, Ctrl+K) lists the kernel's own
+    threads (`kthreadd` and its children), which are often most of the
+    list. While they're hidden, the header and status line say how many
+    there are.
   - **Show threads** (off by default, Ctrl+H) lists each process's threads
     under it, marked `↳`, with their own state and %CPU. Their memory is the
     process's, so those columns show `–`. In the tree they're the first
@@ -303,7 +304,7 @@ Press **F1** or **?** in the app for the full list. The most useful ones:
 | `g`, Ctrl+G | Graph the cursor row, clear the graph |
 | `1`–`6`, `w`, `v` | Graph %CPU / VIRT / RES / SHR / %MEM / threads, change window, show/hide graph |
 | `t`, `e`, `c` | Tree view, expand all, collapse all |
-| Ctrl+K, Ctrl+H | Hide/show kernel threads, show/hide threads |
+| Ctrl+K, Ctrl+H | Show/hide kernel threads, show/hide threads |
 | Shift+P / V / M / S | Sort by CPU / VIRT / RES / SHR |
 | Shift+N / U / C | Sort by PID / user / command |
 | Space, `[`, `]` | Play/pause, slower, faster |
