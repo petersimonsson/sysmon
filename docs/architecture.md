@@ -645,6 +645,15 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   holds focus; when the filter loses focus to nothing, focus returns to the
   root. Shortcuts without a modifier use the predicate
   `SysmonApp && !Input`, so they're off while typing in the filter.
+  Each render works out which actions can do something in the view on
+  screen with the data it has (`AppState::compute_available`). For
+  example, process keys need processes, graph keys need something graphed,
+  Threads needs an agent that sends them, Logs needs a host that sends
+  logs, and playback needs the Recording view. Only those actions get
+  handlers, so the other keys do nothing. Their menu items are greyed out
+  (the menus are rebuilt and `AppMenuBar` reloaded when the set changes),
+  and so are the buttons that do the same. A disabled button's tooltip
+  says how to get the data it needs.
 
   | Keys | Action |
   |---|---|

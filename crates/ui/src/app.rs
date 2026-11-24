@@ -1,6 +1,7 @@
 //! Top-level gpui entity: owns the live and replay host models and renders
 //! the toolbar, host list, header, process table and replay timeline.
 
+use std::any::TypeId;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
@@ -24,7 +25,7 @@ use sysmon_model::{
 };
 use sysmon_proto::ProcKey;
 
-use crate::actions::{self, *};
+use crate::actions::{self, OnAvailable as _, *};
 use crate::format;
 use crate::graph;
 use crate::icons::{IconName, icon};
@@ -221,6 +222,8 @@ pub struct AppState {
     show_shortcuts: bool,
     /// Light or dark was picked from the menu: stop following the system.
     theme_chosen: bool,
+    /// What the actions can do now; worked out on every render.
+    available: actions::Available,
 }
 
 impl AppState {
@@ -332,6 +335,7 @@ impl AppState {
             menu_bar,
             show_shortcuts: false,
             theme_chosen: false,
+            available: actions::Available::default(),
             view: View::Live,
             live_enabled: start.live.is_some(),
             live_hosts: BTreeMap::new(),
@@ -623,8 +627,12 @@ impl AppState {
         let focus = self.focus.clone();
         let app = cx.entity().downgrade();
         let shown = view.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let view = shown.clone();
+            let (can_open, any) = {
+                let v = view.read(cx);
+                (v.can_open(), v.has_recordings())
+            };
             let focus = focus.clone();
             let (open, confirm, all) = (view.clone(), view.clone(), view.clone());
             let (browse, app) = (app.clone(), app.clone());
@@ -634,6 +642,7 @@ impl AppState {
                 .child(view.clone())
                 // Enter: open the picked row, which closes the dialog itself.
                 .on_ok(move |_, window, cx| {
+                    // Nothing picked: stay open.
                     crate::recordings::RecordingsView::open(&confirm, window, cx);
                     false
                 })
@@ -651,6 +660,7 @@ impl AppState {
                         .child(
                             Button::new("recordings-all")
                                 .label("Open all")
+                                .disabled(!any)
                                 .tooltip("Every machine and boot in the data directory")
                                 .on_click(move |_, window, cx| {
                                     let dir = all.read(cx).dir().to_path_buf();
@@ -668,6 +678,7 @@ impl AppState {
                             Button::new("recordings-open")
                                 .label("Open")
                                 .primary()
+                                .disabled(!can_open)
                                 .on_click(move |_, window, cx| {
                                     crate::recordings::RecordingsView::open(&open, window, cx)
                                 }),
@@ -1710,6 +1721,7 @@ impl AppState {
                             .label("Tree")
                             .small()
                             .chosen(self.tree)
+                            .disabled(!self.available.has::<ToggleTree>())
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_tree(cx))),
                     )
                     .child(
@@ -1719,6 +1731,7 @@ impl AppState {
                             .small()
                             // Like its neighbours: highlighted means shown.
                             .chosen(!self.hide_kernel)
+                            .disabled(!self.available.has::<ToggleKernelThreads>())
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_kernel_threads(cx))),
                     )
                     .child(
@@ -1727,6 +1740,10 @@ impl AppState {
                             .label("Threads")
                             .small()
                             .chosen(self.show_threads)
+                            .disabled(!self.available.has::<ToggleThreads>())
+                            .when(!self.available.has::<ToggleThreads>(), |b| {
+                                b.tooltip("This host's agent doesn't send threads: start it with --threads")
+                            })
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_threads(cx))),
                     )
                     .when(self.tree, |d| {
@@ -1736,6 +1753,7 @@ impl AppState {
                                 .tooltip("Expand all (E)")
                                 .accessibility_label("Expand all")
                                 .small()
+                                .disabled(!self.available.has::<ExpandAll>())
                                 .ghost()
                                 .on_click(cx.listener(|this, _, _, cx| this.expand_all(cx))),
                         )
@@ -1745,6 +1763,7 @@ impl AppState {
                                 .tooltip("Collapse all (C)")
                                 .accessibility_label("Collapse all")
                                 .small()
+                                .disabled(!self.available.has::<CollapseAll>())
                                 .ghost()
                                 .on_click(cx.listener(|this, _, _, cx| this.collapse_all(cx))),
                         )
@@ -2038,6 +2057,7 @@ impl AppState {
                     .icon(icon(IconName::Eraser))
                     .label("Clear")
                     .small()
+                    .disabled(!self.available.has::<ClearGraph>())
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| this.clear_graph(cx))),
             )
@@ -2328,6 +2348,10 @@ impl AppState {
                     .icon(icon(IconName::ScrollText))
                     .label("Logs")
                     .small()
+                    .disabled(!self.available.has::<ToggleLogs>())
+                    .when(!self.available.has::<ToggleLogs>(), |b| {
+                        b.tooltip("No logs from this host: start its agent with --logs")
+                    })
                     .chosen(self.panel == Panel::Logs)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.panel = Panel::Logs;
@@ -2339,6 +2363,7 @@ impl AppState {
                     .icon(icon(IconName::Info))
                     .label("Details")
                     .small()
+                    .disabled(!self.available.has::<ToggleDetails>())
                     .chosen(self.panel == Panel::Details)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.panel = Panel::Details;
@@ -2720,136 +2745,369 @@ impl AppState {
         self.control(Control::SetSpeed(SPEEDS[i]));
     }
 
-    /// Hook every action up to the root element.
+    /// What each action can do in the view on screen, with the data there.
+    fn compute_available(&self) -> actions::Available {
+        let mut can = actions::Available::default();
+        for always in [
+            TypeId::of::<Quit>(),
+            TypeId::of::<OpenRecording>(),
+            TypeId::of::<ToggleShortcuts>(),
+            TypeId::of::<Dismiss>(),
+            TypeId::of::<About>(),
+            TypeId::of::<ToggleDarkTheme>(),
+        ] {
+            can.set_type(always, true);
+        }
+        can.set::<ShowLive>(self.live_enabled);
+        can.set::<ShowRecording>(self.replay.is_some());
+        let several_hosts = self.hosts().len() > 1;
+        can.set::<NextHost>(several_hosts);
+        can.set::<PreviousHost>(several_hosts);
+
+        let host = self.current_host();
+        let procs = host.is_some_and(|h| !h.snapshot.procs.is_empty());
+        can.set::<FocusFilter>(procs);
+        can.set::<ToggleTree>(procs);
+        can.set::<ToggleKernelThreads>(procs);
+        // Only agents run with --threads send them; turning them off again
+        // is always possible.
+        can.set::<ToggleThreads>(
+            self.show_threads || (procs && host.is_some_and(HostModel::sends_threads)),
+        );
+        can.set::<CollapseAll>(procs && self.tree);
+        let collapsed = self
+            .selected
+            .and_then(|h| self.collapsed.get(&(self.view, h)))
+            .is_some_and(|c| !c.is_empty());
+        can.set::<ExpandAll>(procs && self.tree && collapsed);
+        for sort in [
+            TypeId::of::<SortByCpu>(),
+            TypeId::of::<SortByMemory>(),
+            TypeId::of::<SortByVirt>(),
+            TypeId::of::<SortByShr>(),
+            TypeId::of::<SortByPid>(),
+            TypeId::of::<SortByUser>(),
+            TypeId::of::<SortByCommand>(),
+            TypeId::of::<CursorUp>(),
+            TypeId::of::<CursorDown>(),
+            TypeId::of::<CursorPageUp>(),
+            TypeId::of::<CursorPageDown>(),
+        ] {
+            can.set_type(sort, procs);
+        }
+        can.set::<ToggleGraph>(procs && self.cursor.is_some());
+        // Back from a tab is always possible; to it, once there's something.
+        can.set::<ToggleDetails>(procs || self.panel == Panel::Details);
+        can.set::<ToggleLogs>(host.is_some_and(|h| h.logs.enabled()) || self.panel == Panel::Logs);
+
+        let picked = self.selection().is_some_and(|s| !s.is_empty());
+        for graph in [
+            TypeId::of::<ClearGraph>(),
+            TypeId::of::<ToggleGraphPanel>(),
+            TypeId::of::<GraphCpu>(),
+            TypeId::of::<GraphVirt>(),
+            TypeId::of::<GraphRss>(),
+            TypeId::of::<GraphShr>(),
+            TypeId::of::<GraphMem>(),
+            TypeId::of::<GraphThreads>(),
+            TypeId::of::<CycleGraphWindow>(),
+        ] {
+            can.set_type(graph, picked);
+        }
+
+        // Playback: only for the recording on screen.
+        let status = (self.view == View::Replay).then(|| self.status()).flatten();
+        for play in [
+            TypeId::of::<TogglePause>(),
+            TypeId::of::<SeekBackward>(),
+            TypeId::of::<SeekForward>(),
+            TypeId::of::<SeekBackwardLong>(),
+            TypeId::of::<SeekForwardLong>(),
+            TypeId::of::<SeekStart>(),
+            TypeId::of::<SeekEnd>(),
+        ] {
+            can.set_type(play, status.is_some());
+        }
+        let speed = status.map(|st| st.speed);
+        can.set::<Faster>(speed.is_some_and(|v| v < SPEEDS[SPEEDS.len() - 1] - f64::EPSILON));
+        can.set::<Slower>(speed.is_some_and(|v| v > SPEEDS[0] + f64::EPSILON));
+        can
+    }
+
+    /// Bring [`Self::available`] up to date, and the menus with it.
+    fn refresh_available(&mut self, cx: &mut Context<Self>) {
+        let now = self.compute_available();
+        if now == self.available {
+            return;
+        }
+        actions::set_menus(&now, cx);
+        if let Some(bar) = &self.menu_bar {
+            bar.update(cx, |bar, cx| bar.reload(cx));
+        }
+        self.available = now;
+    }
+
+    /// Hook the actions that are [`Self::available`] up to the root element.
     fn actions(&self, root: Div, cx: &mut Context<Self>) -> Div {
-        root.on_action(cx.listener(Self::on_open_recording))
-            .on_action(cx.listener(|this, _: &ShowLive, _, cx| this.show(View::Live, cx)))
-            .on_action(cx.listener(|this, _: &ShowRecording, _, cx| this.show(View::Replay, cx)))
-            .on_action(cx.listener(|this, _: &NextHost, _, cx| this.step_host(true, cx)))
-            .on_action(cx.listener(|this, _: &PreviousHost, _, cx| this.step_host(false, cx)))
-            .on_action(cx.listener(|this, _: &FocusFilter, window, cx| {
-                this.filter.update(cx, |f, cx| f.focus(window, cx));
-            }))
-            .on_action(cx.listener(|this, _: &Dismiss, window, cx| {
-                // In a filter box: clear it, or once empty, leave it.
-                let typing_in = [this.filter.clone(), this.log_filter.clone()]
-                    .into_iter()
-                    .find(|f| f.focus_handle(cx).is_focused(window));
-                if this.show_shortcuts {
-                    this.show_shortcuts = false;
-                } else if let Some(input) = typing_in {
-                    if input.read(cx).value().is_empty() {
-                        this.focus.focus(window, cx);
+        let can = &self.available;
+        root.on_available(can, cx.listener(Self::on_open_recording))
+            .on_available(
+                can,
+                cx.listener(|this, _: &ShowLive, _, cx| this.show(View::Live, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &ShowRecording, _, cx| this.show(View::Replay, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &NextHost, _, cx| this.step_host(true, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &PreviousHost, _, cx| this.step_host(false, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &FocusFilter, window, cx| {
+                    this.filter.update(cx, |f, cx| f.focus(window, cx));
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &Dismiss, window, cx| {
+                    // In a filter box: clear it, or once empty, leave it.
+                    let typing_in = [this.filter.clone(), this.log_filter.clone()]
+                        .into_iter()
+                        .find(|f| f.focus_handle(cx).is_focused(window));
+                    if this.show_shortcuts {
+                        this.show_shortcuts = false;
+                    } else if let Some(input) = typing_in {
+                        if input.read(cx).value().is_empty() {
+                            this.focus.focus(window, cx);
+                        } else {
+                            input.update(cx, |f, cx| f.set_value("", window, cx));
+                        }
+                    } else if this.error.is_some() {
+                        this.error = None;
                     } else {
-                        input.update(cx, |f, cx| f.set_value("", window, cx));
+                        this.filter.update(cx, |f, cx| f.set_value("", window, cx));
                     }
-                } else if this.error.is_some() {
-                    this.error = None;
-                } else {
-                    this.filter.update(cx, |f, cx| f.set_value("", window, cx));
-                }
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ToggleShortcuts, _, cx| {
-                this.show_shortcuts = !this.show_shortcuts;
-                cx.notify();
-            }))
-            .on_action(
+                    cx.notify();
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &ToggleShortcuts, _, cx| {
+                    this.show_shortcuts = !this.show_shortcuts;
+                    cx.notify();
+                }),
+            )
+            .on_available(
+                can,
                 cx.listener(|this, _: &ToggleKernelThreads, _, cx| this.toggle_kernel_threads(cx)),
             )
-            .on_action(cx.listener(|this, _: &ToggleThreads, _, cx| this.toggle_threads(cx)))
-            .on_action(cx.listener(|this, _: &ToggleTree, _, cx| this.toggle_tree(cx)))
-            .on_action(cx.listener(|this, _: &ExpandAll, _, cx| this.expand_all(cx)))
-            .on_action(cx.listener(|this, _: &CollapseAll, _, cx| this.collapse_all(cx)))
-            .on_action(cx.listener(|this, _: &SortByCpu, _, cx| this.sort_by(SortKey::Cpu, cx)))
-            .on_action(cx.listener(|this, _: &SortByMemory, _, cx| this.sort_by(SortKey::Res, cx)))
-            .on_action(cx.listener(|this, _: &SortByVirt, _, cx| this.sort_by(SortKey::Virt, cx)))
-            .on_action(cx.listener(|this, _: &SortByShr, _, cx| this.sort_by(SortKey::Shr, cx)))
-            .on_action(cx.listener(|this, _: &SortByPid, _, cx| this.sort_by(SortKey::Pid, cx)))
-            .on_action(cx.listener(|this, _: &SortByUser, _, cx| this.sort_by(SortKey::User, cx)))
-            .on_action(
+            .on_available(
+                can,
+                cx.listener(|this, _: &ToggleThreads, _, cx| this.toggle_threads(cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &ToggleTree, _, cx| this.toggle_tree(cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &ExpandAll, _, cx| this.expand_all(cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &CollapseAll, _, cx| this.collapse_all(cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &SortByCpu, _, cx| this.sort_by(SortKey::Cpu, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &SortByMemory, _, cx| this.sort_by(SortKey::Res, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &SortByVirt, _, cx| this.sort_by(SortKey::Virt, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &SortByShr, _, cx| this.sort_by(SortKey::Shr, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &SortByPid, _, cx| this.sort_by(SortKey::Pid, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &SortByUser, _, cx| this.sort_by(SortKey::User, cx)),
+            )
+            .on_available(
+                can,
                 cx.listener(|this, _: &SortByCommand, _, cx| this.sort_by(SortKey::Command, cx)),
             )
-            .on_action(cx.listener(|this, _: &CursorUp, _, cx| this.move_cursor(-1, cx)))
-            .on_action(cx.listener(|this, _: &CursorDown, _, cx| this.move_cursor(1, cx)))
-            .on_action(cx.listener(|this, _: &CursorPageUp, _, cx| {
-                this.move_cursor(-actions::PAGE_ROWS, cx)
-            }))
-            .on_action(cx.listener(|this, _: &CursorPageDown, _, cx| {
-                this.move_cursor(actions::PAGE_ROWS, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ToggleGraph, _, cx| this.toggle_cursor(cx)))
-            .on_action(cx.listener(|this, _: &ClearGraph, _, cx| this.clear_graph(cx)))
-            .on_action(cx.listener(|this, _: &About, window, cx| this.open_about(window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleDarkTheme, window, cx| {
-                use gpui_kit::component::{Theme, ThemeMode};
-                let mode = if cx.theme().is_dark() {
-                    ThemeMode::Light
-                } else {
-                    ThemeMode::Dark
-                };
-                Theme::change(mode, Some(window), cx);
-                this.theme_chosen = true;
-            }))
-            .on_action(cx.listener(|this, _: &ToggleLogs, _, cx| {
-                this.panel = if this.panel == Panel::Logs {
-                    Panel::Graph
-                } else {
-                    Panel::Logs
-                };
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ToggleDetails, _, cx| {
-                this.panel = if this.panel == Panel::Details {
-                    Panel::Graph
-                } else {
-                    Panel::Details
-                };
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &ToggleGraphPanel, _, cx| {
-                this.graph_visible = !this.graph_visible;
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &GraphCpu, _, cx| this.set_metric(Metric::Cpu, cx)))
-            .on_action(cx.listener(|this, _: &GraphRss, _, cx| this.set_metric(Metric::Rss, cx)))
-            .on_action(cx.listener(|this, _: &GraphVirt, _, cx| this.set_metric(Metric::Virt, cx)))
-            .on_action(cx.listener(|this, _: &GraphShr, _, cx| this.set_metric(Metric::Shr, cx)))
-            .on_action(cx.listener(|this, _: &GraphMem, _, cx| this.set_metric(Metric::MemPct, cx)))
-            .on_action(
+            .on_available(
+                can,
+                cx.listener(|this, _: &CursorUp, _, cx| this.move_cursor(-1, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &CursorDown, _, cx| this.move_cursor(1, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &CursorPageUp, _, cx| {
+                    this.move_cursor(-actions::PAGE_ROWS, cx)
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &CursorPageDown, _, cx| {
+                    this.move_cursor(actions::PAGE_ROWS, cx)
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &ToggleGraph, _, cx| this.toggle_cursor(cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &ClearGraph, _, cx| this.clear_graph(cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &About, window, cx| this.open_about(window, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &ToggleDarkTheme, window, cx| {
+                    use gpui_kit::component::{Theme, ThemeMode};
+                    let mode = if cx.theme().is_dark() {
+                        ThemeMode::Light
+                    } else {
+                        ThemeMode::Dark
+                    };
+                    Theme::change(mode, Some(window), cx);
+                    this.theme_chosen = true;
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &ToggleLogs, _, cx| {
+                    this.panel = if this.panel == Panel::Logs {
+                        Panel::Graph
+                    } else {
+                        Panel::Logs
+                    };
+                    cx.notify();
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &ToggleDetails, _, cx| {
+                    this.panel = if this.panel == Panel::Details {
+                        Panel::Graph
+                    } else {
+                        Panel::Details
+                    };
+                    cx.notify();
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &ToggleGraphPanel, _, cx| {
+                    this.graph_visible = !this.graph_visible;
+                    cx.notify();
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &GraphCpu, _, cx| this.set_metric(Metric::Cpu, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &GraphRss, _, cx| this.set_metric(Metric::Rss, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &GraphVirt, _, cx| this.set_metric(Metric::Virt, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &GraphShr, _, cx| this.set_metric(Metric::Shr, cx)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &GraphMem, _, cx| this.set_metric(Metric::MemPct, cx)),
+            )
+            .on_available(
+                can,
                 cx.listener(|this, _: &GraphThreads, _, cx| this.set_metric(Metric::Threads, cx)),
             )
-            .on_action(cx.listener(|this, _: &CycleGraphWindow, _, cx| {
-                let i = graph::WINDOWS_S
-                    .iter()
-                    .position(|&w| w == this.graph_window_s)
-                    .map_or(0, |i| (i + 1) % graph::WINDOWS_S.len());
-                this.graph_window_s = graph::WINDOWS_S[i];
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &TogglePause, _, _| {
-                if this.view == View::Replay {
-                    this.control(Control::TogglePause);
-                }
-            }))
-            .on_action(cx.listener(|this, _: &Faster, _, _| this.change_speed(true)))
-            .on_action(cx.listener(|this, _: &Slower, _, _| this.change_speed(false)))
-            .on_action(cx.listener(|this, _: &SeekBackward, _, _| {
-                this.seek_by(-(actions::SEEK_SHORT_S as i64))
-            }))
-            .on_action(
+            .on_available(
+                can,
+                cx.listener(|this, _: &CycleGraphWindow, _, cx| {
+                    let i = graph::WINDOWS_S
+                        .iter()
+                        .position(|&w| w == this.graph_window_s)
+                        .map_or(0, |i| (i + 1) % graph::WINDOWS_S.len());
+                    this.graph_window_s = graph::WINDOWS_S[i];
+                    cx.notify();
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &TogglePause, _, _| {
+                    if this.view == View::Replay {
+                        this.control(Control::TogglePause);
+                    }
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &Faster, _, _| this.change_speed(true)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &Slower, _, _| this.change_speed(false)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &SeekBackward, _, _| {
+                    this.seek_by(-(actions::SEEK_SHORT_S as i64))
+                }),
+            )
+            .on_available(
+                can,
                 cx.listener(|this, _: &SeekForward, _, _| {
                     this.seek_by(actions::SEEK_SHORT_S as i64)
                 }),
             )
-            .on_action(cx.listener(|this, _: &SeekBackwardLong, _, _| {
-                this.seek_by(-(actions::SEEK_LONG_S as i64))
-            }))
-            .on_action(cx.listener(|this, _: &SeekForwardLong, _, _| {
-                this.seek_by(actions::SEEK_LONG_S as i64)
-            }))
-            .on_action(cx.listener(|this, _: &SeekStart, _, _| this.seek_to(|st| st.start_ns)))
-            .on_action(cx.listener(|this, _: &SeekEnd, _, _| this.seek_to(|st| st.end_ns)))
+            .on_available(
+                can,
+                cx.listener(|this, _: &SeekBackwardLong, _, _| {
+                    this.seek_by(-(actions::SEEK_LONG_S as i64))
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &SeekForwardLong, _, _| {
+                    this.seek_by(actions::SEEK_LONG_S as i64)
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &SeekStart, _, _| this.seek_to(|st| st.start_ns)),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &SeekEnd, _, _| this.seek_to(|st| st.end_ns)),
+            )
     }
 
     /// Overlay listing every shortcut, grouped as in [`actions::SHORTCUTS`],
@@ -3438,6 +3696,7 @@ fn command(p: &ProcRow) -> String {
 impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mono_char = mono_char_width(window, cx);
+        self.refresh_available(cx);
         self.refresh_graph_names();
         self.refresh_details();
         let panel_shown = self.panel_shown();
@@ -3659,10 +3918,79 @@ mod tests {
         }
     }
 
+    /// Whether the in-window menu's item `name` (in `menu`) is enabled.
+    fn menu_enabled(cx: &mut TestAppContext, menu: &str, name: &str) -> bool {
+        fn find(items: &[gpui_kit::OwnedMenuItem], name: &str) -> Option<bool> {
+            items.iter().find_map(|i| match i {
+                gpui_kit::OwnedMenuItem::Action {
+                    name: n, disabled, ..
+                } if n == name => Some(!disabled),
+                gpui_kit::OwnedMenuItem::Submenu(m) => find(&m.items, name),
+                _ => None,
+            })
+        }
+        cx.update(|cx| {
+            let menus = gpui_kit::component::GlobalState::global(cx).app_menus();
+            let menu = menus.iter().find(|m| m.name == menu).expect("menu");
+            find(&menu.items, name).expect("menu item")
+        })
+    }
+
+    #[gpui_kit::test]
+    fn menus_grey_out_what_has_no_data(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        let draw = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| w.render_frame(cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        draw(cx);
+        // Nothing has arrived: only what needs no data.
+        assert!(menu_enabled(cx, "File", "Open Recording…"));
+        assert!(menu_enabled(cx, "File", "Quit"));
+        assert!(!menu_enabled(cx, "View", "Live"), "not listening");
+        assert!(!menu_enabled(cx, "View", "Recording"), "none open");
+        assert!(!menu_enabled(cx, "View", "Next Host"));
+        assert!(!menu_enabled(cx, "Processes", "Tree View"));
+        assert!(!menu_enabled(cx, "Processes", "CPU"), "submenus too");
+        assert!(!menu_enabled(cx, "Graph", "Clear Graph"));
+        assert!(!menu_enabled(cx, "Playback", "Play / Pause"));
+
+        add_host(&app, cx);
+        draw(cx);
+        assert!(menu_enabled(cx, "Processes", "Tree View"));
+        assert!(menu_enabled(cx, "Processes", "CPU"));
+        assert!(
+            !menu_enabled(cx, "Processes", "Threads"),
+            "agent sends none"
+        );
+        assert!(!menu_enabled(cx, "Processes", "Expand All"), "not a tree");
+        assert!(!menu_enabled(cx, "View", "Next Host"), "only one");
+        assert!(!menu_enabled(cx, "Graph", "%CPU"), "nothing graphed");
+        assert!(!menu_enabled(cx, "Playback", "Play / Pause"), "live");
+
+        cx.update_window(window, |_, w, cx| w.press("down", cx))
+            .unwrap();
+        cx.update_window(window, |_, w, cx| w.press("g", cx))
+            .unwrap();
+        draw(cx);
+        assert!(menu_enabled(cx, "Graph", "%CPU"));
+        assert!(menu_enabled(cx, "Graph", "Clear Graph"));
+    }
+
     #[gpui_kit::test]
     fn shortcuts_change_view_state(cx: &mut TestAppContext) {
         let (window, app) = open(cx);
+        // With no processes yet, the process keys do nothing.
         cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("t", cx);
+            assert!(!app.read(cx).tree, "nothing to show as a tree");
+        })
+        .unwrap();
+        add_host(&app, cx);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
             window.press("t", cx);
             assert!(app.read(cx).tree, "t toggles the tree");
 
@@ -4036,8 +4364,8 @@ mod tests {
             assert!(window.try_find("about").is_none(), "Esc closes it");
         });
         // Single-key shortcuts work again once it's closed.
-        step(cx, &|window, cx| window.press("t", cx));
-        app.read_with(cx, |app, _| assert!(app.tree));
+        step(cx, &|window, cx| window.press("?", cx));
+        app.read_with(cx, |app, _| assert!(app.show_shortcuts));
 
         // So does the Close button.
         step(cx, &|window, cx| {
@@ -4080,7 +4408,17 @@ mod tests {
         step(cx, &|window, cx| window.press("shift-m", cx));
         app.read_with(cx, |app, _| assert_eq!(app.sort, (SortKey::Res, true)));
 
-        // Graph keys follow the column order.
+        // Graph keys follow the column order, once there's a graph.
+        step(cx, &|window, cx| window.press("2", cx));
+        app.read_with(cx, |app, _| {
+            assert_eq!(
+                app.graph_metric,
+                sysmon_model::Metric::Cpu,
+                "nothing graphed"
+            )
+        });
+        step(cx, &|window, cx| window.press("down", cx));
+        step(cx, &|window, cx| window.press("g", cx));
         step(cx, &|window, cx| window.press("2", cx));
         app.read_with(cx, |app, _| {
             assert_eq!(app.graph_metric, sysmon_model::Metric::Virt)
@@ -4183,16 +4521,16 @@ mod tests {
                 .unwrap();
             cx.run_until_parked();
         };
-        // Off by default; with an agent that doesn't send threads, say so.
+        // Off by default, and can't be turned on while the agent doesn't
+        // send threads.
         assert!(table(&app, cx).iter().all(|(_, th, _)| !th));
+        step(cx, &|window, cx| window.render_frame(cx));
         step(cx, &|window, cx| window.press("ctrl-h", cx));
-        app.read_with(cx, |app, cx| {
-            let host = &app.hosts()[&1];
-            let s = app.status_line(host, &app.table_lines(host, cx), cx);
-            assert!(s.contains("start this host's agent with --threads"), "{s}");
-        });
+        app.read_with(cx, |app, _| assert!(!app.show_threads));
 
         send_threads(&app, cx);
+        step(cx, &|window, cx| window.render_frame(cx));
+        step(cx, &|window, cx| window.press("ctrl-h", cx));
         // One sample: no thread has used any CPU yet, so none is listed,
         // and the status says why.
         assert!(table(&app, cx).iter().all(|(_, th, _)| !th));
@@ -5182,6 +5520,35 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn the_open_dialog_has_nothing_to_open_in_an_empty_dir(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("sysmon-ui-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (window, app) = open(cx);
+        app.update(cx, |app, _| app.data_dir = dir.clone());
+        cx.update_window(window, |_, w, cx| {
+            w.dispatch_action(Box::new(crate::actions::OpenRecording), cx)
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("recordings-message").is_some());
+            w.click("recordings-open", cx);
+            w.click("recordings-all", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("recordings").is_some(), "still open");
+        })
+        .unwrap();
+        app.read_with(cx, |app, _| {
+            assert!(app.opening.is_none() && app.replay.is_none())
+        });
+    }
+
+    #[gpui_kit::test]
     fn the_open_dialog_lists_machines_and_boots(cx: &mut TestAppContext) {
         let dir = std::env::temp_dir().join(format!("sysmon-ui-list-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -5275,8 +5642,8 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("recordings").is_none());
         });
-        step(cx, &|window, cx| window.press("t", cx));
-        app.read_with(cx, |app, _| assert!(app.tree));
+        step(cx, &|window, cx| window.press("?", cx));
+        app.read_with(cx, |app, _| assert!(app.show_shortcuts));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5530,28 +5897,22 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn the_logs_tab_says_when_a_host_sends_none(cx: &mut TestAppContext) {
+    fn the_logs_tab_is_off_when_a_host_sends_none(cx: &mut TestAppContext) {
         let (window, app) = open(cx);
         host_with_logs(&app, cx, &[]);
         app.update(cx, |a, _| {
             a.live_hosts.get_mut(&1).unwrap().logs = Default::default()
         });
         cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
             w.press("l", cx);
         })
         .unwrap();
         cx.run_until_parked();
-        cx.update_window(window, |_, w, cx| {
-            w.render_frame(cx);
-            assert_eq!(
-                w.find("logs-status")
-                    .description()
-                    .map(|d| d.to_string())
-                    .as_deref(),
-                Some("No logs from this host: start its agent with --logs")
-            );
-        })
-        .unwrap();
+        app.read_with(cx, |app, _| {
+            assert_ne!(app.panel, Panel::Logs);
+            assert!(!app.available.has::<crate::actions::ToggleLogs>());
+        });
     }
 
     #[gpui_kit::test]
