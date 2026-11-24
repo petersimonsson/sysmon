@@ -2201,7 +2201,7 @@ impl AppState {
                     return Some((key, format!("{} (thread of {})", t.comm, t.tgid)));
                 }
                 let row = host.snapshot.procs.iter().find(|r| r.key == key)?;
-                Some((key, row.comm.clone()))
+                Some((key, proc_name(row)))
             })
             .collect();
         let known = self.graph_names.entry(here).or_default();
@@ -4033,6 +4033,28 @@ fn size_cell(kib: Option<u64>) -> String {
     kib.map_or_else(|| "–".into(), |k| format::bytes(k as f64 * 1024.0))
 }
 
+/// A process's name for people: the kernel's name (`comm`), unless that's
+/// a cut-off start of the program's own name, as it is past 15 characters
+/// (`xdg-document-po` for `xdg-document-portal`). A process that renamed
+/// itself (`Isolated Web Co` for `zen-bin`) keeps the name it chose.
+fn proc_name(p: &ProcRow) -> String {
+    name_of(&p.comm, p.cmdline.as_deref())
+}
+
+/// [`proc_name`] from the kernel's name and the command line.
+fn name_of(comm: &str, cmdline: Option<&str>) -> String {
+    let program = cmdline.and_then(|c| {
+        let (_, name, _) = command_parts(c);
+        c.get(name).filter(|n| !n.is_empty())
+    });
+    match program {
+        Some(program) if program.len() > comm.len() && program.starts_with(comm) => {
+            program.to_string()
+        }
+        _ => comm.to_string(),
+    }
+}
+
 fn command(p: &ProcRow) -> String {
     p.cmdline
         .clone()
@@ -5682,6 +5704,22 @@ mod tests {
         assert_eq!(cores_per_row(13, 12), 7);
         assert_eq!(cores_per_row(1, 0), 1);
         assert_eq!(cores_per_row(0, 5), 1);
+    }
+
+    #[test]
+    fn processes_are_named_by_their_program_when_comm_is_cut_off() {
+        let name = super::name_of;
+        assert_eq!(
+            name("xdg-document-po", Some("/usr/lib/xdg-document-portal")),
+            "xdg-document-portal"
+        );
+        assert_eq!(
+            name("Isolated Web Co", Some("/opt/zen/zen-bin -contentproc")),
+            "Isolated Web Co"
+        );
+        assert_eq!(name("zsh", Some("-zsh")), "zsh");
+        assert_eq!(name("kworker/0:1", None), "kworker/0:1");
+        assert_eq!(name("bash", Some("/bin/bash")), "bash");
     }
 
     #[test]
