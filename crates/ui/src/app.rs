@@ -66,6 +66,8 @@ const CORE_W: f32 = 142.;
 const CORE_GAP: f32 = 12.;
 /// Width of the host list.
 const SIDEBAR_W: f32 = 190.;
+/// The CPU and memory bars under each host's name.
+const SIDEBAR_BAR_W: f32 = 84.;
 /// Samples shown in the header's sparklines.
 const SPARK_POINTS: usize = 240;
 /// Initial height of the graph panel below the process list.
@@ -986,6 +988,11 @@ impl AppState {
             };
             let silence = self.silence(host);
             let stale = silence.is_some();
+            // Not while silent: old figures would pass for current ones.
+            let load = (!stale && host.snapshot.mem.total > 0).then(|| {
+                let s = &host.snapshot;
+                (s.cpu_pct.first().copied().unwrap_or(0.0), mem_pct(&s.mem))
+            });
             // Only what's worth knowing: "0.0% incomplete" on every healthy
             // host was noise, and "incomplete" alone didn't say of what.
             let detail = match silence {
@@ -1039,6 +1046,28 @@ impl AppState {
                                 format!("{} · host id {:016x}", host.name(), id),
                             )),
                     )
+                    .children(load.map(|(cpu, mem)| {
+                        // How busy it is, so a host that needs a look stands
+                        // out without clicking through each one.
+                        let row = |what: &'static str, pct: f32| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().flex_none().w(px(28.)).whitespace_nowrap().child(what))
+                                .child(bar(pct, px(SIDEBAR_BAR_W), theme.muted, theme.primary))
+                                .child(div().flex_1().text_right().child(format!("{pct:.0}%")))
+                        };
+                        div()
+                            .id(("host-load", id as usize))
+                            .test_support()
+                            .mt_1()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .aria_description(format!("CPU {cpu:.0}%, memory {mem:.0}%"))
+                            .child(row("CPU", cpu))
+                            .child(row("Mem", mem))
+                    }))
                     .children(detail.map(|detail| {
                         div()
                             .id(("host-detail", id as usize))
@@ -1226,11 +1255,7 @@ impl AppState {
         let mem = s.mem;
         // From the network: available can be bogus (above total).
         let mem_used = mem.total.saturating_sub(mem.available);
-        let mem_pct = if mem.total > 0 {
-            mem_used as f32 / mem.total as f32 * 100.0
-        } else {
-            0.0
-        };
+        let mem_pct = mem_pct(&mem);
         let swap_used = mem.swap_total.saturating_sub(mem.swap_free);
         let rx: f64 = s.net.iter().map(|n| n.rx_bytes_per_s).sum();
         let tx: f64 = s.net.iter().map(|n| n.tx_bytes_per_s).sum();
@@ -4040,6 +4065,17 @@ fn priority_style(p: u8, theme: &gpui_kit::component::Theme) -> (&'static str, H
     (LABELS[p.min(7) as usize], color)
 }
 
+/// Memory in use (all but what's available) as a share of the total.
+fn mem_pct(mem: &sysmon_proto::MemInfo) -> f32 {
+    // From the network: available can be bogus (above total).
+    let used = mem.total.saturating_sub(mem.available);
+    if mem.total > 0 {
+        used as f32 / mem.total as f32 * 100.0
+    } else {
+        0.0
+    }
+}
+
 /// A size in KiB as table text; "–" when the agent didn't report it.
 fn size_cell(kib: Option<u64>) -> String {
     kib.map_or_else(|| "–".into(), |k| format::bytes(k as f64 * 1024.0))
@@ -5372,6 +5408,57 @@ mod tests {
         });
         cx.update_window(window, |_, window, cx| window.render_frame(cx))
             .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn the_sidebar_shows_how_busy_each_host_is_while_it_reports(cx: &mut TestAppContext) {
+        let (window, app) = open(cx);
+        let now = sysmon_ingest::unix_now_ns();
+        let sample = |received: u64| sysmon_proto::Frame {
+            received_ns: received,
+            ..test_frame(
+                1,
+                0,
+                sysmon_proto::SystemSample {
+                    ts_unix_ns: received,
+                    mem: sysmon_proto::MemInfo {
+                        total: 4000,
+                        available: 1000,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+        };
+        let load = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, w, cx| {
+                w.render_frame(cx);
+                w.try_find(("host-load", 1usize))
+                    .and_then(|e| e.description().map(str::to_string))
+            })
+            .unwrap()
+        };
+        app.update(cx, |app, cx| {
+            apply(
+                &mut app.live_hosts,
+                sysmon_ingest::Event::Frame(sample(now)),
+            );
+            app.ensure_selection();
+            cx.notify();
+        });
+        assert_eq!(load(cx).as_deref(), Some("CPU 0%, memory 75%"));
+
+        // Silent: no figures, which would be old.
+        app.update(cx, |app, cx| {
+            app.live_hosts.clear();
+            let then = now - 10_000_000_000;
+            apply(
+                &mut app.live_hosts,
+                sysmon_ingest::Event::Frame(sample(then)),
+            );
+            cx.notify();
+        });
+        assert_eq!(load(cx), None);
     }
 
     #[gpui_kit::test]
