@@ -4477,6 +4477,37 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn about_and_the_themes_can_be_given_keys(cx: &mut TestAppContext) {
+        let (window, app) = open_with(cx, |s| {
+            s.config.keys = vec![
+                ("about".into(), vec!["ctrl-shift-a".into()]),
+                ("theme_dark".into(), vec!["alt-d".into()]),
+            ];
+        });
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        app.read_with(cx, |app, _| assert!(app.error.is_none(), "{:?}", app.error));
+        step(cx, &|w, cx| w.press("alt-d", cx));
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.theme, crate::config::ThemePref::Dark)
+        });
+        step(cx, &|w, cx| w.press("ctrl-shift-a", cx));
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("about").is_some(), "About opened");
+        });
+        // With no key set they stay off the shortcuts list.
+        cx.update(|cx| {
+            let keymap = cx.global::<crate::keymap::Keymap>();
+            assert!(keymap.keys::<crate::actions::ThemeLight>().is_empty());
+        });
+    }
+
+    #[gpui_kit::test]
     fn menu_bar_is_a_strip_at_the_top(cx: &mut TestAppContext) {
         for with_host in [false, true] {
             let (window, app) = open(cx);
