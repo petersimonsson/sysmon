@@ -59,7 +59,9 @@ actions!(
         ToggleThreads,
         ToggleLogs,
         ToggleDetails,
-        ToggleDarkTheme,
+        ThemeSystem,
+        ThemeLight,
+        ThemeDark,
     ]
 );
 
@@ -307,23 +309,35 @@ pub const MOUSE: &[(&str, &str)] = &[
 /// with the data it has. Only these get handlers, so the others' keys do
 /// nothing, and their menu items are greyed out.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Available(HashSet<TypeId>);
+pub struct Available {
+    on: HashSet<TypeId>,
+    /// Shown ticked in the menus: the option in effect.
+    checked: HashSet<TypeId>,
+}
 
 impl Available {
     pub fn set<A: Action>(&mut self, on: bool) {
-        if on {
-            self.0.insert(TypeId::of::<A>());
-        }
+        self.set_type(TypeId::of::<A>(), on);
     }
 
     pub fn set_type(&mut self, action: TypeId, on: bool) {
         if on {
-            self.0.insert(action);
+            self.on.insert(action);
         }
     }
 
     pub fn has<A: Action>(&self) -> bool {
-        self.0.contains(&TypeId::of::<A>())
+        self.on.contains(&TypeId::of::<A>())
+    }
+
+    pub fn check<A: Action>(&mut self, checked: bool) {
+        if checked {
+            self.checked.insert(TypeId::of::<A>());
+        }
+    }
+
+    pub fn is_checked<A: Action>(&self) -> bool {
+        self.checked.contains(&TypeId::of::<A>())
     }
 }
 
@@ -367,7 +381,9 @@ pub fn set_menus(available: &Available, cx: &mut App) {
 fn menus(available: &Available) -> Vec<Menu> {
     macro_rules! action {
         ($name:expr, $action:ident) => {
-            MenuItem::action($name, $action).disabled(!available.has::<$action>())
+            MenuItem::action($name, $action)
+                .disabled(!available.has::<$action>())
+                .checked(available.is_checked::<$action>())
         };
     }
     vec![
@@ -386,7 +402,11 @@ fn menus(available: &Available) -> Vec<Menu> {
             action!("Logs", ToggleLogs),
             action!("Process Details", ToggleDetails),
             MenuItem::separator(),
-            action!("Dark Theme", ToggleDarkTheme),
+            MenuItem::submenu(Menu::new("Theme").items([
+                action!("System", ThemeSystem),
+                action!("Light", ThemeLight),
+                action!("Dark", ThemeDark),
+            ])),
         ]),
         Menu::new("Processes").items([
             action!("Filter…", FocusFilter),

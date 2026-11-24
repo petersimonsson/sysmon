@@ -4,6 +4,7 @@
 mod about;
 mod actions;
 mod app;
+mod config;
 mod format;
 mod graph;
 mod icons;
@@ -49,6 +50,9 @@ struct Args {
     /// Replay speed multiplier.
     #[arg(long, default_value_t = 1.0, value_parser = parse_speed)]
     speed: f64,
+    /// Settings file. Defaults to `$XDG_CONFIG_HOME/sysmon/config.toml`.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
     /// Print sysmon's license and the license notices of all third-party
     /// software in this binary, then exit.
     #[arg(long)]
@@ -87,12 +91,16 @@ fn main() -> anyhow::Result<()> {
 
     // Stops the recorder cleanly when the app quits or is signalled.
     let mut stopper: Option<pipeline::RecorderHandle> = None;
-    let start = match &args.replay {
+    let config_path = args.config.clone().unwrap_or_else(config::default_path);
+    let (config, writable) = config::load(&config_path);
+    let mut start = match &args.replay {
         Some(path) => app::Start {
             live: None,
             replay: Some((pipeline::open_replay(path, args.speed)?, path.clone())),
             recording_to: None,
             data_dir: data_dir.clone(),
+            config: Default::default(),
+            config_path: None,
         },
         None => {
             let recording = (!args.no_record).then(|| pipeline::Recording {
@@ -115,9 +123,14 @@ fn main() -> anyhow::Result<()> {
                 replay: None,
                 recording_to,
                 data_dir,
+                config: Default::default(),
+                config_path: None,
             }
         }
     };
+    start.config = config;
+    // A file that couldn't be read is left alone; changes last the session.
+    start.config_path = writable.then_some(config_path);
 
     gpui_kit::application()
         .with_assets(icons::AppAssets)

@@ -90,6 +90,10 @@ pub struct Start {
     /// Where recordings are kept, recording or not: the Open Recording
     /// dialog lists what's there.
     pub data_dir: PathBuf,
+    /// The settings read at startup.
+    pub config: crate::config::Config,
+    /// Where setting changes are saved; none to keep them for the session.
+    pub config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -220,8 +224,9 @@ pub struct AppState {
     /// In-window menu bar (not used on macOS, which has a native one).
     menu_bar: Option<Entity<AppMenuBar>>,
     show_shortcuts: bool,
-    /// Light or dark was picked from the menu: stop following the system.
-    theme_chosen: bool,
+    /// Light, dark, or following the system; from the config, then the menu.
+    theme: crate::config::ThemePref,
+    config_path: Option<PathBuf>,
     /// What the actions can do now; worked out on every render.
     available: actions::Available,
 }
@@ -302,12 +307,11 @@ impl AppState {
                 InputEvent::Focus => {}
             }
         };
-        // Light or dark as the system is, until one is picked from the menu.
-        gpui_kit::component::Theme::sync_system_appearance(Some(window), cx);
+        apply_theme(start.config.theme, window, cx);
         let subscriptions = vec![
             cx.observe_window_appearance(window, |this, window, cx| {
-                if !this.theme_chosen {
-                    gpui_kit::component::Theme::sync_system_appearance(Some(window), cx);
+                if this.theme == crate::config::ThemePref::System {
+                    apply_theme(this.theme, window, cx);
                 }
             }),
             cx.subscribe_in(&filter, window, on_filter),
@@ -334,7 +338,8 @@ impl AppState {
             focus,
             menu_bar,
             show_shortcuts: false,
-            theme_chosen: false,
+            theme: start.config.theme,
+            config_path: start.config_path,
             available: actions::Available::default(),
             view: View::Live,
             live_enabled: start.live.is_some(),
@@ -2754,9 +2759,17 @@ impl AppState {
             TypeId::of::<ToggleShortcuts>(),
             TypeId::of::<Dismiss>(),
             TypeId::of::<About>(),
-            TypeId::of::<ToggleDarkTheme>(),
+            TypeId::of::<ThemeSystem>(),
+            TypeId::of::<ThemeLight>(),
+            TypeId::of::<ThemeDark>(),
         ] {
             can.set_type(always, true);
+        }
+        {
+            use crate::config::ThemePref;
+            can.check::<ThemeSystem>(self.theme == ThemePref::System);
+            can.check::<ThemeLight>(self.theme == ThemePref::Light);
+            can.check::<ThemeDark>(self.theme == ThemePref::Dark);
         }
         can.set::<ShowLive>(self.live_enabled);
         can.set::<ShowRecording>(self.replay.is_some());
@@ -2832,6 +2845,37 @@ impl AppState {
         can.set::<Faster>(speed.is_some_and(|v| v < SPEEDS[SPEEDS.len() - 1] - f64::EPSILON));
         can.set::<Slower>(speed.is_some_and(|v| v > SPEEDS[0] + f64::EPSILON));
         can
+    }
+
+    /// Use `theme` from now on, and save it if there's a config file.
+    fn set_theme(
+        &mut self,
+        theme: crate::config::ThemePref,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.theme = theme;
+        apply_theme(theme, window, cx);
+        cx.notify();
+        let Some(path) = self.config_path.clone() else {
+            return;
+        };
+        let saved = cx.background_spawn(async move {
+            crate::config::save_theme(&path, theme).map_err(|e| (path, e))
+        });
+        cx.spawn(async move |this, cx| {
+            if let Err((path, e)) = saved.await {
+                tracing::error!(path = %path.display(), error = %e, "saving the theme failed");
+                let _ = this.update(cx, |this, cx| {
+                    this.error = Some(format!(
+                        "Couldn't save the theme to {}: {e}",
+                        path.display()
+                    ));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// Bring [`Self::available`] up to date, and the menus with it.
@@ -2985,15 +3029,20 @@ impl AppState {
             )
             .on_available(
                 can,
-                cx.listener(|this, _: &ToggleDarkTheme, window, cx| {
-                    use gpui_kit::component::{Theme, ThemeMode};
-                    let mode = if cx.theme().is_dark() {
-                        ThemeMode::Light
-                    } else {
-                        ThemeMode::Dark
-                    };
-                    Theme::change(mode, Some(window), cx);
-                    this.theme_chosen = true;
+                cx.listener(|this, _: &ThemeSystem, window, cx| {
+                    this.set_theme(crate::config::ThemePref::System, window, cx)
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &ThemeLight, window, cx| {
+                    this.set_theme(crate::config::ThemePref::Light, window, cx)
+                }),
+            )
+            .on_available(
+                can,
+                cx.listener(|this, _: &ThemeDark, window, cx| {
+                    this.set_theme(crate::config::ThemePref::Dark, window, cx)
                 }),
             )
             .on_available(
@@ -3693,6 +3742,17 @@ fn command(p: &ProcRow) -> String {
         .unwrap_or_else(|| format!("[{}]", p.comm))
 }
 
+/// Light or dark: as `theme` says, or as the system is.
+fn apply_theme(theme: crate::config::ThemePref, window: &mut Window, cx: &mut App) {
+    use crate::config::ThemePref;
+    use gpui_kit::component::{Theme, ThemeMode};
+    match theme {
+        ThemePref::System => Theme::sync_system_appearance(Some(window), cx),
+        ThemePref::Light => Theme::change(ThemeMode::Light, Some(window), cx),
+        ThemePref::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
+    }
+}
+
 impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mono_char = mono_char_width(window, cx);
@@ -3875,6 +3935,14 @@ mod tests {
     };
 
     fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<AppState>) {
+        open_with(cx, |_| {})
+    }
+
+    /// [`open`], with `Start` changed by `tweak` first.
+    fn open_with(
+        cx: &mut TestAppContext,
+        tweak: impl FnOnce(&mut Start),
+    ) -> (AnyWindowHandle, Entity<AppState>) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::actions::init(cx);
@@ -3885,12 +3953,15 @@ mod tests {
                 })),
                 ..Default::default()
             };
-            let start = Start {
+            let mut start = Start {
                 live: None,
                 replay: None,
                 recording_to: Some(std::env::temp_dir()),
                 data_dir: std::env::temp_dir(),
+                config: Default::default(),
+                config_path: None,
             };
+            tweak(&mut start);
             gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| AppState::new(start, window, cx))
             })
@@ -5104,26 +5175,73 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn the_view_menu_switches_between_light_and_dark(cx: &mut TestAppContext) {
+    fn the_theme_menu_picks_ticks_and_saves_the_theme(cx: &mut TestAppContext) {
+        use crate::config::ThemePref;
         use gpui_kit::component::ActiveTheme as _;
-        let (window, app) = open(cx);
+        let dir = std::env::temp_dir().join(format!("sysmon-ui-theme-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("config.toml");
+        let (window, app) = open_with(cx, |s| s.config_path = Some(path.clone()));
+        let pick = |cx: &mut TestAppContext, action: Box<dyn gpui_kit::Action>| {
+            cx.update_window(window, |_, w, cx| {
+                w.dispatch_action(action, cx);
+                w.render_frame(cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
         let dark = |cx: &mut TestAppContext| cx.update(|cx| cx.theme().is_dark());
-        let before = dark(cx);
-        cx.update_window(window, |_, w, cx| {
-            w.dispatch_action(Box::new(crate::actions::ToggleDarkTheme), cx)
-        })
-        .unwrap();
-        cx.run_until_parked();
-        assert_eq!(dark(cx), !before);
-        app.read_with(cx, |app, _| {
-            assert!(app.theme_chosen, "no longer following the system")
-        });
-        cx.update_window(window, |_, w, cx| {
-            w.dispatch_action(Box::new(crate::actions::ToggleDarkTheme), cx)
-        })
-        .unwrap();
-        cx.run_until_parked();
-        assert_eq!(dark(cx), before);
+        let checked = |cx: &mut TestAppContext, name: &str| {
+            cx.update(|cx| {
+                let menus = gpui_kit::component::GlobalState::global(cx).app_menus();
+                let view = menus.iter().find(|m| m.name == "View").unwrap();
+                view.items.iter().find_map(|i| match i {
+                    gpui_kit::OwnedMenuItem::Submenu(m) if m.name == "Theme" => {
+                        m.items.iter().find_map(|i| match i {
+                            gpui_kit::OwnedMenuItem::Action {
+                                name: n, checked, ..
+                            } if n == name => Some(*checked),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                })
+            })
+            .expect("Theme item")
+        };
+        cx.update_window(window, |_, w, cx| w.render_frame(cx))
+            .unwrap();
+        assert!(
+            checked(cx, "System") && !checked(cx, "Dark"),
+            "follows the system at first"
+        );
+        assert!(!path.exists(), "nothing saved until something is picked");
+
+        pick(cx, Box::new(crate::actions::ThemeDark));
+        assert!(dark(cx));
+        assert!(checked(cx, "Dark") && !checked(cx, "System"));
+        assert_eq!(crate::config::load(&path).0.theme, ThemePref::Dark);
+
+        pick(cx, Box::new(crate::actions::ThemeLight));
+        assert!(!dark(cx));
+        assert_eq!(crate::config::load(&path).0.theme, ThemePref::Light);
+
+        pick(cx, Box::new(crate::actions::ThemeSystem));
+        app.read_with(cx, |app, _| assert_eq!(app.theme, ThemePref::System));
+        assert!(checked(cx, "System"));
+        assert_eq!(crate::config::load(&path).0.theme, ThemePref::System);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui_kit::test]
+    fn the_saved_theme_applies_at_startup(cx: &mut TestAppContext) {
+        use crate::config::{Config, ThemePref};
+        use gpui_kit::component::ActiveTheme as _;
+        for (theme, is_dark) in [(ThemePref::Dark, true), (ThemePref::Light, false)] {
+            let (_window, app) = open_with(cx, |s| s.config = Config { theme });
+            assert_eq!(cx.update(|cx| cx.theme().is_dark()), is_dark);
+            app.read_with(cx, |app, _| assert_eq!(app.theme, theme));
+        }
     }
 
     #[gpui_kit::test]
