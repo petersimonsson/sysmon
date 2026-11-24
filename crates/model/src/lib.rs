@@ -1,6 +1,7 @@
 //! sysmon state: turns raw counters into rates and history, independent of
 //! whether frames come from the network or from a recording.
 
+pub mod catalog;
 mod clock;
 pub mod details;
 mod host;
@@ -10,6 +11,7 @@ pub mod series;
 mod source;
 pub mod tree;
 
+pub use catalog::Recording;
 pub use clock::PlaybackClock;
 pub use details::ProcDetails;
 pub use host::{
