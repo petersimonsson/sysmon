@@ -1656,7 +1656,7 @@ impl AppState {
         match self.selection().filter(|s| !s.is_empty()) {
             Some(sel) => parts.push(format!("{} graphed", sel.len())),
             // The checkboxes have no header: say what they're for.
-            None => parts.push("tick a row's box (or press G) to graph it".into()),
+            None => parts.push("tick a row's box (or press g) to graph it".into()),
         }
         parts.join(" · ")
     }
@@ -1763,9 +1763,9 @@ impl AppState {
                         || line.tree.as_ref().is_some_and(|t| !t.matched);
                     let slot = picked.get(&line.key()).copied();
                     let pick_tip = match slot {
-                        Some(_) => "Remove from the graph (G)",
-                        None if line.thread.is_some() => "Graph this thread (G)",
-                        None => "Graph this process (G)",
+                        Some(_) => "Remove from the graph (g)",
+                        None if line.thread.is_some() => "Graph this thread (g)",
+                        None => "Graph this process (g)",
                     };
                     // Process-only figures: a thread's memory and thread
                     // count are its process's, shown on that row.
@@ -1936,7 +1936,7 @@ impl AppState {
                         d.child(
                             Button::new("expand-all")
                                 .icon(icon(IconName::ChevronsUpDown))
-                                .tooltip("Expand all (E)")
+                                .tooltip("Expand all (e)")
                                 .accessibility_label("Expand all")
                                 .small()
                                 .disabled(!self.available.has::<ExpandAll>())
@@ -1946,7 +1946,7 @@ impl AppState {
                         .child(
                             Button::new("collapse-all")
                                 .icon(icon(IconName::ChevronsDownUp))
-                                .tooltip("Collapse all (C)")
+                                .tooltip("Collapse all (c)")
                                 .accessibility_label("Collapse all")
                                 .small()
                                 .disabled(!self.available.has::<CollapseAll>())
@@ -5977,7 +5977,7 @@ mod tests {
         cx.update_window(window, |_, w, cx| {
             w.render_frame(cx);
             let pick = w.find(("pick", 0usize));
-            assert_eq!(pick.description(), Some("Graph this process (G)"));
+            assert_eq!(pick.description(), Some("Graph this process (g)"));
             w.click(("pick", 0usize), cx);
         })
         .unwrap();
@@ -5985,7 +5985,7 @@ mod tests {
         cx.update_window(window, |_, w, cx| {
             w.render_frame(cx);
             let pick = w.find(("pick", 0usize));
-            assert_eq!(pick.description(), Some("Remove from the graph (G)"));
+            assert_eq!(pick.description(), Some("Remove from the graph (g)"));
         })
         .unwrap();
     }

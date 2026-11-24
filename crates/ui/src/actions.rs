@@ -468,6 +468,11 @@ pub fn display_key(k: &str) -> String {
     if k == "-" || k == "+" {
         return k.to_string();
     }
+    // A lone letter is shown as typed: "G" read as Shift+G beside the
+    // real Shift+P. With a modifier it's capitalised, as menus do (Ctrl+O).
+    if k.chars().count() == 1 {
+        return k.to_string();
+    }
     k.split('-')
         .map(|part| match part {
             "ctrl" => "Ctrl".to_string(),
@@ -502,6 +507,8 @@ mod tests {
         assert_eq!(display_key("f1"), "F1");
         assert_eq!(display_key("?"), "?");
         assert_eq!(display_key("]"), "]");
+        assert_eq!(display_key("g"), "g", "not G, which reads as Shift+G");
+        assert_eq!(display_key("shift-p"), "Shift+P");
     }
 
     #[test]
