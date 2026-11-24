@@ -104,6 +104,16 @@ impl RecordingsView {
         &self.filter
     }
 
+    /// A row is picked, so Open has something to open.
+    pub fn can_open(&self) -> bool {
+        self.selected.is_some()
+    }
+
+    /// Anything was found, so Open all has something to open.
+    pub fn has_recordings(&self) -> bool {
+        !self.recordings().is_empty()
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }

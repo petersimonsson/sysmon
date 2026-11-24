@@ -4,6 +4,9 @@
 //! shortcuts overlay. The menus use the same actions, so they show the
 //! bindings next to each item.
 
+use std::any::TypeId;
+use std::collections::HashSet;
+
 use gpui_kit::*;
 
 actions!(
@@ -300,6 +303,47 @@ pub const MOUSE: &[(&str, &str)] = &[
     ("Drag the divider", "Resize the bottom panel"),
 ];
 
+/// The actions that can do something right now, in the view on screen
+/// with the data it has. Only these get handlers, so the others' keys do
+/// nothing, and their menu items are greyed out.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Available(HashSet<TypeId>);
+
+impl Available {
+    pub fn set<A: Action>(&mut self, on: bool) {
+        if on {
+            self.0.insert(TypeId::of::<A>());
+        }
+    }
+
+    pub fn set_type(&mut self, action: TypeId, on: bool) {
+        if on {
+            self.0.insert(action);
+        }
+    }
+
+    pub fn has<A: Action>(&self) -> bool {
+        self.0.contains(&TypeId::of::<A>())
+    }
+}
+
+/// Handle an action only while it's [`Available`].
+pub trait OnAvailable: InteractiveElement + Sized {
+    fn on_available<A: Action>(
+        self,
+        available: &Available,
+        listener: impl Fn(&A, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        if available.has::<A>() {
+            self.on_action(listener)
+        } else {
+            self
+        }
+    }
+}
+
+impl<E: InteractiveElement> OnAvailable for E {}
+
 /// Register key bindings and menus. Call once, after `gpui_kit::init`.
 pub fn init(cx: &mut App) {
     cx.bind_keys(SHORTCUTS.iter().flat_map(|s| {
@@ -307,84 +351,94 @@ pub fn init(cx: &mut App) {
         s.keys.iter().map(move |k| (s.bind)(k, Some(ctx)))
     }));
     cx.on_action(|_: &Quit, cx| cx.quit());
-
-    // macOS draws the native menu bar; elsewhere `AppMenuBar` renders these
-    // inside the window.
-    cx.set_menus(menus());
-    gpui_kit::component::GlobalState::global_mut(cx)
-        .set_app_menus(menus().into_iter().map(Menu::owned).collect());
+    // The window sets the menus up for what it shows once it draws.
+    set_menus(&Available::default(), cx);
 }
 
-fn menus() -> Vec<Menu> {
+/// Put up the menus, with what isn't `available` greyed out. macOS draws
+/// the native menu bar; elsewhere `AppMenuBar` renders these inside the
+/// window, once it's reloaded.
+pub fn set_menus(available: &Available, cx: &mut App) {
+    cx.set_menus(menus(available));
+    gpui_kit::component::GlobalState::global_mut(cx)
+        .set_app_menus(menus(available).into_iter().map(Menu::owned).collect());
+}
+
+fn menus(available: &Available) -> Vec<Menu> {
+    macro_rules! action {
+        ($name:expr, $action:ident) => {
+            MenuItem::action($name, $action).disabled(!available.has::<$action>())
+        };
+    }
     vec![
         Menu::new("File").items([
-            MenuItem::action("Open Recording…", OpenRecording),
+            action!("Open Recording…", OpenRecording),
             MenuItem::separator(),
-            MenuItem::action("Quit", Quit),
+            action!("Quit", Quit),
         ]),
         Menu::new("View").items([
-            MenuItem::action("Live", ShowLive),
-            MenuItem::action("Recording", ShowRecording),
+            action!("Live", ShowLive),
+            action!("Recording", ShowRecording),
             MenuItem::separator(),
-            MenuItem::action("Next Host", NextHost),
-            MenuItem::action("Previous Host", PreviousHost),
+            action!("Next Host", NextHost),
+            action!("Previous Host", PreviousHost),
             MenuItem::separator(),
-            MenuItem::action("Logs", ToggleLogs),
-            MenuItem::action("Process Details", ToggleDetails),
+            action!("Logs", ToggleLogs),
+            action!("Process Details", ToggleDetails),
             MenuItem::separator(),
-            MenuItem::action("Dark Theme", ToggleDarkTheme),
+            action!("Dark Theme", ToggleDarkTheme),
         ]),
         Menu::new("Processes").items([
-            MenuItem::action("Filter…", FocusFilter),
+            action!("Filter…", FocusFilter),
             MenuItem::separator(),
-            MenuItem::action("Tree View", ToggleTree),
-            MenuItem::action("Kernel Threads", ToggleKernelThreads),
-            MenuItem::action("Threads", ToggleThreads),
-            MenuItem::action("Expand All", ExpandAll),
-            MenuItem::action("Collapse All", CollapseAll),
+            action!("Tree View", ToggleTree),
+            action!("Kernel Threads", ToggleKernelThreads),
+            action!("Threads", ToggleThreads),
+            action!("Expand All", ExpandAll),
+            action!("Collapse All", CollapseAll),
             MenuItem::separator(),
             MenuItem::submenu(Menu::new("Sort By").items([
-                MenuItem::action("CPU", SortByCpu),
-                MenuItem::action("VIRT", SortByVirt),
-                MenuItem::action("RES", SortByMemory),
-                MenuItem::action("SHR", SortByShr),
-                MenuItem::action("PID", SortByPid),
-                MenuItem::action("User", SortByUser),
-                MenuItem::action("Command", SortByCommand),
+                action!("CPU", SortByCpu),
+                action!("VIRT", SortByVirt),
+                action!("RES", SortByMemory),
+                action!("SHR", SortByShr),
+                action!("PID", SortByPid),
+                action!("User", SortByUser),
+                action!("Command", SortByCommand),
             ])),
         ]),
         Menu::new("Graph").items([
-            MenuItem::action("Graph Selected Row", ToggleGraph),
-            MenuItem::action("Clear Graph", ClearGraph),
+            action!("Graph Selected Row", ToggleGraph),
+            action!("Clear Graph", ClearGraph),
             MenuItem::separator(),
-            MenuItem::action("Show / Hide Graph", ToggleGraphPanel),
+            action!("Show / Hide Graph", ToggleGraphPanel),
             MenuItem::submenu(Menu::new("Metric").items([
-                MenuItem::action("%CPU", GraphCpu),
-                MenuItem::action("VIRT", GraphVirt),
-                MenuItem::action("RES", GraphRss),
-                MenuItem::action("SHR", GraphShr),
-                MenuItem::action("%MEM", GraphMem),
-                MenuItem::action("Threads", GraphThreads),
+                action!("%CPU", GraphCpu),
+                action!("VIRT", GraphVirt),
+                action!("RES", GraphRss),
+                action!("SHR", GraphShr),
+                action!("%MEM", GraphMem),
+                action!("Threads", GraphThreads),
             ])),
-            MenuItem::action("Cycle Time Window", CycleGraphWindow),
+            action!("Cycle Time Window", CycleGraphWindow),
         ]),
         Menu::new("Playback").items([
-            MenuItem::action("Play / Pause", TogglePause),
-            MenuItem::action("Faster", Faster),
-            MenuItem::action("Slower", Slower),
+            action!("Play / Pause", TogglePause),
+            action!("Faster", Faster),
+            action!("Slower", Slower),
             MenuItem::separator(),
-            MenuItem::action(seek_label("Back", SEEK_SHORT_S), SeekBackward),
-            MenuItem::action(seek_label("Forward", SEEK_SHORT_S), SeekForward),
-            MenuItem::action(seek_label("Back", SEEK_LONG_S), SeekBackwardLong),
-            MenuItem::action(seek_label("Forward", SEEK_LONG_S), SeekForwardLong),
+            action!(seek_label("Back", SEEK_SHORT_S), SeekBackward),
+            action!(seek_label("Forward", SEEK_SHORT_S), SeekForward),
+            action!(seek_label("Back", SEEK_LONG_S), SeekBackwardLong),
+            action!(seek_label("Forward", SEEK_LONG_S), SeekForwardLong),
             MenuItem::separator(),
-            MenuItem::action("Go to Start", SeekStart),
-            MenuItem::action("Go to End", SeekEnd),
+            action!("Go to Start", SeekStart),
+            action!("Go to End", SeekEnd),
         ]),
         Menu::new("Help").items([
-            MenuItem::action("Keyboard Shortcuts", ToggleShortcuts),
+            action!("Keyboard Shortcuts", ToggleShortcuts),
             MenuItem::separator(),
-            MenuItem::action("About sysmon", About),
+            action!("About sysmon", About),
         ]),
     ]
 }
