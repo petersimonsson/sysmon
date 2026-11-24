@@ -492,7 +492,7 @@ impl Render for RecordingsView {
 }
 
 /// `path` with the home directory written as `~`, as people say it.
-fn home_relative(path: &Path) -> String {
+pub fn home_relative(path: &Path) -> String {
     relative_to(path, std::env::var_os("HOME").map(PathBuf::from).as_deref())
 }
 

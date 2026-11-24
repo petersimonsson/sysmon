@@ -457,6 +457,11 @@ pub fn display_key(k: &str) -> String {
             "pageup" => "PgUp".to_string(),
             "pagedown" => "PgDn".to_string(),
             "end" => "End".to_string(),
+            "enter" => "Enter".to_string(),
+            "tab" => "Tab".to_string(),
+            "backspace" => "Backspace".to_string(),
+            "delete" => "Delete".to_string(),
+            "insert" => "Insert".to_string(),
             p => p.to_uppercase(),
         })
         .collect::<Vec<_>>()
@@ -496,6 +501,7 @@ mod tests {
         assert_eq!(display_key("ctrl-o"), "Ctrl+O");
         assert_eq!(display_key("shift-left"), "Shift+←");
         assert_eq!(display_key("f1"), "F1");
+        assert_eq!(display_key("enter"), "Enter");
         assert_eq!(display_key("?"), "?");
         assert_eq!(display_key("]"), "]");
         assert_eq!(display_key("g"), "g", "not G, which reads as Shift+G");

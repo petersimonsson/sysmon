@@ -647,15 +647,21 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   writes back only the keys that changed (with `toml_edit`, so comments
   and unknown keys are kept). It writes to a temporary file and renames it
   into place, on the background executor. A file that can't be parsed is
-  never written. For now the only setting is `ui.theme`
-  (`system`/`light`/`dark`). With `system`, the app follows the window
+  never written. The settings are `ui.theme` (`system`/`light`/`dark`)
+  and `[keys]` (see Keyboard below), which the app reads but never writes. With `system`, the app follows the window
   appearance as it changes.
 - **Keyboard:** every command is a gpui action (`crates/ui/src/actions.rs`).
-  `SHORTCUTS` is the single table that both binds the keys and fills the
-  F1 / `?` overlay. The root element sets the `SysmonApp` key context and
-  holds focus; when the filter loses focus to nothing, focus returns to the
-  root. Shortcuts without a modifier use the predicate
-  `SysmonApp && !Input`, so they're off while typing in the filter.
+  `SHORTCUTS` holds the default keys and descriptions. At startup
+  `keymap::Keymap::resolve` applies the settings' `[keys]` (by action name
+  in snake_case; a setting replaces the defaults, takes its keys off other
+  actions, and the first setting to name a key keeps it), and the result is
+  bound and kept as a gpui global. The F1 / `?` overlay, the menus and the
+  key hints in tooltips (`keymap::hinted`) all show what's in effect;
+  `--print-keys` prints it as TOML. The root element sets the `SysmonApp`
+  key context and holds focus; when the filter loses focus to nothing,
+  focus returns to the root. A key that can be typed (no Ctrl, Alt or
+  Super, and not Esc or an F-key; `actions::works_while_typing`) is bound
+  under `SysmonApp && !Input`, so it's off while typing in a filter.
   Each render works out which actions can do something in the view on
   screen with the data it has (`AppState::compute_available`). For
   example, process keys need processes, graph keys need something graphed,
