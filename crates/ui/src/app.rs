@@ -1936,6 +1936,7 @@ impl AppState {
                         d.child(
                             Button::new("expand-all")
                                 .icon(icon(IconName::ChevronsUpDown))
+                                .label("Expand all")
                                 .tooltip("Expand all (e)")
                                 .accessibility_label("Expand all")
                                 .small()
@@ -1946,6 +1947,7 @@ impl AppState {
                         .child(
                             Button::new("collapse-all")
                                 .icon(icon(IconName::ChevronsDownUp))
+                                .label("Collapse all")
                                 .tooltip("Collapse all (c)")
                                 .accessibility_label("Collapse all")
                                 .small()
