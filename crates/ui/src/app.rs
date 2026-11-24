@@ -4057,9 +4057,51 @@ fn name_of(comm: &str, cmdline: Option<&str>) -> String {
 
 fn command(p: &ProcRow) -> String {
     p.cmdline
-        .clone()
+        .as_deref()
         .filter(|c| !c.is_empty())
-        .unwrap_or_else(|| format!("[{}]", p.comm))
+        .map_or_else(|| format!("[{}]", p.comm), printable)
+}
+
+/// `text` without terminal escape sequences (colours in an fzf or ls
+/// argument), which would show as boxes and noise, and with other control
+/// characters as spaces.
+fn printable(text: &str) -> String {
+    if !text.chars().any(char::is_control) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(if c.is_control() { ' ' } else { c });
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameters up to a final byte in @..=~.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: up to BEL or ESC \.
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' {
+                        break;
+                    }
+                    if c == '\x1b' {
+                        chars.next_if_eq(&'\\');
+                        break;
+                    }
+                }
+            }
+            // Any other escape is two characters long.
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Light or dark: as `theme` says, or as the system is.
@@ -5720,6 +5762,22 @@ mod tests {
         assert_eq!(name("zsh", Some("-zsh")), "zsh");
         assert_eq!(name("kworker/0:1", None), "kworker/0:1");
         assert_eq!(name("bash", Some("/bin/bash")), "bash");
+    }
+
+    #[test]
+    fn escape_codes_are_left_out_of_commands() {
+        use super::printable;
+        assert_eq!(printable("ls --color=auto"), "ls --color=auto");
+        assert_eq!(
+            printable(
+                "fzf --border-label '\x1b[48;2;24;24;37m\x1b[38;2;166;173;200m Files \x1b[0m'"
+            ),
+            "fzf --border-label ' Files '"
+        );
+        assert_eq!(printable("a\x1b]0;title\x07b"), "ab", "OSC to BEL");
+        assert_eq!(printable("a\x1b]8;;url\x1b\\b"), "ab", "OSC to ST");
+        assert_eq!(printable("tab\there"), "tab here");
+        assert_eq!(printable("cut off\x1b[38;2"), "cut off");
     }
 
     #[test]
