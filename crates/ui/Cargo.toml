@@ -19,6 +19,7 @@ signal-hook.workspace = true
 clap.workspace = true
 flume.workspace = true
 gpui-kit.workspace = true
+toml_edit.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

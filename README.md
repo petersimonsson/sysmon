@@ -154,6 +154,7 @@ application menu: copy it to `~/.local/share/applications/` (with
 | `--max-gib N` | no limit | Delete the oldest recordings above N GiB |
 | `--replay PATH` | | Open a recording instead of listening |
 | `--speed N` | `1` | Replay speed |
+| `--config PATH` | `~/.config/sysmon/config.toml` | Settings file (see [Settings](#settings)) |
 | `--licenses` | | Print all license notices and exit |
 
 ### The window
@@ -259,6 +260,23 @@ Logs are recorded too. Red ticks under the replay bar show where the
 selected host logged errors. In the Logs tab, clicking a line jumps there,
 so the graphs and process table show that moment; after a jump, the list
 shows the 10 minutes leading up to it.
+
+### Settings
+
+**View → Theme** picks **System** (follow the desktop's light or dark
+setting; the default), **Light** or **Dark**. The choice is saved to
+`$XDG_CONFIG_HOME/sysmon/config.toml` (usually
+`~/.config/sysmon/config.toml`), so it's kept next time:
+
+```toml
+[ui]
+theme = "system"   # "system", "light" or "dark"
+```
+
+You can also edit the file by hand. Saving changes only the keys it sets,
+so your comments stay. If the file can't be parsed, sysmon uses the
+defaults, logs a warning and doesn't overwrite it; your changes then last
+only until you quit.
 
 ### Keyboard
 

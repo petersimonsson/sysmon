@@ -639,6 +639,14 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   `/etc/localtime`), with the UTC offset beside the sample time and the
   replay position. The offset is worked out per timestamp, so a recording
   that spans a DST change reads correctly. Segment file names stay in UTC.
+- **Settings:** `crates/ui/src/config.rs` reads
+  `$XDG_CONFIG_HOME/sysmon/config.toml` (or `--config`) at startup, and
+  writes back only the keys that changed (with `toml_edit`, so comments
+  and unknown keys are kept). It writes to a temporary file and renames it
+  into place, on the background executor. A file that can't be parsed is
+  never written. For now the only setting is `ui.theme`
+  (`system`/`light`/`dark`). With `system`, the app follows the window
+  appearance as it changes.
 - **Keyboard:** every command is a gpui action (`crates/ui/src/actions.rs`).
   `SHORTCUTS` is the single table that both binds the keys and fills the
   F1 / `?` overlay. The root element sets the `SysmonApp` key context and
