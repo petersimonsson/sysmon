@@ -8,6 +8,7 @@ mod config;
 mod format;
 mod graph;
 mod icons;
+mod keymap;
 mod notices;
 mod pipeline;
 mod recordings;
@@ -92,7 +93,13 @@ fn main() -> anyhow::Result<()> {
     // Stops the recorder cleanly when the app quits or is signalled.
     let mut stopper: Option<pipeline::RecorderHandle> = None;
     let config_path = args.config.clone().unwrap_or_else(config::default_path);
-    let (config, writable) = config::load(&config_path);
+    let (mut config, writable) = config::load(&config_path);
+    // The keys in effect: the defaults with the file's [keys] over them.
+    let (keymap, key_problems) = keymap::Keymap::resolve(&config.keys);
+    for p in &key_problems {
+        tracing::warn!(path = %config_path.display(), "{p}");
+    }
+    config.problems.extend(key_problems);
     let mut start = match &args.replay {
         Some(path) => app::Start {
             live: None,
@@ -136,7 +143,7 @@ fn main() -> anyhow::Result<()> {
         .with_assets(icons::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            actions::init(cx);
+            actions::init(cx, keymap);
             // Ctrl+Q, File → Quit and closing the window all end up here.
             if let Some(r) = stopper.clone() {
                 cx.on_app_quit(move |_| {

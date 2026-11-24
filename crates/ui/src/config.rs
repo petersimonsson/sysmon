@@ -3,6 +3,11 @@
 //! ```toml
 //! [ui]
 //! theme = "system"   # "system", "light" or "dark"
+//!
+//! [keys]                         # see crate::keymap
+//! toggle_graph = "x"             # replaces the default key(s)
+//! cursor_down = ["down", "j"]
+//! toggle_tree = []               # no key
 //! ```
 //!
 //! A missing file or key means the default. The app writes only the keys it
@@ -43,6 +48,10 @@ impl ThemePref {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
     pub theme: ThemePref,
+    /// `[keys]`: an action's name and the keys for it, in file order.
+    pub keys: Vec<(String, Vec<String>)>,
+    /// What was wrong in the file, as lines to show; each was skipped.
+    pub problems: Vec<String>,
 }
 
 /// `$XDG_CONFIG_HOME/sysmon/config.toml`, else `~/.config/sysmon/config.toml`.
@@ -79,13 +88,42 @@ pub fn load(path: &Path) -> (Config, bool) {
     if let Some(theme) = doc.get("ui").and_then(|ui| ui.get("theme")) {
         match theme.as_str().and_then(ThemePref::parse) {
             Some(t) => config.theme = t,
-            None => tracing::warn!(
-                path = %path.display(),
-                "ui.theme should be \"system\", \"light\" or \"dark\"; using \"system\""
+            None => config.problems.push(
+                "[ui] theme should be \"system\", \"light\" or \"dark\"; using \"system\"".into(),
             ),
         }
     }
+    match doc.get("keys") {
+        None => {}
+        Some(keys) => match keys.as_table_like() {
+            Some(table) => {
+                for (name, item) in table.iter() {
+                    match key_list(item) {
+                        Some(list) => config.keys.push((name.to_string(), list)),
+                        None => config.problems.push(format!(
+                            "[keys] {name} should be a key (\"x\") or a list of keys ([\"x\", \"ctrl-x\"])"
+                        )),
+                    }
+                }
+            }
+            None => config.problems.push("[keys] should be a table".into()),
+        },
+    }
+    for p in &config.problems {
+        tracing::warn!(path = %path.display(), "{p}");
+    }
     (config, true)
+}
+
+/// A `[keys]` value: one key, or a list of them (empty for none).
+fn key_list(item: &Item) -> Option<Vec<String>> {
+    if let Some(s) = item.as_str() {
+        return Some(vec![s.to_string()]);
+    }
+    item.as_array()?
+        .iter()
+        .map(|v| v.as_str().map(str::to_string))
+        .collect()
 }
 
 /// Set `ui.theme` in the file at `path`, creating it (and its directory) if
@@ -121,6 +159,39 @@ pub fn save_theme(path: &Path, theme: ThemePref) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_are_read_in_file_order() {
+        let path = tmp("keys");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text = "[keys]\ntoggle_graph = \"x\"\ncursor_down = [\"down\", \"j\"]\n\
+                    toggle_tree = []\nclear_graph = 3\n";
+        std::fs::write(&path, text).unwrap();
+        let (config, _) = load(&path);
+        let keys: Vec<(&str, Vec<&str>)> = config
+            .keys
+            .iter()
+            .map(|(n, ks)| (n.as_str(), ks.iter().map(String::as_str).collect()))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                ("toggle_graph", vec!["x"]),
+                ("cursor_down", vec!["down", "j"]),
+                ("toggle_tree", vec![]),
+            ]
+        );
+        assert_eq!(
+            config.problems.len(),
+            1,
+            "clear_graph = 3: {:?}",
+            config.problems
+        );
+        // The app doesn't write [keys], but saving the theme keeps them.
+        save_theme(&path, ThemePref::Dark).unwrap();
+        assert_eq!(load(&path).0.keys, config.keys);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("sysmon-config-{}-{name}", std::process::id()));
@@ -168,7 +239,10 @@ mod tests {
 
         // A value it doesn't know is only that key.
         std::fs::write(&path, "[ui]\ntheme = \"purple\"\n").unwrap();
-        assert_eq!(load(&path), (Config::default(), true));
+        let (config, writable) = load(&path);
+        assert!(writable);
+        assert_eq!(config.theme, ThemePref::System);
+        assert_eq!(config.problems.len(), 1, "{:?}", config.problems);
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
 }
