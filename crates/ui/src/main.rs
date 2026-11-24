@@ -9,6 +9,7 @@ mod graph;
 mod icons;
 mod notices;
 mod pipeline;
+mod recordings;
 mod selection;
 mod widgets;
 

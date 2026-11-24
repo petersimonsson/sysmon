@@ -516,10 +516,15 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   - a menu bar (File, View, Processes, Graph, Playback, Help). On Linux and
     Windows it's gpui-kit's in-window `AppMenuBar`; on macOS it's the native
     menu bar (`cx.set_menus`). Menu items show their shortcuts;
-  - a toolbar with Live / Recording and Open recording… (the system file
-    picker, via `cx.prompt_for_paths`; the recording is opened on the
-    background executor, since that reads every segment's index), and any
-    error, dismissed with its × or Esc;
+  - a toolbar with Live / Recording and Open recording…, and any error,
+    dismissed with its × or Esc. Open recording… shows the recordings
+    dialog (`recordings.rs`). It runs `sysmon_model::catalog::scan` on the
+    background executor. For each (host, boot) the scan reads every
+    segment's index, which gives its stretches of data (silences over
+    `GAP_NS` count as gaps), and decodes one block for the newest
+    `HostInfo` name. The dialog has a row for each boot, grouped by host.
+    Browse… falls back to the system file picker (`cx.prompt_for_paths`).
+    Either way the recording is opened on the background executor;
   - a sidebar listing hosts by name, with a liveness dot ("silent for N")
     and the incomplete-frame rate;
   - a header with CPU, memory, network and disk figures, each with a
@@ -668,7 +673,8 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   in a recording (driven by `ReplayHandle::manual`); and the Details tab
   following the cursor, keeping an exited process, and leading to the
   parent, children, graph and Logs tab.
-- **Opening recordings:** Open recording…, or
+- **Opening recordings:** the recordings dialog (pick a boot, a host or
+  everything in the data directory), Browse… in it, or
   `sysmon-ui --replay <data_dir>/<host>/…` (which doesn't listen).
 
 ## Threading (monitoring host)

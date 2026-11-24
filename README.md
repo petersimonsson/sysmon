@@ -241,8 +241,16 @@ and the time it was down shows as a gap. For up to 30 s after it starts, the
 command lines and users of processes that were already running may be
 missing, until the agents' next full metadata refresh.
 
-To replay a recording, use **File → Open Recording…** (Ctrl+O), or start with
-`sysmon-ui --replay ~/.local/share/sysmon`. You can open the whole data
+To replay a recording, use **File → Open Recording…** (Ctrl+O). It lists
+the recordings in the data directory, one row per boot of each machine,
+grouped by machine with the newest first. Each row shows the time covered,
+how long that is, a bar with the gaps (times when nothing was recorded) and
+their total length, the size on disk, and a **recording** badge if it is still
+being recorded. Type to filter by machine name, use ↑/↓ to pick a row and
+Enter (or a double-click) to open it. Opening a machine's row opens all its
+boots, and **Open all** opens the whole data directory. **Browse…** opens a
+recording from somewhere else. You can also start with
+`sysmon-ui --replay ~/.local/share/sysmon`, and give it the whole data
 directory, one host or boot directory, or a single `.seg` file. Use the
 replay bar at the bottom to play, pause, change speed and seek. Recordings
 from several hosts play back together, in the order they were received.
