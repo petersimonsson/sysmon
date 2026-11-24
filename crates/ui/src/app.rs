@@ -100,6 +100,16 @@ const FORGET_AFTER_NS: u64 = 3600 * 1_000_000_000;
 /// send datagrams under made-up host IDs.
 const MAX_LIVE_HOSTS: usize = 256;
 
+/// The settings file's problems as one line for the error strip: the
+/// first, and how many more (all of them are in the log).
+fn settings_problems(problems: &[String]) -> Option<String> {
+    let first = problems.first()?;
+    Some(match problems.len() {
+        1 => format!("Settings: {first}"),
+        n => format!("Settings: {first} (and {} more; see the log)", n - 1),
+    })
+}
+
 /// One sender turned away, and why: "10.0.0.5: its data is …".
 fn rejected_line(r: &Rejected) -> String {
     format!("{}: {}", r.from, r.reason)
@@ -454,7 +464,9 @@ impl AppState {
             replay_slices: 0,
             shown_status: None,
             scroll: UniformListScrollHandle::new(),
-            error: None,
+            // What was wrong in the settings file, said once at startup:
+            // a typo in [keys] otherwise looks like a key that doesn't work.
+            error: settings_problems(&start.config.problems),
             _tasks: tasks,
             _subscriptions: subscriptions,
         };
@@ -942,7 +954,10 @@ impl AppState {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .aria_description("Dismiss")
-                            .tooltip(|window, cx| Tooltip::new("Dismiss (Esc)").build(window, cx))
+                            .tooltip({
+                                let tip = crate::keymap::hinted::<Dismiss>(cx, "Dismiss");
+                                move |window, cx| Tooltip::new(tip.clone()).build(window, cx)
+                            })
                             .child(icon(IconName::X))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.error = None;
@@ -1758,7 +1773,12 @@ impl AppState {
         match self.selection().filter(|s| !s.is_empty()) {
             Some(sel) => parts.push(format!("{} graphed", sel.len())),
             // The checkboxes have no header: say what they're for.
-            None => parts.push("tick a row's box (or press g) to graph it".into()),
+            None => parts.push(
+                match cx.global::<crate::keymap::Keymap>().label::<ToggleGraph>() {
+                    Some(key) => format!("tick a row's box (or press {key}) to graph it"),
+                    None => "tick a row's box to graph it".into(),
+                },
+            ),
         }
         parts.join(" · ")
     }
@@ -1849,6 +1869,12 @@ impl AppState {
         let empty_note = (count == 0 && !needle.is_empty()).then(|| {
             format!("No processes match \u{201c}{needle}\u{201d}. Esc clears the filter.")
         });
+        // With the keys in effect, which the settings may have changed.
+        let pick_tips: Rc<[SharedString; 3]> = Rc::new([
+            crate::keymap::hinted::<ToggleGraph>(cx, "Remove from the graph"),
+            crate::keymap::hinted::<ToggleGraph>(cx, "Graph this thread"),
+            crate::keymap::hinted::<ToggleGraph>(cx, "Graph this process"),
+        ]);
         let list = uniform_list("procs", count, move |range, _, _| {
             range
                 .map(|i| {
@@ -1865,9 +1891,9 @@ impl AppState {
                         || line.tree.as_ref().is_some_and(|t| !t.matched);
                     let slot = picked.get(&line.key()).copied();
                     let pick_tip = match slot {
-                        Some(_) => "Remove from the graph (g)",
-                        None if line.thread.is_some() => "Graph this thread (g)",
-                        None => "Graph this process (g)",
+                        Some(_) => pick_tips[0].clone(),
+                        None if line.thread.is_some() => pick_tips[1].clone(),
+                        None => pick_tips[2].clone(),
                     };
                     // Process-only figures: a thread's memory and thread
                     // count are its process's, shown on that row.
@@ -1926,8 +1952,10 @@ impl AppState {
                                     }
                                     None => d.border_color(theme.muted_foreground),
                                 })
-                                .aria_description(pick_tip)
-                                .tooltip(move |window, cx| Tooltip::new(pick_tip).build(window, cx))
+                                .aria_description(pick_tip.clone())
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(pick_tip.clone()).build(window, cx)
+                                })
                                 .on_click(on_pick),
                         )
                         .child(div().w(px(PID_COL)).child(line.key().pid.to_string()))
@@ -2039,7 +2067,7 @@ impl AppState {
                             Button::new("expand-all")
                                 .icon(icon(IconName::ChevronsUpDown))
                                 .label("Expand all")
-                                .tooltip("Expand all (e)")
+                                .tooltip(crate::keymap::hinted::<ExpandAll>(cx, "Expand all"))
                                 .accessibility_label("Expand all")
                                 .small()
                                 .disabled(!self.available.has::<ExpandAll>())
@@ -2050,7 +2078,7 @@ impl AppState {
                             Button::new("collapse-all")
                                 .icon(icon(IconName::ChevronsDownUp))
                                 .label("Collapse all")
-                                .tooltip("Collapse all (c)")
+                                .tooltip(crate::keymap::hinted::<CollapseAll>(cx, "Collapse all"))
                                 .accessibility_label("Collapse all")
                                 .small()
                                 .disabled(!self.available.has::<CollapseAll>())
@@ -3410,8 +3438,14 @@ impl AppState {
     fn render_shortcuts(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let mut groups: Vec<(&str, Vec<(String, &str)>)> = Vec::new();
-        for s in actions::SHORTCUTS {
-            let keys = s
+        // The keys in effect, settings included; an action left without
+        // any isn't listed.
+        for b in cx.global::<crate::keymap::Keymap>().bindings() {
+            if b.keys.is_empty() {
+                continue;
+            }
+            let s = b.shortcut;
+            let keys = b
                 .keys
                 .iter()
                 .map(|k| actions::display_key(k))
@@ -4331,14 +4365,14 @@ mod tests {
         open_with(cx, |_| {})
     }
 
-    /// [`open`], with `Start` changed by `tweak` first.
+    /// [`open`], with `Start` changed by `tweak` first. Its settings'
+    /// `[keys]` are bound as `main` binds them.
     fn open_with(
         cx: &mut TestAppContext,
         tweak: impl FnOnce(&mut Start),
     ) -> (AnyWindowHandle, Entity<AppState>) {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            crate::actions::init(cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: point(px(0.), px(0.)),
@@ -4355,11 +4389,74 @@ mod tests {
                 config_path: None,
             };
             tweak(&mut start);
+            let (keymap, problems) = crate::keymap::Keymap::resolve(&start.config.keys);
+            start.config.problems.extend(problems);
+            crate::actions::init(cx, keymap);
             gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| AppState::new(start, window, cx))
             })
             .expect("open test window")
         })
+    }
+
+    #[gpui_kit::test]
+    fn keys_set_in_the_settings_replace_the_defaults(cx: &mut TestAppContext) {
+        let (window, app) = open_with(cx, |s| {
+            s.config.keys = vec![
+                ("toggle_graph".into(), vec!["x".into()]),
+                ("toggel_tree".into(), vec!["t".into()]),
+            ];
+        });
+        add_host(&app, cx);
+        let step = |cx: &mut TestAppContext,
+                    f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+            cx.update_window(window, |_, window, cx| f(window, cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        // The typo is reported, once, where it shows.
+        app.read_with(cx, |app, _| {
+            let e = app.error.clone().unwrap_or_default();
+            assert!(
+                e.starts_with("Settings: [keys] toggel_tree: no such action"),
+                "{e}"
+            );
+        });
+        // Hints name the key in effect.
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            let pick = w.find(("pick", 0usize));
+            assert_eq!(pick.description(), Some("Graph this process (x)"));
+        });
+        app.read_with(cx, |app, cx| {
+            let host = app.current_host().unwrap();
+            let status = app.status_line(host, &app.table_lines(host, cx), cx);
+            assert!(status.contains("(or press x)"), "{status}");
+        });
+        step(cx, &|w, cx| {
+            w.press("down", cx);
+            w.press("g", cx);
+        });
+        app.read_with(cx, |app, _| {
+            assert!(picked(app).is_empty(), "g does nothing now")
+        });
+        step(cx, &|w, cx| w.press("x", cx));
+        app.read_with(cx, |app, _| {
+            assert_eq!(picked(app).len(), 1, "x graphs the row")
+        });
+        // The shortcuts list says x.
+        step(cx, &|w, cx| w.press("f1", cx));
+        step(cx, &|w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("shortcuts-columns").is_some());
+        });
+        cx.update(|cx| {
+            let keymap = cx.global::<crate::keymap::Keymap>();
+            assert_eq!(
+                keymap.label::<crate::actions::ToggleGraph>().as_deref(),
+                Some("x")
+            );
+        });
     }
 
     #[gpui_kit::test]
@@ -6038,7 +6135,12 @@ mod tests {
         use crate::config::{Config, ThemePref};
         use gpui_kit::component::ActiveTheme as _;
         for (theme, is_dark) in [(ThemePref::Dark, true), (ThemePref::Light, false)] {
-            let (_window, app) = open_with(cx, |s| s.config = Config { theme });
+            let (_window, app) = open_with(cx, |s| {
+                s.config = Config {
+                    theme,
+                    ..Default::default()
+                }
+            });
             assert_eq!(cx.update(|cx| cx.theme().is_dark()), is_dark);
             app.read_with(cx, |app, _| assert_eq!(app.theme, theme));
         }

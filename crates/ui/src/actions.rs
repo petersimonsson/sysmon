@@ -68,7 +68,7 @@ actions!(
 /// Key context of the app's root element.
 pub const CONTEXT: &str = "SysmonApp";
 /// Shortcuts without a modifier must not fire while typing in the filter.
-const NOT_TYPING: &str = "SysmonApp && !Input";
+pub const NOT_TYPING: &str = "SysmonApp && !Input";
 
 /// Seek step for ←/→ and ⇧←/⇧→, in seconds.
 pub const SEEK_SHORT_S: u64 = 10;
@@ -89,19 +89,32 @@ fn seek_label(direction: &str, s: u64) -> String {
 
 pub struct Shortcut {
     pub group: &'static str,
-    /// Keystrokes in gpui syntax; the first is shown in the overlay.
+    /// The default keystrokes, in gpui syntax and the keymap's spelling
+    /// ([`crate::keymap::canonical`]); the first is shown in the overlay.
     pub keys: &'static [&'static str],
     pub description: &'static str,
-    bind: fn(&'static str, Option<&str>) -> KeyBinding,
+    /// The action's type name (`ToggleGraph`).
+    action_name: &'static str,
+    pub type_id: fn() -> TypeId,
+    pub action: fn() -> Box<dyn Action>,
+}
+
+impl Shortcut {
+    /// What the settings call it: `toggle_graph`.
+    pub fn name(&self) -> String {
+        crate::keymap::snake_case(self.action_name)
+    }
 }
 
 macro_rules! shortcut {
-    ($group:literal, [$($key:literal),+], $action:expr, $desc:literal) => {
+    ($group:literal, [$($key:literal),+], $action:ident, $desc:literal) => {
         Shortcut {
             group: $group,
             keys: &[$($key),+],
             description: $desc,
-            bind: |k, c| KeyBinding::new(k, $action, c),
+            action_name: stringify!($action),
+            type_id: TypeId::of::<$action>,
+            action: || Box::new($action),
         }
     };
 }
@@ -294,18 +307,13 @@ pub trait OnAvailable: InteractiveElement + Sized {
 
 impl<E: InteractiveElement> OnAvailable for E {}
 
-/// Register key bindings and menus. Call once, after `gpui_kit::init`.
-pub fn init(cx: &mut App) {
-    cx.bind_keys(SHORTCUTS.iter().flat_map(|s| {
-        s.keys.iter().map(move |k| {
-            let ctx = if works_while_typing(k) {
-                CONTEXT
-            } else {
-                NOT_TYPING
-            };
-            (s.bind)(k, Some(ctx))
-        })
-    }));
+/// Register `keymap`'s key bindings and the menus. Call once, after
+/// `gpui_kit::init`. The keymap is kept as a global, for the shortcuts
+/// list and hints to show the keys in effect.
+pub fn init(cx: &mut App, keymap: crate::keymap::Keymap) {
+    let bindings = keymap.key_bindings(cx);
+    cx.bind_keys(bindings);
+    cx.set_global(keymap);
     cx.on_action(|_: &Quit, cx| cx.quit());
     // The window sets the menus up for what it shows once it draws.
     set_menus(&Available::default(), cx);
