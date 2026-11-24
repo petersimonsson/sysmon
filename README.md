@@ -279,7 +279,7 @@ shows the 10 minutes leading up to it.
 
 ### Settings
 
-**View → Theme** picks **System** (follow the desktop's light or dark
+**Settings → Theme** picks **System** (follow the desktop's light or dark
 setting; the default), **Light** or **Dark**. The choice is saved to
 `$XDG_CONFIG_HOME/sysmon/config.toml` (usually
 `~/.config/sysmon/config.toml`), so it's kept next time:
