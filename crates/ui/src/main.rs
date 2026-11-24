@@ -91,6 +91,7 @@ fn main() -> anyhow::Result<()> {
             live: None,
             replay: Some((pipeline::open_replay(path, args.speed)?, path.clone())),
             recording_to: None,
+            data_dir: data_dir.clone(),
         },
         None => {
             let recording = (!args.no_record).then(|| pipeline::Recording {
@@ -106,12 +107,13 @@ fn main() -> anyhow::Result<()> {
             if let Some(r) = &recorder {
                 stop_recording_on_signals(r.clone())?;
             }
-            let recording_to = recorder.is_some().then_some(data_dir);
+            let recording_to = recorder.is_some().then(|| data_dir.clone());
             stopper = recorder;
             app::Start {
                 live: Some(live),
                 replay: None,
                 recording_to,
+                data_dir,
             }
         }
     };
