@@ -939,18 +939,28 @@ impl AppState {
             // is beside the Recording button (the data directory beside it
             // read as a second, different recording).
             .when(self.view == View::Live && self.live_enabled, |b| {
-                let text = match &self.recording_to {
-                    Some(dir) => format!("Recording to {}", dir.display()),
-                    None => "Not recording".into(),
+                // A dot and a word; where to is on hover (the whole path
+                // took a third of the bar and said the same all session).
+                let (text, label) = match &self.recording_to {
+                    Some(dir) => (format!("Recording to {}", dir.display()), "Recording"),
+                    None => ("Not recording".to_string(), "Not recording"),
                 };
+                let recording = self.recording_to.is_some();
                 b.child(
                     div()
                         .id("recording-to")
                         .test_support()
+                        .flex()
+                        .items_center()
+                        .gap_1()
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .aria_description(text.clone())
-                        .child(text),
+                        .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                        .when(recording, |d| {
+                            d.child(div().size(px(7.)).rounded_full().bg(theme.danger))
+                        })
+                        .child(label),
                 )
             })
     }
@@ -2300,6 +2310,7 @@ impl AppState {
             .child(
                 Button::new("graph-hide")
                     .icon(icon(IconName::PanelBottomClose))
+                    .label("Hide")
                     .tooltip("Hide the panel")
                     .accessibility_label("Hide the panel")
                     .small()
@@ -2715,6 +2726,7 @@ impl AppState {
             .child(
                 Button::new("logs-hide")
                     .icon(icon(IconName::PanelBottomClose))
+                    .label("Hide")
                     .tooltip("Hide the panel")
                     .accessibility_label("Hide the panel")
                     .small()
