@@ -657,7 +657,13 @@ buggy or hostile agent can't overflow it (a panic in debug builds).
   actions, and the first setting to name a key keeps it), and the result is
   bound and kept as a gpui global. The F1 / `?` overlay, the menus and the
   key hints in tooltips (`keymap::hinted`) all show what's in effect;
-  `--print-keys` prints it as TOML. The root element sets the `SysmonApp`
+  `--print-keys` prints it as TOML. Settings → Keyboard Shortcuts…
+  (`shortcuts.rs`) edits a draft of it: adding a key installs a keystroke
+  interceptor (`cx.intercept_keystrokes`), which runs before any binding,
+  so the key pressed is caught rather than run. Save calls
+  `keymap::apply`, which swaps sysmon's bindings (tagged with a
+  `KeyBindingMetaIndex`) for the new ones while keeping gpui-kit's, and
+  `config::save_keys` writes every action that differs from its defaults. The root element sets the `SysmonApp`
   key context and holds focus; when the filter loses focus to nothing,
   focus returns to the root. A key that can be typed (no Ctrl, Alt or
   Super, and not Esc or an F-key; `actions::works_while_typing`) is bound

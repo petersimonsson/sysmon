@@ -131,6 +131,39 @@ impl Keymap {
         out
     }
 
+    /// Each action's keys, in [`SHORTCUTS`] order: what the shortcut
+    /// editor edits.
+    pub fn draft(&self) -> Vec<Vec<String>> {
+        self.bindings.iter().map(|b| b.keys.clone()).collect()
+    }
+
+    /// The keymap with `draft`'s keys, one list per action in
+    /// [`SHORTCUTS`] order (as [`Self::draft`] gives them).
+    pub fn from_draft(draft: Vec<Vec<String>>) -> Self {
+        Self {
+            bindings: SHORTCUTS
+                .iter()
+                .zip(draft)
+                .map(|(shortcut, keys)| Binding { shortcut, keys })
+                .collect(),
+        }
+    }
+
+    /// What `[keys]` must say for this keymap: every action whose keys
+    /// differ from its defaults with them, and the rest as `None` (no
+    /// entry). An action that only lost a key to another is written out
+    /// too, so the file says plainly what each key does.
+    pub fn entries(&self) -> Vec<(String, Option<Vec<String>>)> {
+        self.bindings
+            .iter()
+            .map(|b| {
+                let default = b.shortcut.keys.iter().map(|k| k.to_string());
+                let same = b.keys.iter().cloned().eq(default);
+                (b.shortcut.name(), (!same).then(|| b.keys.clone()))
+            })
+            .collect()
+    }
+
     pub fn bindings(&self) -> &[Binding] {
         &self.bindings
     }
@@ -167,7 +200,7 @@ impl Keymap {
                     not_typing.clone()
                 };
                 match KeyBinding::load(k, (b.shortcut.action)(), Some(ctx), false, None, cx) {
-                    Ok(binding) => out.push(binding),
+                    Ok(binding) => out.push(binding.with_meta(OURS)),
                     // `canonical` let it through, so this is a bug; skip
                     // the key rather than lose them all.
                     Err(e) => tracing::warn!(key = %k, error = %e, "can't bind key"),
@@ -185,6 +218,30 @@ pub fn hinted<A: Action>(cx: &App, text: &str) -> SharedString {
         Some(key) => format!("{text} ({key})").into(),
         None => SharedString::from(text.to_string()),
     }
+}
+
+/// Marks sysmon's own bindings in gpui's keymap, so they can be told from
+/// gpui-kit's (text editing, menus, dialogs) when the keys change.
+const OURS: KeyBindingMetaIndex = KeyBindingMetaIndex(0x5359_534d);
+
+/// Put `keymap` in effect while running: sysmon's bindings are replaced,
+/// everyone else's kept, and the global the shortcuts list and hints read
+/// is updated. gpui can only clear the whole keymap, so the others are
+/// taken out first and put back. Menus that show keys must be rebuilt by
+/// the caller.
+pub fn apply(cx: &mut App, keymap: Keymap) {
+    let others: Vec<KeyBinding> = cx
+        .key_bindings()
+        .borrow()
+        .bindings()
+        .filter(|b| b.meta() != Some(OURS))
+        .cloned()
+        .collect();
+    let ours = keymap.key_bindings(cx);
+    cx.clear_key_bindings();
+    cx.bind_keys(others);
+    cx.bind_keys(ours);
+    cx.set_global(keymap);
 }
 
 /// Keys that aren't a single character.
@@ -285,6 +342,57 @@ pub fn canonical(key: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// The key that `keystroke`, as pressed, is bound as; `None` for a
+/// modifier on its own. A shifted symbol is the symbol it types: Shift
+/// with / is `?`, as the defaults write it, while Shift with a letter stays
+/// `shift-p`.
+pub fn from_keystroke(keystroke: &Keystroke) -> Option<String> {
+    let key = keystroke.key.as_str();
+    if matches!(
+        key,
+        "shift"
+            | "control"
+            | "ctrl"
+            | "alt"
+            | "platform"
+            | "super"
+            | "cmd"
+            | "function"
+            | "fn"
+            | "capslock"
+    ) {
+        return None;
+    }
+    let m = &keystroke.modifiers;
+    let mut shift = m.shift;
+    let mut name = key.to_string();
+    if shift && !m.control && !m.alt && !m.platform {
+        let typed = keystroke
+            .key_char
+            .as_deref()
+            .filter(|c| c.chars().count() == 1);
+        if let Some(c) = typed
+            && c.chars().all(|c| !c.is_alphabetic() && !c.is_whitespace())
+        {
+            name = c.to_string();
+            shift = false;
+        }
+    }
+    let mut out = String::new();
+    for (on, part) in [
+        (m.control, "ctrl-"),
+        (m.alt, "alt-"),
+        (shift, "shift-"),
+        (m.platform, "super-"),
+    ] {
+        if on {
+            out.push_str(part);
+        }
+    }
+    out.push_str(&name);
+    canonical(&out).ok()
+}
+
 /// `ToggleGraph` → `toggle_graph`: how an action is named in the settings.
 pub fn snake_case(name: &str) -> String {
     let mut out = String::new();
@@ -337,6 +445,66 @@ mod tests {
         let (round, problems) = Keymap::resolve(&again);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(round.to_toml(), text);
+    }
+
+    #[test]
+    fn a_key_press_is_named_as_the_keymap_writes_it() {
+        use super::from_keystroke;
+        use gpui_kit::Keystroke;
+        // Every default, pressed, comes back as itself.
+        for s in SHORTCUTS {
+            for k in s.keys {
+                let pressed = Keystroke::parse(k).unwrap();
+                assert_eq!(from_keystroke(&pressed).as_deref(), Some(*k), "{k}");
+            }
+        }
+        // ? as a keyboard reports it: Shift with /, typing "?".
+        let question = Keystroke {
+            key_char: Some("?".into()),
+            ..Keystroke::parse("shift-/").unwrap()
+        };
+        assert_eq!(from_keystroke(&question).as_deref(), Some("?"));
+        let shifted_p = Keystroke {
+            key_char: Some("P".into()),
+            ..Keystroke::parse("shift-p").unwrap()
+        };
+        assert_eq!(from_keystroke(&shifted_p).as_deref(), Some("shift-p"));
+        assert_eq!(from_keystroke(&Keystroke::parse("shift").unwrap()), None);
+        assert_eq!(
+            from_keystroke(&Keystroke::parse("ctrl-shift-g").unwrap()).as_deref(),
+            Some("ctrl-shift-g")
+        );
+    }
+
+    #[test]
+    fn a_draft_saves_as_entries_that_read_back_the_same() {
+        let mut draft = Keymap::defaults().draft();
+        let graph = SHORTCUTS
+            .iter()
+            .position(|s| s.name() == "toggle_graph")
+            .unwrap();
+        let expand = SHORTCUTS
+            .iter()
+            .position(|s| s.name() == "expand_all")
+            .unwrap();
+        draft[graph] = vec!["e".into()];
+        draft[expand] = vec![];
+        let keymap = Keymap::from_draft(draft.clone());
+        let entries = keymap.entries();
+        let written: Vec<(String, Vec<String>)> = entries
+            .iter()
+            .filter_map(|(n, ks)| ks.clone().map(|ks| (n.clone(), ks)))
+            .collect();
+        assert_eq!(written.len(), 2, "{written:?}");
+        let (again, problems) = Keymap::resolve(&written);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(again.draft(), draft);
+        assert!(
+            Keymap::defaults()
+                .entries()
+                .iter()
+                .all(|(_, ks)| ks.is_none())
+        );
     }
 
     #[test]

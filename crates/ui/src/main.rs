@@ -13,6 +13,7 @@ mod notices;
 mod pipeline;
 mod recordings;
 mod selection;
+mod shortcuts;
 mod widgets;
 
 use std::net::SocketAddr;
