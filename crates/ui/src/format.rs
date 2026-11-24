@@ -104,7 +104,10 @@ pub fn fit(s: &str, max: usize) -> String {
 
 pub fn duration(ns: u64) -> String {
     let s = ns / 1_000_000_000;
-    if s >= 3600 {
+    if s >= 86_400 {
+        // "75h36m" made you divide by 24.
+        format!("{}d{:02}h", s / 86_400, s / 3600 % 24)
+    } else if s >= 3600 {
         format!("{}h{:02}m", s / 3600, s / 60 % 60)
     } else if s >= 60 {
         format!("{}m{:02}s", s / 60, s % 60)
@@ -124,6 +127,10 @@ mod tests {
         assert_eq!(bytes_per_s(3.0 * 1024.0 * 1024.0), "3.0 MiB/s");
         assert_eq!(duration(3_725 * 1_000_000_000), "1h02m");
         assert_eq!(duration(65 * 1_000_000_000), "1m05s");
+        assert_eq!(
+            duration((3 * 86_400 + 3 * 3600 + 36 * 60) * 1_000_000_000),
+            "3d03h"
+        );
     }
 
     fn fmt(ts_ns: u64, tz: TimeZone) -> (String, String) {

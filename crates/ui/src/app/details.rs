@@ -310,7 +310,8 @@ impl AppState {
             |t| format::duration(s.seen_ns.saturating_sub(t)),
         );
         let threads = match s.live.as_ref() {
-            Some(d) if host.sends_threads() => {
+            // Only when they differ: "7 (7 listed)" said the same twice.
+            Some(d) if host.sends_threads() && d.threads.len() + 1 != row.threads as usize => {
                 format!("{} ({} listed)", row.threads, d.threads.len() + 1)
             }
             _ => row.threads.to_string(),
