@@ -181,6 +181,7 @@ impl AppState {
             .child(
                 Button::new("details-hide")
                     .icon(icon(IconName::PanelBottomClose))
+                    .label("Hide")
                     .tooltip("Hide the panel")
                     .accessibility_label("Hide the panel")
                     .small()
