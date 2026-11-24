@@ -108,6 +108,29 @@ impl Keymap {
         (Self { bindings }, problems)
     }
 
+    /// The keys in effect as a `[keys]` table, every action with its
+    /// description, grouped as the shortcuts list groups them: for
+    /// `sysmon-ui --print-keys`, to copy into the settings and edit.
+    pub fn to_toml(&self) -> String {
+        let mut out = String::from(
+            "# sysmon-ui keyboard shortcuts. Put this in config.toml and edit it:\n\
+             # an action's keys replace its defaults, [] leaves it without any, and\n\
+             # one you leave out keeps its defaults. Keys are written ctrl-g, shift-p,\n\
+             # f5, pagedown, … (Ctrl+G works too).\n[keys]\n",
+        );
+        let mut group = "";
+        for b in &self.bindings {
+            if b.shortcut.group != group {
+                group = b.shortcut.group;
+                out.push_str(&format!("\n# {group}\n"));
+            }
+            let keys: Vec<String> = b.keys.iter().map(|k| format!("{k:?}")).collect();
+            let entry = format!("{} = [{}]", b.shortcut.name(), keys.join(", "));
+            out.push_str(&format!("{entry:<40} # {}\n", b.shortcut.description));
+        }
+        out
+    }
+
     pub fn bindings(&self) -> &[Binding] {
         &self.bindings
     }
@@ -289,6 +312,31 @@ mod tests {
             .iter()
             .map(|(n, ks)| (n.to_string(), ks.iter().map(|k| k.to_string()).collect()))
             .collect()
+    }
+
+    #[test]
+    fn the_printed_table_reads_back_as_the_same_keys() {
+        let (keymap, _) = Keymap::resolve(&set(&[("toggle_graph", &["x"]), ("toggle_tree", &[])]));
+        let text = keymap.to_toml();
+        assert!(text.contains("toggle_graph = [\"x\"]"), "{text}");
+        assert!(text.contains("toggle_tree = []"), "{text}");
+        let doc: toml_edit::DocumentMut = text.parse().expect("valid TOML");
+        let keys = doc["keys"].as_table().unwrap();
+        assert_eq!(keys.len(), SHORTCUTS.len(), "every action");
+        let again: Vec<(String, Vec<String>)> = keys
+            .iter()
+            .map(|(n, v)| {
+                let ks = v
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|k| k.as_str().unwrap().to_string());
+                (n.to_string(), ks.collect())
+            })
+            .collect();
+        let (round, problems) = Keymap::resolve(&again);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(round.to_toml(), text);
     }
 
     #[test]

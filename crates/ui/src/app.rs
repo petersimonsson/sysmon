@@ -3540,7 +3540,24 @@ impl AppState {
                             .text_xs()
                             .text_color(theme.muted_foreground)
                             .child("Single-key shortcuts are off while the filter has focus. Esc or click to close."),
-                    ),
+                    )
+                    .child({
+                        let path = self
+                            .config_path
+                            .clone()
+                            .unwrap_or_else(crate::config::default_path);
+                        let text = format!(
+                            "Change keys under [keys] in {} (sysmon-ui --print-keys lists them all).",
+                            crate::recordings::home_relative(&path)
+                        );
+                        div()
+                            .id("shortcuts-settings")
+                            .test_support()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .aria_description(text.clone())
+                            .child(text)
+                    }),
             )
     }
 

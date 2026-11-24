@@ -58,6 +58,10 @@ struct Args {
     /// software in this binary, then exit.
     #[arg(long)]
     licenses: bool,
+    /// Print the keyboard shortcuts in effect as a `[keys]` table for the
+    /// settings file, then exit.
+    #[arg(long)]
+    print_keys: bool,
 }
 
 /// Wayland app ID / X11 WM_CLASS; matches `dist/sysmon.desktop`, so
@@ -98,6 +102,10 @@ fn main() -> anyhow::Result<()> {
     let (keymap, key_problems) = keymap::Keymap::resolve(&config.keys);
     for p in &key_problems {
         tracing::warn!(path = %config_path.display(), "{p}");
+    }
+    if args.print_keys {
+        print!("{}", keymap.to_toml());
+        return Ok(());
     }
     config.problems.extend(key_problems);
     let mut start = match &args.replay {

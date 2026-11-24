@@ -156,6 +156,7 @@ application menu: copy it to `~/.local/share/applications/` (with
 | `--speed N` | `1` | Replay speed |
 | `--config PATH` | `~/.config/sysmon/config.toml` | Settings file (see [Settings](#settings)) |
 | `--licenses` | | Print all license notices and exit |
+| `--print-keys` | | Print the keyboard shortcuts as a `[keys]` table and exit (see [Keyboard](#keyboard)) |
 
 ### The window
 
@@ -288,6 +289,9 @@ setting; the default), **Light** or **Dark**. The choice is saved to
 theme = "system"   # "system", "light" or "dark"
 ```
 
+The same file can set your own keyboard shortcuts: see
+[Changing keys](#changing-keys).
+
 You can also edit the file by hand. Saving changes only the keys it sets,
 so your comments stay. If the file can't be parsed, sysmon uses the
 defaults, logs a warning and doesn't overwrite it; your changes then last
@@ -295,7 +299,8 @@ only until you quit.
 
 ### Keyboard
 
-Press **F1** or **?** in the app for the full list. The most useful ones:
+Press **F1** or **?** in the app for the full list. The most useful ones
+are below; you can change any of them (see [Changing keys](#changing-keys)).
 
 | Keys | |
 |---|---|
@@ -316,6 +321,35 @@ Press **F1** or **?** in the app for the full list. The most useful ones:
 | ←/→, Shift+←/→, Home/End | Seek 10 s, 1 min, to start/end |
 
 Single-letter shortcuts are turned off while you type in the filter.
+
+#### Changing keys
+
+Set your own keys under `[keys]` in the settings file. Each action is named
+in snake_case, and the keys you give it replace its defaults:
+
+```toml
+[keys]
+toggle_graph = "x"              # x graphs the row, instead of g
+cursor_down = ["down", "n"]     # several keys
+toggle_tree = []                # no key at all
+```
+
+`sysmon-ui --print-keys` prints every action with its keys and what it does,
+as a `[keys]` table to copy into the file and edit. Keys are written as
+`ctrl-g`, `shift-p`, `alt-x`, `f5`, `pagedown` and so on (`Ctrl+G`, as the
+menus write it, works too; a capital letter on its own means Shift).
+
+- A key you give one action is taken off any other that had it by default.
+  Two actions can't share one: the first in the file keeps it.
+- Keys you can type (letters, digits, `/`, Shift with them) don't work while
+  a filter box has the keyboard; ones with Ctrl, Alt or Super, Esc and the
+  F-keys do.
+- The shortcuts list, menus and tooltips show the keys in effect.
+- Anything sysmon can't use (an action it doesn't know, a key that isn't
+  one, a clash) is skipped; the first problem is shown in the window when it
+  starts, and all of them in the log.
+- Changes take effect the next time sysmon starts. Mouse actions can't be
+  changed.
 
 ## Command-line tools
 
