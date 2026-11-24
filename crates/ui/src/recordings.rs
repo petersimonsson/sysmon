@@ -20,6 +20,10 @@ use crate::widgets::Highlighted as _;
 const LIVE_WITHIN_NS: u64 = 120_000_000_000;
 const ROW_H: f32 = 30.;
 const COVERAGE_W: f32 = 140.;
+/// The dialog body around the list: the filter row, gaps and borders.
+const LIST_CHROME_H: f32 = 64.;
+const MIN_H: f32 = 200.;
+const MAX_H: f32 = 480.;
 
 /// Called with what to open: a boot's directory, or a host's for all of its
 /// boots.
@@ -409,13 +413,29 @@ impl Render for RecordingsView {
             }
         };
 
+        // As tall as the full list needs, within limits: one boot in a
+        // 480 px box was mostly empty space. Not by the filtered rows, so
+        // the dialog doesn't jump about while typing.
+        let all_rows = match &self.scan {
+            Scan::Done(found) => {
+                let mut hosts: Vec<u64> = found.iter().map(|r| r.host_id).collect();
+                hosts.sort_unstable();
+                hosts.dedup();
+                hosts.len() + found.len()
+            }
+            _ => 0,
+        };
+        let height = (LIST_CHROME_H + all_rows as f32 * ROW_H).clamp(MIN_H, MAX_H);
+        let dir = home_relative(&self.dir);
+        let dir_tip = self.dir.display().to_string();
+
         div()
             .id("recordings")
             .test_support()
             .flex()
             .flex_col()
             .gap_3()
-            .h(px(480.))
+            .h(px(height))
             // Enter is the dialog's Confirm, which opens the picked row.
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                 match ev.keystroke.key.as_str() {
@@ -439,14 +459,21 @@ impl Render for RecordingsView {
                         ),
                     )
                     .child(
+                        // Cut off with "…", the whole path on hover.
                         div()
+                            .id("recordings-dir")
+                            .test_support()
                             .flex_1()
                             .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
+                            .truncate()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(format!("In {}", self.dir.display())),
+                            .aria_description(dir_tip.clone())
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(dir_tip.clone())
+                                    .build(window, cx)
+                            })
+                            .child(format!("In {dir}")),
                     ),
             )
             .child(
@@ -464,6 +491,22 @@ impl Render for RecordingsView {
     }
 }
 
+/// `path` with the home directory written as `~`, as people say it.
+fn home_relative(path: &Path) -> String {
+    relative_to(path, std::env::var_os("HOME").map(PathBuf::from).as_deref())
+}
+
+fn relative_to(path: &Path, home: Option<&Path>) -> String {
+    match home {
+        Some(home) if !home.as_os_str().is_empty() => match path.strip_prefix(home) {
+            Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
+            Ok(rest) => format!("~/{}", rest.display()),
+            Err(_) => path.display().to_string(),
+        },
+        _ => path.display().to_string(),
+    }
+}
+
 fn message(text: String, theme: &gpui_kit::component::Theme) -> AnyElement {
     div()
         .id("recordings-message")
@@ -473,4 +516,21 @@ fn message(text: String, theme: &gpui_kit::component::Theme) -> AnyElement {
         .text_color(theme.muted_foreground)
         .child(text)
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    // Explicit imports: the gpui glob would shadow `#[test]`.
+    use super::relative_to;
+    use std::path::Path;
+
+    #[test]
+    fn the_home_directory_is_written_as_a_tilde() {
+        let home = Some(Path::new("/home/me"));
+        let rel = |p: &str| relative_to(Path::new(p), home);
+        assert_eq!(rel("/home/me/.local/share/sysmon"), "~/.local/share/sysmon");
+        assert_eq!(rel("/home/me"), "~");
+        assert_eq!(rel("/home/meg/x"), "/home/meg/x", "not a prefix by text");
+        assert_eq!(relative_to(Path::new("/srv/sysmon"), None), "/srv/sysmon");
+    }
 }
