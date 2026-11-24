@@ -164,10 +164,6 @@ impl Keymap {
             .collect()
     }
 
-    pub fn bindings(&self) -> &[Binding] {
-        &self.bindings
-    }
-
     /// The keys bound to the action `A`.
     pub fn keys<A: Action>(&self) -> &[String] {
         self.bindings

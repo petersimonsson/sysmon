@@ -280,7 +280,6 @@ pub struct AppState {
     focus: FocusHandle,
     /// In-window menu bar (not used on macOS, which has a native one).
     menu_bar: Option<Entity<AppMenuBar>>,
-    show_shortcuts: bool,
     /// Light, dark, or following the system; from the config, then the menu.
     theme: crate::config::ThemePref,
     config_path: Option<PathBuf>,
@@ -397,7 +396,6 @@ impl AppState {
         let mut this = Self {
             focus,
             menu_bar,
-            show_shortcuts: false,
             theme: start.config.theme,
             config_path: start.config_path,
             available: actions::Available::default(),
@@ -2280,7 +2278,6 @@ impl AppState {
     /// Settings → Keyboard Shortcuts…: the shortcut editor, on the keys in
     /// effect. Save there puts its keys in effect and in the settings.
     fn open_shortcuts_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_shortcuts = false;
         let app = cx.entity().downgrade();
         let save_to = self.config_path.clone();
         let view = cx.new(|cx| {
@@ -3084,7 +3081,6 @@ impl AppState {
         for always in [
             TypeId::of::<Quit>(),
             TypeId::of::<OpenRecording>(),
-            TypeId::of::<ToggleShortcuts>(),
             TypeId::of::<Dismiss>(),
             TypeId::of::<About>(),
             TypeId::of::<EditShortcuts>(),
@@ -3275,9 +3271,7 @@ impl AppState {
                     let typing_in = [this.filter.clone(), this.log_filter.clone()]
                         .into_iter()
                         .find(|f| f.focus_handle(cx).is_focused(window));
-                    if this.show_shortcuts {
-                        this.show_shortcuts = false;
-                    } else if let Some(input) = typing_in {
+                    if let Some(input) = typing_in {
                         if input.read(cx).value().is_empty() {
                             this.focus.focus(window, cx);
                         } else {
@@ -3288,13 +3282,6 @@ impl AppState {
                     } else {
                         this.filter.update(cx, |f, cx| f.set_value("", window, cx));
                     }
-                    cx.notify();
-                }),
-            )
-            .on_available(
-                can,
-                cx.listener(|this, _: &ToggleShortcuts, _, cx| {
-                    this.show_shortcuts = !this.show_shortcuts;
                     cx.notify();
                 }),
             )
@@ -3513,149 +3500,6 @@ impl AppState {
             .on_available(
                 can,
                 cx.listener(|this, _: &SeekEnd, _, _| this.seek_to(|st| st.end_ns)),
-            )
-    }
-
-    /// Overlay listing every shortcut, grouped as in [`actions::SHORTCUTS`],
-    /// then what the mouse does ([`actions::MOUSE`]).
-    fn render_shortcuts(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let mut groups: Vec<(&str, Vec<(String, &str)>)> = Vec::new();
-        // The keys in effect, settings included; an action left without
-        // any isn't listed.
-        for b in cx.global::<crate::keymap::Keymap>().bindings() {
-            if b.keys.is_empty() {
-                continue;
-            }
-            let s = b.shortcut;
-            let keys = b
-                .keys
-                .iter()
-                .map(|k| actions::display_key(k))
-                .collect::<Vec<_>>()
-                .join("  ");
-            match groups.last_mut() {
-                Some((g, list)) if *g == s.group => list.push((keys, s.description)),
-                _ => groups.push((s.group, vec![(keys, s.description)])),
-            }
-        }
-        groups.push((
-            "Mouse",
-            actions::MOUSE
-                .iter()
-                .map(|&(what, does)| (what.to_string(), does))
-                .collect(),
-        ));
-        let mut columns = div()
-            .id("shortcuts-columns")
-            .test_support()
-            .flex()
-            .flex_wrap()
-            .gap_x_8()
-            .gap_y_6();
-        for (k, (group, list)) in groups.into_iter().enumerate() {
-            let mut col = div()
-                .id(("shortcuts-group", k))
-                .test_support()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .pb_1()
-                        .child(group),
-                );
-            for (keys, description) in list {
-                col = col.child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .text_xs()
-                        .child(
-                            // The UI font: the monospace one drew ← → ↑ ↓ tiny.
-                            div()
-                                .w(px(110.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.primary)
-                                .child(keys),
-                        )
-                        .child(description),
-                );
-            }
-            columns = columns.child(col);
-        }
-        div()
-            .id("shortcuts-overlay")
-            .test_support()
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.background.opacity(0.6))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.show_shortcuts = false;
-                cx.notify();
-            }))
-            .child(
-                div()
-                    // Within the window: the columns wrap to its width, and
-                    // a short window scrolls them.
-                    .id("shortcuts-panel")
-                    .max_w(relative(0.95))
-                    .max_h(relative(0.95))
-                    .overflow_y_scroll()
-                    .p_6()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.popover)
-                    .shadow_lg()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(div().text_lg().child("Keyboard shortcuts"))
-                    .child(columns)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Single-key shortcuts are off while the filter has focus. Esc or click to close."),
-                    )
-                    .child({
-                        let path = self
-                            .config_path
-                            .clone()
-                            .unwrap_or_else(crate::config::default_path);
-                        let text = format!(
-                            "Change them in Settings → Keyboard Shortcuts…, or under [keys] in {}.",
-                            crate::recordings::home_relative(&path)
-                        );
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .id("shortcuts-settings")
-                                    .test_support()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .aria_description(text.clone())
-                                    .child(text),
-                            )
-                            .child(
-                                Button::new("shortcuts-edit")
-                                    .label("Edit…")
-                                    .small()
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.open_shortcuts_editor(window, cx);
-                                    })),
-                            )
-                    }),
             )
     }
 
@@ -4373,7 +4217,6 @@ impl Render for AppState {
                 }),
         };
 
-        let shortcuts = self.show_shortcuts.then(|| self.render_shortcuts(cx));
         let root = div()
             // Divider drags are tracked on the root so they continue when
             // the pointer leaves the divider.
@@ -4418,7 +4261,6 @@ impl Render for AppState {
             .child(toolbar)
             .child(div().flex().flex_1().min_h_0().child(sidebar).child(main))
             .children(timeline)
-            .children(shortcuts)
     }
 }
 
@@ -4560,11 +4402,6 @@ mod tests {
             assert_eq!(picked(app).len(), 1, "x graphs the row")
         });
         // The shortcuts list says x.
-        step(cx, &|w, cx| w.press("f1", cx));
-        step(cx, &|w, cx| {
-            w.render_frame(cx);
-            assert!(w.try_find("shortcuts-columns").is_some());
-        });
         cx.update(|cx| {
             let keymap = cx.global::<crate::keymap::Keymap>();
             assert_eq!(
@@ -4705,31 +4542,6 @@ mod tests {
         assert_eq!(get("toggle_tree"), Some(vec![]));
         assert_eq!(config.keys.len(), 2, "{:?}", config.keys);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[gpui_kit::test]
-    fn the_shortcuts_list_opens_the_editor(cx: &mut TestAppContext) {
-        let (window, app) = open(cx);
-        // Tall enough for the whole list (a short one scrolls).
-        cx.simulate_window_resize(
-            window,
-            gpui_kit::size(gpui_kit::px(1200.), gpui_kit::px(1400.)),
-        );
-        cx.update_window(window, |_, w, cx| w.press("f1", cx))
-            .unwrap();
-        cx.run_until_parked();
-        cx.update_window(window, |_, w, cx| {
-            w.render_frame(cx);
-            w.click("shortcuts-edit", cx)
-        })
-        .unwrap();
-        cx.run_until_parked();
-        cx.update_window(window, |_, w, cx| {
-            w.render_frame(cx);
-            assert!(w.try_find("shortcuts-editor").is_some(), "editor open");
-        })
-        .unwrap();
-        app.read_with(cx, |app, _| assert!(!app.show_shortcuts, "list closed"));
     }
 
     #[gpui_kit::test]
@@ -4912,6 +4724,29 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn help_has_only_about_and_settings_has_the_shortcuts(cx: &mut TestAppContext) {
+        let (window, _app) = open(cx);
+        cx.update_window(window, |_, w, cx| w.render_frame(cx))
+            .unwrap();
+        let names = |cx: &mut TestAppContext, menu: &str| -> Vec<String> {
+            cx.update(|cx| {
+                let menus = gpui_kit::component::GlobalState::global(cx).app_menus();
+                let m = menus.iter().find(|m| m.name == menu).expect("menu");
+                m.items
+                    .iter()
+                    .filter_map(|i| match i {
+                        gpui_kit::OwnedMenuItem::Action { name, .. } => Some(name.to_string()),
+                        gpui_kit::OwnedMenuItem::Submenu(m) => Some(m.name.to_string()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+        };
+        assert_eq!(names(cx, "Help"), ["About sysmon"]);
+        assert_eq!(names(cx, "Settings"), ["Keyboard Shortcuts…", "Theme"]);
+    }
+
+    #[gpui_kit::test]
     fn menus_grey_out_what_has_no_data(cx: &mut TestAppContext) {
         let (window, app) = open(cx);
         let draw = |cx: &mut TestAppContext| {
@@ -4979,11 +4814,6 @@ mod tests {
             );
             window.press("shift-n", cx);
             assert_eq!(app.read(cx).sort, (SortKey::Pid, false));
-
-            window.press("f1", cx);
-            assert!(app.read(cx).show_shortcuts);
-            window.press("escape", cx);
-            assert!(!app.read(cx).show_shortcuts, "escape closes the overlay");
 
             // No recording is open, so the Recording view isn't available.
             window.press("ctrl-2", cx);
@@ -5367,8 +5197,10 @@ mod tests {
             assert!(window.try_find("about").is_none(), "Esc closes it");
         });
         // Single-key shortcuts work again once it's closed.
-        step(cx, &|window, cx| window.press("?", cx));
-        app.read_with(cx, |app, _| assert!(app.show_shortcuts));
+        // The app has the keyboard again, for its shortcuts.
+        let focus = app.read_with(cx, |app, _| app.focus.clone());
+        cx.update_window(window, |_, w, _| assert!(focus.is_focused(w)))
+            .unwrap();
 
         // Opened from the Help menu, the menu hands the keyboard back to
         // the app as it closes, so the dialog doesn't have it: Esc still
@@ -6717,42 +6549,6 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn the_shortcuts_overlay_lists_the_mouse_and_fits_the_window(cx: &mut TestAppContext) {
-        let (window, _app) = open(cx);
-        cx.update_window(window, |_, w, cx| w.press("f1", cx))
-            .unwrap();
-        cx.run_until_parked();
-        cx.update_window(window, |_, w, cx| {
-            w.render_frame(cx);
-            let screen = w.find("shortcuts-overlay").bounds();
-            // Every group, the mouse's last, is within the width: they wrap
-            // (and the panel scrolls if the window is short).
-            // (A group whose actions all lack a key isn't shown.)
-            let groups = crate::actions::SHORTCUTS
-                .iter()
-                .filter(|s| !s.keys.is_empty())
-                .map(|s| s.group)
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                + 1;
-            for k in 0..groups {
-                let col = w.find(("shortcuts-group", k)).bounds();
-                assert!(
-                    col.origin.x >= screen.origin.x
-                        && col.origin.x + col.size.width <= screen.origin.x + screen.size.width,
-                    "group {k}: {col:?} within {screen:?}"
-                );
-            }
-        })
-        .unwrap();
-        assert!(
-            crate::actions::MOUSE
-                .iter()
-                .any(|(what, _)| *what == "Ctrl+click")
-        );
-    }
-
-    #[gpui_kit::test]
     fn the_graph_checkboxes_explain_themselves(cx: &mut TestAppContext) {
         let (window, app) = open(cx);
         add_host(&app, cx);
@@ -7102,8 +6898,10 @@ mod tests {
             window.render_frame(cx);
             assert!(window.try_find("recordings").is_none());
         });
-        step(cx, &|window, cx| window.press("?", cx));
-        app.read_with(cx, |app, _| assert!(app.show_shortcuts));
+        // The app has the keyboard again, for its shortcuts.
+        let focus = app.read_with(cx, |app, _| app.focus.clone());
+        cx.update_window(window, |_, w, _| assert!(focus.is_focused(w)))
+            .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
