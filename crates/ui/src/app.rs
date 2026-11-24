@@ -1488,13 +1488,24 @@ impl AppState {
                                     i.hostname, i.cpu_count, i.kernel
                                 )
                             }))
-                            .child(format!(
-                                "{} processes ({} kernel threads) · sample {} ({})",
-                                s.procs.len(),
-                                s.procs.iter().filter(|p| p.kernel_thread).count(),
-                                format::datetime(s.ts_unix_ns),
-                                format::utc_offset(s.ts_unix_ns)
-                            )),
+                            .child({
+                                // Times are local; the zone is on hover
+                                // rather than after every sample time.
+                                let zone =
+                                    format!("Local time ({})", format::utc_offset(s.ts_unix_ns));
+                                div()
+                                    .id("sample-line")
+                                    .test_support()
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(zone.clone()).build(window, cx)
+                                    })
+                                    .child(format!(
+                                        "{} processes ({} kernel threads) · sample {}",
+                                        s.procs.len(),
+                                        s.procs.iter().filter(|p| p.kernel_thread).count(),
+                                        format::datetime(s.ts_unix_ns),
+                                    ))
+                            }),
                     ),
             )
             .child(cores)
