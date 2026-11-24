@@ -1,10 +1,13 @@
 //! sysmon receiver: UDP socket thread, chunk reassembly and fan-out.
 
 mod assembler;
+mod rejects;
 
 pub use assembler::{Assembler, Event};
+pub use rejects::{Reason, Rejected, Rejections};
 
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -21,6 +24,8 @@ pub struct RawDatagram {
 pub struct Sinks {
     pub events: flume::Sender<Event>,
     pub raw: Option<flume::Sender<RawDatagram>>,
+    /// Counts what was turned away, by sender and reason.
+    pub rejections: Arc<Rejections>,
 }
 
 /// Bind `addr` and run the receive loop on a dedicated thread.
@@ -55,6 +60,11 @@ fn run(socket: UdpSocket, opener: sysmon_proto::Opener, sinks: Sinks) {
                 let bytes = match opener.open(&buf[..len]) {
                     Ok(b) => b,
                     Err(err) => {
+                        sinks.rejections.record(
+                            from.ip(),
+                            Reason::of(&err, &buf[..len]),
+                            unix_now_ns(),
+                        );
                         rejected += 1;
                         if rejected.is_power_of_two() {
                             tracing::warn!(%from, %err, rejected, "rejected datagram");
@@ -76,7 +86,12 @@ fn run(socket: UdpSocket, opener: sysmon_proto::Opener, sinks: Sinks) {
                 }
                 match sysmon_proto::decode(bytes) {
                     Ok((header, msg)) => assembler.push(header, msg, now, recv_ns),
-                    Err(err) => tracing::debug!(%from, %err, "undecodable datagram"),
+                    Err(err) => {
+                        tracing::debug!(%from, %err, "undecodable datagram");
+                        sinks
+                            .rejections
+                            .record(from.ip(), Reason::of(&err, bytes), recv_ns);
+                    }
                 }
             }
             Err(e)

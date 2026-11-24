@@ -3,9 +3,11 @@
 
 use std::any::TypeId;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::net::SocketAddr;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::TestSupportExt as _;
@@ -18,7 +20,7 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use sysmon_ingest::Event;
+use sysmon_ingest::{Event, Rejected, Rejections};
 use sysmon_model::{
     Control, Feed, HISTORY_LEN, HostModel, LogKind, Metric, ProcRow, ReplayHandle, ReplayStatus,
     SeriesTarget, ThreadRow, TreeLine, tree::Guide,
@@ -78,6 +80,8 @@ const SPEEDS: [f64; 5] = [1., 4., 16., 64., 256.];
 const REPLAY_SLICE: Duration = Duration::from_millis(8);
 /// How often the sidebar is brought up to date for hosts not shown.
 const SIDEBAR_EVERY: Duration = Duration::from_secs(1);
+/// How long a sender whose data was turned away stays on show.
+const REJECTED_RECENT_NS: u64 = 30_000_000_000;
 /// A live host not heard from for this long is dropped, history and all.
 const FORGET_AFTER_NS: u64 = 3600 * 1_000_000_000;
 /// At most this many live hosts are kept; past it, the one silent longest
@@ -85,9 +89,14 @@ const FORGET_AFTER_NS: u64 = 3600 * 1_000_000_000;
 /// send datagrams under made-up host IDs.
 const MAX_LIVE_HOSTS: usize = 256;
 
+/// One sender turned away, and why: "10.0.0.5: its data is …".
+fn rejected_line(r: &Rejected) -> String {
+    format!("{}: {}", r.from, r.reason)
+}
+
 /// What the app starts with; built in `main` before the window opens.
 pub struct Start {
-    pub live: Option<flume::Receiver<Event>>,
+    pub live: Option<crate::pipeline::Live>,
     /// A recording to play, and where it is.
     pub replay: Option<(ReplayHandle, PathBuf)>,
     /// Where live data is recorded, if it is.
@@ -142,6 +151,12 @@ enum Panel {
 pub struct AppState {
     view: View,
     live_enabled: bool,
+    /// Where agents should send, and whether they need the key.
+    listen: Option<(SocketAddr, bool)>,
+    /// What the receiver turned away, and the part of it shown: senders
+    /// heard from in the last [`REJECTED_RECENT_NS`], newest first.
+    rejections: Option<Arc<Rejections>>,
+    rejected: Vec<Rejected>,
     live_hosts: BTreeMap<u64, HostModel>,
     /// When the monitor last got anything from each live host (its clock).
     live_heard: HashMap<u64, u64>,
@@ -249,7 +264,7 @@ impl AppState {
         });
 
         let mut tasks = Vec::new();
-        if let Some(events) = start.live.clone() {
+        if let Some(events) = start.live.as_ref().map(|l| l.events.clone()) {
             tasks.push(cx.spawn(async move |this, cx| {
                 // Wait for one event, then drain whatever else is queued so a
                 // burst becomes a single repaint.
@@ -348,6 +363,9 @@ impl AppState {
             available: actions::Available::default(),
             view: View::Live,
             live_enabled: start.live.is_some(),
+            listen: start.live.as_ref().map(|l| (l.listen, l.keyed)),
+            rejections: start.live.as_ref().map(|l| l.rejections.clone()),
+            rejected: Vec::new(),
             live_hosts: BTreeMap::new(),
             live_heard: HashMap::new(),
             replay: None,
@@ -451,7 +469,19 @@ impl AppState {
             .live_hosts
             .values()
             .any(|h| Self::silence_at(h, now_ns).is_some());
-        if std::mem::take(&mut self.sidebar_stale) || silent {
+        // Redrawn when who is turned away, or why, changes; not for counts.
+        let rejected = self.rejections.as_ref().map_or_else(Vec::new, |r| {
+            r.since(now_ns.saturating_sub(REJECTED_RECENT_NS))
+        });
+        let same = |a: &[Rejected], b: &[Rejected]| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(x, y)| (x.from, x.reason) == (y.from, y.reason))
+        };
+        let turned_away = !same(&rejected, &self.rejected);
+        self.rejected = rejected;
+        if std::mem::take(&mut self.sidebar_stale) || silent || turned_away {
             self.sidebar_drawn = now;
             return true;
         }
@@ -1039,6 +1069,109 @@ impl AppState {
                 .child(icon(IconName::Link2Off).text_color(theme.warning))
                 .child(text),
         )
+    }
+
+    /// A notice above the header while data from some sender is turned
+    /// away (wrong key, newer agent, …): that machine won't show up, and
+    /// otherwise only stderr would say why.
+    fn render_rejected_banner(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        let first = self.rejected.first().filter(|_| self.view == View::Live)?;
+        let theme = cx.theme();
+        let mut text = format!("Turning away data from {}: {}", first.from, first.reason);
+        let more = self.rejected.len() - 1;
+        if more > 0 {
+            text.push_str(&format!(" (and {more} more)"));
+        }
+        let all: Vec<String> = self.rejected.iter().map(rejected_line).collect();
+        let all = all.join("\n");
+        Some(
+            div()
+                .id("rejected-banner")
+                .test_support()
+                .flex_none()
+                .px_2()
+                .py_1()
+                .text_sm()
+                .bg(theme.warning.opacity(0.15))
+                .border_b_1()
+                .border_color(theme.warning)
+                .flex()
+                .items_center()
+                .gap_2()
+                .aria_description(text.clone())
+                .when(more > 0, |d| {
+                    d.tooltip(move |window, cx| Tooltip::new(all.clone()).build(window, cx))
+                })
+                .child(icon(IconName::TriangleAlert).text_color(theme.warning))
+                .child(text),
+        )
+    }
+
+    /// The Live view before any agent is heard from: where to send, how to
+    /// start one, and why data that did arrive was turned away.
+    fn render_waiting(&self, cx: &App) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let mut col = div()
+            .id("waiting")
+            .test_support()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_2()
+            .text_sm()
+            .text_color(theme.muted_foreground)
+            .child(div().text_base().child("Waiting for agents…"));
+        if let Some((addr, keyed)) = self.listen {
+            let target = if addr.ip().is_unspecified() {
+                format!("<this machine>:{}", addr.port())
+            } else {
+                addr.to_string()
+            };
+            let key = if keyed { " --key-file <key>" } else { "" };
+            let command = format!("sysmon-agent --target {target}{key}");
+            col = col
+                .child(
+                    div()
+                        .id("waiting-listen")
+                        .test_support()
+                        .child(format!("Listening on UDP {addr}. Start an agent with:")),
+                )
+                .child(
+                    div()
+                        .id("waiting-command")
+                        .test_support()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(theme.muted)
+                        .text_color(theme.foreground)
+                        .font_family(theme.mono_font_family.clone())
+                        .aria_description(command.clone())
+                        .child(command),
+                );
+        }
+        if !self.rejected.is_empty() {
+            col = col.child(
+                div()
+                    .id("waiting-rejected")
+                    .test_support()
+                    .mt_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .text_color(theme.warning)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(icon(IconName::TriangleAlert))
+                            .child("Data arrived, but was turned away:"),
+                    )
+                    .children(self.rejected.iter().map(|r| div().child(rejected_line(r)))),
+            );
+        }
+        col
     }
 
     /// [`Self::silence`] at monitor time `now`.
@@ -3845,6 +3978,7 @@ impl Render for AppState {
                     .flex_col()
                     .flex_1()
                     .min_w_0()
+                    .children(self.render_rejected_banner(cx))
                     .children(self.render_stale_banner(host, cx))
                     .child(Self::render_header(
                         host,
@@ -3891,8 +4025,8 @@ impl Render for AppState {
                 .justify_center()
                 .text_color(theme.muted_foreground)
                 .child(match self.view {
-                    View::Live => "Waiting for agents…",
-                    View::Replay => "Loading recording…",
+                    View::Live => self.render_waiting(cx).into_any_element(),
+                    View::Replay => "Loading recording…".into_any_element(),
                 }),
         };
 
@@ -5082,6 +5216,81 @@ mod tests {
             assert!(w.try_find(("host-silent", 1usize)).is_some());
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn waiting_says_where_to_send_and_what_was_turned_away(cx: &mut TestAppContext) {
+        use sysmon_ingest::{Reason, Rejections};
+        let (window, app) = open(cx);
+        let rejections = std::sync::Arc::new(Rejections::default());
+        app.update(cx, |app, cx| {
+            app.live_enabled = true;
+            app.listen = Some(("0.0.0.0:9876".parse().unwrap(), true));
+            app.rejections = Some(rejections.clone());
+            cx.notify();
+        });
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let found = w.find("waiting-command");
+            let cmd = found.description().unwrap_or_default();
+            assert_eq!(
+                cmd,
+                "sysmon-agent --target <this machine>:9876 --key-file <key>"
+            );
+            assert!(
+                w.try_find("waiting-rejected").is_none(),
+                "nothing turned away yet"
+            );
+        })
+        .unwrap();
+
+        // An agent with the wrong key: the next tick shows it, and why.
+        let now = sysmon_ingest::unix_now_ns();
+        rejections.record("10.0.0.5".parse().unwrap(), Reason::WrongKey, now);
+        let t = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        app.update(cx, |app, cx| {
+            assert!(app.live_tick(t, now), "redrawn for it");
+            cx.notify();
+        });
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            assert!(w.try_find("waiting-rejected").is_some());
+        })
+        .unwrap();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.rejected.len(), 1);
+            assert_eq!(app.rejected[0].reason, Reason::WrongKey);
+        });
+
+        // Once another host is up, a banner keeps saying so above it.
+        app.update(cx, |app, cx| {
+            apply(
+                &mut app.live_hosts,
+                sysmon_ingest::Event::Frame(sysmon_proto::Frame {
+                    received_ns: now,
+                    ..test_frame(1, 0, sampled_at(now))
+                }),
+            );
+            app.ensure_selection();
+            cx.notify();
+        });
+        cx.update_window(window, |_, w, cx| {
+            w.render_frame(cx);
+            let found = w.find("rejected-banner");
+            let banner = found.description().unwrap_or_default();
+            assert!(
+                banner.starts_with("Turning away data from 10.0.0.5: "),
+                "{banner}"
+            );
+        })
+        .unwrap();
+
+        // It goes once the sender has been quiet for a while.
+        let later = now + super::REJECTED_RECENT_NS + 1;
+        app.update(cx, |app, _| {
+            assert!(app.live_tick(t + std::time::Duration::from_secs(2), later));
+            assert!(app.rejected.is_empty());
+        });
     }
 
     #[gpui_kit::test]

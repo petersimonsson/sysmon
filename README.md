@@ -159,6 +159,11 @@ application menu: copy it to `~/.local/share/applications/` (with
 
 ### The window
 
+- **Before any agent shows up**, the window says which address it listens
+  on and how to start an agent. If data arrives but is turned away (a
+  missing or different key, or an agent newer than the monitor), it says
+  from where and why; once other hosts are showing, a banner above them
+  keeps saying so.
 - **Sidebar:** one entry per host, by name. The dot turns red when the
   monitor hasn't heard from a host for three intervals; a host silent for
   an hour is dropped. Click a host to show it.
