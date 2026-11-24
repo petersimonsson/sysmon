@@ -339,6 +339,8 @@ as a `[keys]` table to copy into the file and edit. Keys are written as
 `ctrl-g`, `shift-p`, `alt-x`, `f5`, `pagedown` and so on (`Ctrl+G`, as the
 menus write it, works too; a capital letter on its own means Shift).
 
+- A few actions have no key until you give them one: `about`,
+  `theme_system`, `theme_light` and `theme_dark`.
 - A key you give one action is taken off any other that had it by default.
   Two actions can't share one: the first in the file keeps it.
 - Keys you can type (letters, digits, `/`, Shift with them) don't work while

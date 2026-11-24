@@ -107,10 +107,10 @@ impl Shortcut {
 }
 
 macro_rules! shortcut {
-    ($group:literal, [$($key:literal),+], $action:ident, $desc:literal) => {
+    ($group:literal, [$($key:literal),*], $action:ident, $desc:literal) => {
         Shortcut {
             group: $group,
-            keys: &[$($key),+],
+            keys: &[$($key),*],
             description: $desc,
             action_name: stringify!($action),
             type_id: TypeId::of::<$action>,
@@ -134,6 +134,9 @@ pub const SHORTCUTS: &[Shortcut] = &[
         Dismiss,
         "Close this list, or clear the filter"
     ),
+    // No key by default, but one can be set ([keys] in the settings);
+    // the shortcuts list leaves out actions without one.
+    shortcut!("General", [], About, "About sysmon"),
     shortcut!("View", ["ctrl-1"], ShowLive, "Live view"),
     shortcut!("View", ["ctrl-2"], ShowRecording, "Recording view"),
     shortcut!("View", ["ctrl-up"], PreviousHost, "Previous host"),
@@ -150,6 +153,9 @@ pub const SHORTCUTS: &[Shortcut] = &[
         ToggleDetails,
         "Show the cursor row's process details, or the graph again"
     ),
+    shortcut!("View", [], ThemeSystem, "Theme: as the system"),
+    shortcut!("View", [], ThemeLight, "Theme: light"),
+    shortcut!("View", [], ThemeDark, "Theme: dark"),
     shortcut!(
         "Processes",
         ["ctrl-f", "/"],
@@ -525,7 +531,7 @@ mod tests {
         let desc = |key: &str| {
             SHORTCUTS
                 .iter()
-                .find(|s| s.keys[0] == key)
+                .find(|s| s.keys.first() == Some(&key))
                 .unwrap()
                 .description
         };
